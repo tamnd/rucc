@@ -1,0 +1,318 @@
+//! The sysroot layout and the cache key.
+//!
+//! Design: `spec/cross-compile/08-sysroots.md` sections 8.2 and 8.3.
+
+use std::path::Path;
+
+use rucc_sysroot::{BUNDLED_GLIBC, Kernel, Sysroot, bundled_glibc_minor, layout::can_be_bundled};
+use rucc_tuple::{TARGETS, TargetEntry, TargetTuple};
+
+/// The target with this spelling.
+fn target(tuple: &str) -> TargetTuple {
+    tuple.parse().expect("a target this understands")
+}
+
+#[test]
+fn the_cache_key_is_the_whole_tuple() {
+    // `spec/cross-compile/03-target-model.md` section 3.2's whole argument, checked. A key that
+    // dropped a field would serve one target's sysroot to another, and the failure would be a
+    // missing symbol at link time on one machine and not on another.
+    let cache = Path::new("/cache");
+    let mut keys: Vec<String> = TARGETS
+        .iter()
+        .map(|entry| {
+            let row = TargetEntry::parse(entry).expect("the table parses");
+            Sysroot::in_cache(cache, row).cache_key()
+        })
+        .collect();
+    let total = keys.len();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), total, "two rows of the table share a sysroot directory");
+}
+
+#[test]
+fn a_pinned_libc_version_is_a_different_sysroot() {
+    // The reason `env_version` is in the tuple. Headers for glibc 2.28 and headers for 2.34 are
+    // different text, and a cache that served one for the other would be right until it was not.
+    let cache = Path::new("/cache");
+    let plain = Sysroot::in_cache(cache, target("x86_64-linux-gnu"));
+    let pinned = Sysroot::in_cache(cache, target("x86_64-linux-gnu.2.28"));
+    assert_ne!(plain.cache_key(), pinned.cache_key());
+    assert_ne!(plain.root(), pinned.root());
+}
+
+#[test]
+fn the_baseline_within_an_architecture_does_not_change_the_header_directory() {
+    // Section 8.3's split is per architecture and not per baseline. `armv7a` and `armv5te` read the
+    // same `arm` headers, because a header does not care which instructions the chip has. They are
+    // still different sysroots, because the ABI differs, and the two facts are separate.
+    let cache = Path::new("/cache");
+    let hard = Sysroot::in_cache(cache, target("armv7a-linux-musleabihf"));
+    let soft = Sysroot::in_cache(cache, target("armv5te-linux-musleabi"));
+    assert_eq!(hard.header_arch(), "arm");
+    assert_eq!(soft.header_arch(), "arm");
+    assert_ne!(hard.cache_key(), soft.cache_key());
+}
+
+#[test]
+fn the_two_libcs_split_x32_in_two_different_places() {
+    // A 64-bit architecture with 32-bit pointers. Every type in the headers that carries a pointer
+    // or a `long` is a different size, so reading the LP64 headers would be wrong, and the two
+    // libcs say so differently. musl has a directory for it, which is `arch/x32` in its source.
+    // glibc has one x86 family directory for i386, x86-64 and x32, and the files in it branch on
+    // `__ILP32__` themselves, starting with `bits/wordsize.h`.
+    let cache = Path::new("/cache");
+    let x32 = Sysroot::in_cache(cache, target("x86_64-linux-gnux32"));
+    let lp64 = Sysroot::in_cache(cache, target("x86_64-linux-gnu"));
+    assert_eq!(x32.header_arch(), "x86");
+    assert_eq!(lp64.header_arch(), "x86");
+    // And still two sysroots, because the link inputs are not shared even where the headers are.
+    assert_ne!(x32.cache_key(), lp64.cache_key());
+
+    let musl_x32 = Sysroot::in_cache(cache, target("x86_64-linux-muslx32"));
+    let musl_lp64 = Sysroot::in_cache(cache, target("x86_64-linux-musl"));
+    assert_eq!(musl_x32.header_arch(), "x32");
+    assert_eq!(musl_lp64.header_arch(), "x86_64");
+}
+
+#[test]
+fn glibc_names_its_header_directory_after_the_family_and_musl_after_the_architecture() {
+    // Checked against Zig 0.16, which ships twelve glibc directories named after families and
+    // seventeen musl directories named after architectures. The producer installs what the libc's
+    // own build installs, so the name has to follow the libc rather than a scheme of ours.
+    let cache = Path::new("/cache");
+    for (tuple, family, own) in [
+        ("i686-linux-gnu", "x86", "i386"),
+        ("riscv64-linux-gnu", "riscv", "riscv64"),
+        ("powerpc64le-linux-gnu", "powerpcle", "powerpc64"),
+        ("loongarch64-linux-gnu", "loongarch", "loongarch64"),
+    ] {
+        let gnu = Sysroot::in_cache(cache, target(tuple));
+        assert_eq!(gnu.header_arch(), family, "{tuple} reads the wrong glibc directory");
+        let musl = Sysroot::in_cache(cache, target(&tuple.replace("-gnu", "-musl")));
+        assert_eq!(musl.header_arch(), own, "{tuple} reads the wrong musl directory");
+    }
+}
+
+#[test]
+fn the_byte_order_is_in_the_glibc_directory_name_for_powerpc_and_for_no_other_family() {
+    // Measured on glibc 2.44, by installing the headers twice for a family, once per order, and
+    // diffing the two installs. `aarch64_be` against `aarch64` is 474 files each and an empty diff,
+    // so one directory serves both orders. `powerpc64` against `powerpc64le` is 474 files each and
+    // one file that differs, `bits/long-double.h`, because little endian powerpc can redirect
+    // `long double` to the float128 ABI and big endian powerpc cannot. One directory for both would
+    // hand half the powerpc rows a macro that is wrong about their own ABI. The name is the family
+    // and the order and not the width, because the third run of the experiment, 32-bit against
+    // 64-bit powerpc with the order held fixed, is 474 files each and an empty diff as well.
+    // tamnd/rucc#940.
+    let cache = Path::new("/cache");
+    let le = Sysroot::in_cache(cache, target("powerpc64le-linux-gnu"));
+    let be = Sysroot::in_cache(cache, target("powerpc64-linux-gnu"));
+    assert_eq!(le.header_arch(), "powerpcle");
+    assert_eq!(be.header_arch(), "powerpc");
+    assert_ne!(le.arch_include(), be.arch_include());
+
+    // And nowhere else, because a directory per order where the text is the same is a copy of the
+    // same files under two names.
+    for (little, big) in [
+        ("aarch64-linux-gnu", "aarch64_be-linux-gnu"),
+        ("armv7-linux-gnueabihf", "armv7eb-linux-gnueabihf"),
+    ] {
+        let one = Sysroot::in_cache(cache, target(little));
+        let other = Sysroot::in_cache(cache, target(big));
+        assert_eq!(
+            one.header_arch(),
+            other.header_arch(),
+            "{little} and {big} read the same text and should read the same directory"
+        );
+        // Still two sysroots. The headers are shared and the link inputs are not.
+        assert_ne!(one.cache_key(), other.cache_key());
+    }
+
+    // musl carries no order either, for the same reason read off its own source: the files that
+    // depend on the order branch inside themselves, `bits/alltypes.h` and `bits/signal.h` on
+    // `__BIG_ENDIAN__`, and `arch/` in musl 1.2.5 has no per order directory at all.
+    let musl_le = Sysroot::in_cache(cache, target("powerpc64le-linux-musl"));
+    let musl_be = Sysroot::in_cache(cache, target("powerpc64-linux-musl"));
+    assert_eq!(musl_le.header_arch(), "powerpc64");
+    assert_eq!(musl_be.header_arch(), "powerpc64");
+}
+
+#[test]
+fn the_architecture_specific_headers_are_searched_before_the_generic_ones() {
+    let sysroot = Sysroot::in_cache(Path::new("/cache"), target("aarch64-linux-musl"));
+    let includes = sysroot.includes();
+    assert_eq!(includes[0], sysroot.arch_include());
+    assert_eq!(includes[1], sysroot.generic_include());
+    assert!(includes[0].ends_with("include/aarch64"));
+    assert!(includes[1].ends_with("include/generic"));
+}
+
+#[test]
+fn a_windows_sysroot_searches_one_directory_because_mingw_has_no_per_architecture_half() {
+    // Measured rather than assumed. Installing mingw-w64 14.0.0's headers for `x86_64-w64-mingw32`,
+    // `i686-w64-mingw32` and `aarch64-w64-mingw32` gives three trees of 1702 files that `diff -rq`
+    // finds no difference between, because a Windows header branches on the API level the program
+    // asked for with `_WIN32_WINNT` rather than on the machine it is compiled for. tamnd/rucc#1360.
+    let cache = Path::new("/cache");
+    for tuple in ["x86_64-windows-gnu", "i686-windows-gnu", "aarch64-windows-gnu"] {
+        let sysroot = Sysroot::in_cache(cache, target(tuple));
+        assert!(!sysroot.splits_by_arch(), "{tuple}");
+        let includes = sysroot.includes();
+        assert_eq!(includes, vec![sysroot.generic_include()], "{tuple}");
+        assert!(includes[0].ends_with("include/generic"));
+    }
+
+    // A WASI sysroot is one preview of wasi-libc for one architecture, so it has one tree as well.
+    for tuple in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3"] {
+        let sysroot = Sysroot::in_cache(cache, target(tuple));
+        assert!(!sysroot.splits_by_arch(), "{tuple}");
+        assert_eq!(sysroot.includes(), vec![sysroot.generic_include()], "{tuple}");
+    }
+
+    // And every other target still has both, so this is one libc's layout rather than a change to
+    // the model. An msvc target is behind the microsoft-sdk wall and never reads a tree of ours at
+    // all, which is why it is not the interesting case either way.
+    let linux = Sysroot::in_cache(cache, target("x86_64-linux-gnu"));
+    assert!(linux.splits_by_arch());
+    assert_eq!(linux.includes().len(), 2);
+}
+
+#[test]
+fn everything_is_under_the_root_and_nothing_is_absolute_from_somewhere_else() {
+    // A sysroot that reached outside its own directory would be a cache entry that could not be
+    // deleted, moved or copied, and the cache in `spec/cross-compile/13-distribution.md` does all
+    // three.
+    let sysroot = Sysroot::in_cache(Path::new("/cache"), target("aarch64-linux-musl"));
+    for path in
+        [sysroot.arch_include(), sysroot.generic_include(), sysroot.lib(), sysroot.manifest_path()]
+    {
+        assert!(path.starts_with(sysroot.root()), "{} escaped the root", path.display());
+    }
+}
+
+#[test]
+fn the_two_licence_walls_are_the_only_targets_we_cannot_bundle() {
+    // Section 8.2's table has seven rows and section 8.6 says two of them are legal rather than
+    // technical. Everything else is engineering, and this is the list stated as code so that a new
+    // row cannot quietly join the walls.
+    for entry in TARGETS {
+        let row = TargetEntry::parse(entry).expect("the table parses");
+        let expected = !matches!(
+            (row.os(), row.env()),
+            (rucc_tuple::Os::MacOs | rucc_tuple::Os::IOs, _) | (_, rucc_tuple::Env::Msvc)
+        );
+        assert_eq!(can_be_bundled(row), expected, "{}", entry.tuple);
+    }
+    assert!(can_be_bundled(target("aarch64-linux-musl")));
+    assert!(can_be_bundled(target("x86_64-pc-windows-gnu")));
+    assert!(!can_be_bundled(target("x86_64-pc-windows-msvc")));
+    assert!(!can_be_bundled(target("aarch64-macos")));
+    // Freestanding needs nine compiler headers and no link inputs, so there is nothing to fetch and
+    // nothing to refuse.
+    assert!(can_be_bundled(target("armv7m-none-eabi")));
+}
+
+#[test]
+fn the_kernel_headers_are_shared_rather_than_copied_per_target() {
+    // The reason they are not under a sysroot. `linux/` and `asm-generic/` are nine megabytes of
+    // files that are byte for byte the same whatever the target, so two targets sharing an
+    // architecture share one tree and two architectures share everything but `asm/`.
+    let cache = Path::new("/cache");
+    let gnu = Kernel::for_target(cache, target("x86_64-linux-gnu")).expect("x86-64 has a kernel");
+    let musl = Kernel::for_target(cache, target("x86_64-linux-musl")).expect("so does musl");
+    let arm = Kernel::for_target(cache, target("aarch64-linux-gnu")).expect("so does aarch64");
+    assert_eq!(gnu, musl, "the libc does not change the kernel's headers");
+    assert_eq!(gnu.generic_include(), arm.generic_include());
+    assert_ne!(gnu.arch_include(), arm.arch_include());
+    assert!(!gnu.arch_include().starts_with("/cache/sysroots"));
+}
+
+#[test]
+fn the_kernel_has_its_own_name_for_the_machine() {
+    // A third spelling, after ours and the libc's. `arm64` is the directory under `arch/` in the
+    // kernel's source and `aarch64` is not, and the 31-bit s390 port leaving did not rename the one
+    // that stayed.
+    let cache = Path::new("/cache");
+    for (tuple, arch) in [
+        ("aarch64-linux-gnu", "arm64"),
+        ("s390x-linux-gnu", "s390"),
+        ("x86_64-linux-gnu", "x86"),
+        ("i686-linux-gnu", "x86"),
+        ("riscv64-linux-gnu", "riscv"),
+        ("powerpc64le-linux-gnu", "powerpc"),
+        ("loongarch64-linux-gnu", "loongarch"),
+        ("armv7a-linux-gnueabihf", "arm"),
+    ] {
+        let kernel = Kernel::for_target(cache, target(tuple)).expect("a Linux target has a kernel");
+        assert_eq!(kernel.arch(), arch, "{tuple} reads the wrong asm directory");
+        assert!(kernel.arch_include().ends_with(arch));
+    }
+}
+
+#[test]
+fn only_linux_with_a_libc_we_produce_has_kernel_headers() {
+    // Windows, Darwin and the BSDs have their own system headers and no `linux/` at all,
+    // freestanding has no system call interface, and bionic carries its own scrubbed copy of the
+    // uapi headers rather than reading this tree.
+    let cache = Path::new("/cache");
+    for tuple in ["x86_64-pc-windows-gnu", "aarch64-macos", "armv7m-none-eabi", "wasm32-wasi"] {
+        assert!(Kernel::for_target(cache, target(tuple)).is_none(), "{tuple} has no kernel tree");
+    }
+    assert!(Kernel::for_target(cache, target("aarch64-linux-android")).is_none());
+    assert!(Kernel::for_target(cache, target("x86_64-linux-gnu")).is_some());
+}
+
+#[test]
+fn the_kernels_asm_is_searched_before_its_shared_tree() {
+    let cache = Path::new("/cache");
+    let kernel = Kernel::for_target(cache, target("aarch64-linux-musl")).expect("a kernel");
+    let includes = kernel.includes();
+    assert_eq!(includes[0], kernel.arch_include());
+    assert_eq!(includes[1], kernel.generic_include());
+    assert!(includes[0].ends_with("kernel-headers/arm64"));
+    assert!(includes[1].ends_with("kernel-headers/generic"));
+}
+
+#[test]
+fn the_version_macro_is_the_one_the_target_asked_for_and_the_trees_own_otherwise() {
+    // Section 8.3's version half. One tree serves every release because the differences are inside
+    // the files, so the release is what the target supplies, and a target that pinned nothing is
+    // compiled against the release the tree was produced from.
+    let asked = target("x86_64-linux-gnu.2.28");
+    assert_eq!(bundled_glibc_minor(asked), Ok(Some(28)));
+    let plain = target("x86_64-linux-gnu");
+    assert_eq!(bundled_glibc_minor(plain), Ok(Some(BUNDLED_GLIBC.minor_part().unwrap())));
+    // A major version with no minor is somebody naming the libc rather than pinning it, so it is
+    // the tree's own version and not an error.
+    assert_eq!(bundled_glibc_minor(target("x86_64-linux-gnu.2")), bundled_glibc_minor(plain));
+}
+
+#[test]
+fn nothing_but_glibc_gets_a_glibc_version_macro() {
+    // There is no `__GLIBC_MINOR__` on musl or mingw, and a program that probes for one has to hear
+    // no. Defining it would have every `__GLIBC_PREREQ` in a portable program answer yes on a libc
+    // that has neither the symbol versioning nor the declarations the probe is about.
+    for tuple in ["x86_64-linux-musl", "x86_64-pc-windows-gnu", "aarch64-macos", "armv7m-none-eabi"]
+    {
+        assert_eq!(bundled_glibc_minor(target(tuple)), Ok(None), "{tuple}");
+    }
+}
+
+#[test]
+fn a_release_newer_than_the_tree_is_refused_rather_than_approximated() {
+    // The one direction that cannot be faked. Asking for an older release turns declarations off,
+    // which is what the macro is for, and asking for a newer one would turn on declarations the
+    // text does not have, so every probe would pass and the program would fail later and further
+    // away, at best on a missing declaration and at worst on a missing symbol at link time.
+    let skew =
+        bundled_glibc_minor(target("x86_64-linux-gnu.2.99")).expect_err("newer than the tree");
+    assert_eq!(skew.tree, BUNDLED_GLIBC);
+    assert_eq!(skew.asked.to_string(), "2.99");
+    assert!(skew.to_string().contains("2.99") && skew.to_string().contains("2.44"));
+    // A different major is the same answer for the same reason, in both directions, because glibc 3
+    // does not exist and glibc 1 is not what this tree is.
+    assert!(bundled_glibc_minor(target("x86_64-linux-gnu.3.0")).is_err());
+    assert!(bundled_glibc_minor(target("x86_64-linux-gnu.1.9")).is_err());
+}

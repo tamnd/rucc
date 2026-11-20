@@ -1,0 +1,3035 @@
+//! Turning what a declaration wrote into a type: the specifiers, then the declarator.
+//!
+//! Design: `spec/07-types-and-semantics.md` section 7.1.
+//!
+//! A C declaration says its type in two halves that are read in opposite directions. The
+//! specifiers are a set and are read together, so `unsigned static const long int` is a
+//! perfectly ordinary `static const unsigned long`. The declarator is a sequence and is read
+//! outward from the name, so `int (*f[3])(char)` says that `f` is an array of three pointers to
+//! functions taking `char` and returning `int`. This is the one place that knows both, and
+//! everything downstream asks the type table rather than reading a specifier list again.
+//!
+//! # Two directions, one fold
+//!
+//! [`Derived`](rucc_ast::Derived) is already in the spoken order, nearest the name first, which
+//! the parser produced by pushing while it descended into the parentheses. So the type is built
+//! by folding that list from its far end onto the type the specifiers named, and the step
+//! nearest the name is applied last. That is why the loop below runs backwards and why the
+//! index being zero is worth a name: an array is only allowed to say `static` or carry
+//! qualifiers when it is the step nearest the name of a parameter, which is what makes
+//! `void f(int a[const 3])` legal and `int a[const 3];` not.
+//!
+//! # What is not here yet
+//!
+//! The attributes a member carries. `_Alignas` on a member, `packed` on a member or on the
+//! record, and the `#pragma pack` around it are each a number
+//! [`FieldDecl`](rucc_types::FieldDecl) already has a place for, and none of them is filled in,
+//! because what fills them in is attribute checking rather than type building.
+//!
+//! `auto` as a type specifier needs the initializer that it takes its type from, so it waits on
+//! initialization. `_Imaginary` is a keyword gcc has never implemented, so it is refused where
+//! it is written rather than given a type it is not.
+
+use rucc_ast::{
+    self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
+};
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Idx, Symbol, sym};
+use rucc_diag::{Diagnostic, Span};
+use rucc_session::Std;
+use rucc_target::{TargetInfo, VaList};
+use rucc_types::{
+    ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
+    TypeId, TypeKind, Written, adjust_parameter, is_complete, is_function, is_integer, is_pointer,
+    is_record, is_void, layout,
+};
+
+use crate::check::{Checker, Promoted};
+use crate::decl::{DeclId, DeclKind};
+use crate::scope::{Binding, ScopeTypes, Tag, TagKind};
+
+mod tag;
+
+/// What the type builder has worked out already and is not going to work out twice.
+#[derive(Debug, Default)]
+pub(crate) struct Built {
+    /// What each specifier list turned out to name.
+    ///
+    /// The declarators of one declaration share one specifier list, and `struct { int x; } a, b;`
+    /// declares one structure and not two, so building the type a second time is not a slow way
+    /// to get the same answer, it is a different answer. Every specifier list is written at one
+    /// place in the source and is checked once, so remembering what it named is enough.
+    specified: Map<ast::DeclSpecsId, TypeId>,
+    /// The tag types whose body has been read.
+    ///
+    /// This is what tells a redefinition from a completion, and the type table cannot answer it
+    /// on its own. A record is complete exactly when its body has been read, but C23's
+    /// `enum E : int;` is a complete type that has never had one, so `enum E : int;` followed by
+    /// `enum E : int { A };` is a definition of something already complete and is allowed.
+    defined: Set<TypeId>,
+    /// What the named parameters of each prototype were declared as, by the first parameter of
+    /// the list.
+    ///
+    /// A function definition binds these again in the body's scope, so that the `n` a prototype
+    /// saw in `void f(int n, int a[n])` and the `n` the body assigns to are one declaration
+    /// rather than two that happen to share a name. The key is the first parameter because a run
+    /// of indices is not something a map can be keyed by, and a prototype always has at least one
+    /// parameter in it: `(void)` and `()` are parameter lists of other kinds.
+    params: Map<Idx<ast::Param>, Vec<DeclId>>,
+    /// The enumerators and the tags that each prototype declared, by the first parameter of the
+    /// list.
+    ///
+    /// C 6.2.1p4 puts them in the block scope of a function definition's body, with the
+    /// parameters. gcc warns that such a type is not visible outside the function, and it lets
+    /// the body use it. 9front's `devvmx.c` has `enum { TRAPRD = 1, TRAPWR = 2 } state` as a
+    /// parameter and tests `state & TRAPRD` in the body.
+    param_types: Map<Idx<ast::Param>, ScopeTypes>,
+    /// The target's `__builtin_va_list`, once something has asked for it.
+    ///
+    /// Every mention of the keyword names one type, so this is not only a cache. On the targets
+    /// where the type is a record, building it a second time would build a second record, and
+    /// two records with the same members are still two types, so `va_list a, b; a = b;` would
+    /// stop being an assignment and start being a diagnostic.
+    va_list: Option<TypeId>,
+}
+
+/// Who a declaration is about, for the diagnostics that name it.
+///
+/// gcc writes every one of these two ways, once for a declarator with a name and once for the
+/// abstract declarator of a type name: `declaration of 'a' as array of voids` against
+/// `declaration of type name as array of voids`. The two are kept together here so that a
+/// message cannot be written in only one of its forms.
+#[derive(Debug, Clone, Copy)]
+struct Subject {
+    /// The name, absent in an abstract declarator.
+    name: Option<Symbol>,
+    /// What a diagnostic about the declarator points at.
+    span: Span,
+}
+
+/// What one mention of a tag turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::check) enum TagUse {
+    /// The tag names a type already, which is that type.
+    Known(TypeId),
+    /// The tag names nothing yet, so this mention is what declares it.
+    New,
+    /// There was no tag, so there is nothing to bind and a fresh type every time.
+    Anonymous,
+    /// The tag names something of another kind, which has been reported.
+    Wrong,
+}
+
+/// Where a declarator is being read, which decides what it is allowed to say.
+#[derive(Debug, Clone, Copy, Default)]
+pub(in crate::check) struct Place {
+    /// Whether this declarator is a function parameter, which is what lets its outermost array
+    /// carry `static` and qualifiers, since those belong to the pointer it becomes.
+    parameter: bool,
+    /// Whether this declarator is a member of a structure or a union, which is what names the
+    /// place in the one message that has to name it.
+    member: bool,
+    /// Whether this declarator is inside a function prototype, which is the only place `[*]`
+    /// means anything.
+    prototype: bool,
+}
+
+/// A member of a structure or a union, which is the one place that is named by a constant.
+/// The keyword for the address space those qualifiers put an object in, when it is a named one.
+pub(in crate::check) fn space_spelling(quals: Qualifiers) -> Option<&'static str> {
+    if quals.has(Qualifiers::SEG_GS) {
+        Some("__seg_gs")
+    } else if quals.has(Qualifiers::SEG_FS) {
+        Some("__seg_fs")
+    } else {
+        None
+    }
+}
+
+pub(in crate::check) const MEMBER: Place =
+    Place { parameter: false, member: true, prototype: false };
+
+impl Checker<'_> {
+    /// The type a type name names, which is a cast, a `sizeof` or a `_Generic` association.
+    pub fn type_name(&mut self, id: ast::TypeNameId) -> TypeId {
+        let name = self.ast[id];
+        let ty = self.declared_type(name.specs, name.declarator);
+        // `mode`, `hardbool` and `vector_size` change which type is named rather than how that type is laid
+        // out, so they are read here for the same reason `Checker::declare` reads them. A type
+        // name is nearly always a typedef that already carries the answer, and the one place it
+        // is not is a cast or a compound literal with the attribute written out, which real code
+        // does reach for through a macro that takes the lane type and the lane count.
+        self.retyped(ty, self.ast[name.specs].attrs)
+    }
+
+    /// The type one declarator of one declaration declares.
+    ///
+    /// Always gives back a type. A declarator that does not check is reported and answered with
+    /// the nearest thing that does, so that the declaration around it is still checked instead
+    /// of collapsing, which is the same rule the expressions follow with their poisoned nodes.
+    pub fn declared_type(
+        &mut self,
+        specs: ast::DeclSpecsId,
+        declarator: ast::DeclaratorId,
+    ) -> TypeId {
+        self.build_type(specs, declarator, Place::default())
+    }
+
+    /// The typedef name a declaration's specifiers named, and the type it stands for.
+    ///
+    /// The declaration's type is built on top of that type, by the qualifiers beside the name and
+    /// by whatever the declarator derives from it: `const size_type n;` is a const over it and
+    /// `size_type *p;` a pointer to it. The answer is what was written and nothing more, so an
+    /// attribute that changes the type, or an initializer that gives an array its length, still
+    /// leaves the name here, and whoever reads it looks for the type inside the declaration's and
+    /// finds it or does not.
+    ///
+    /// `__builtin_va_list` is a keyword here and a typedef name to gcc, which describes a list
+    /// as one, so it is answered as a name too.
+    ///
+    /// gcc keeps the name through `typeof`: `typeof(u64)` is spelled `u64`, and so is `typeof(x)`
+    /// where `x` was first declared with it. The kernel's `DEFINE_PER_CPU(u64, x)` is
+    /// `__typeof__(u64) x`, and its `EXPORT_SYMBOL(f)` is `extern typeof(f) f;`, which spells the
+    /// return type the way `f`'s first declaration did.
+    pub(in crate::check) fn spelled_with(
+        &mut self,
+        specs: ast::DeclSpecsId,
+    ) -> Option<(Symbol, TypeId)> {
+        let name = match self.ast[specs].ty {
+            TypeSpec::Typedef(name) => name,
+            TypeSpec::VaList => {
+                let name = self.va_list_name()?;
+                return Some((name, self.va_list_type()));
+            }
+            TypeSpec::Typeof { operand: TypeofArg::Type(name), .. } => {
+                return self.spelled_with(self.ast[name].specs);
+            }
+            TypeSpec::Typeof { operand: TypeofArg::Expr(expr), .. } => {
+                if let Some(&spelled) = self.typeof_spellings.get(&expr) {
+                    return Some(spelled);
+                }
+                let ast::Expr::Name(name) = self.ast[expr] else { return None };
+                let Some(Binding::Decl(of)) = self.scopes.lookup(name) else { return None };
+                return self.first_spellings.get(&of).copied().flatten();
+            }
+            _ => return None,
+        };
+        match self.scopes.lookup(name) {
+            Some(Binding::Typedef(of)) => Some((name, of)),
+            _ => None,
+        }
+    }
+
+    /// The typedef name the type of a checked expression is spelled with, which is what
+    /// `typeof` of it keeps: the first declaration's for a name, and the member's own for
+    /// `a.m` and `p->m`, which gcc keeps the same way. `&x` is spelled the way `x` is, as
+    /// `name *p` is, so the kernel's `typeof(&__SCT__name)` in `static_call_update` points at
+    /// the static call's typedef.
+    fn expr_spelled_with(&self, node: crate::expr::ExprId) -> Option<(Symbol, TypeId)> {
+        match self.tast[node].kind {
+            crate::expr::ExprKind::Decl(decl) => self.first_spellings.get(&decl).copied().flatten(),
+            crate::expr::ExprKind::Unary { op: ast::UnaryOp::AddrOf, operand } => {
+                self.expr_spelled_with(operand)
+            }
+            crate::expr::ExprKind::Member { base, field } => {
+                let base = self.types.canonical(self.tast[base].ty);
+                let TypeKind::Record(record) = self.types.kind(base) else { return None };
+                let member = self.types.record_info(record).fields.get(field as usize)?.name?;
+                self.types.member_spelling(record, member)
+            }
+            _ => None,
+        }
+    }
+
+    /// The type a declaration with no declarator names, which is what declares a tag.
+    ///
+    /// `struct S { int x; };` builds and lays out the record even though there is nothing for it
+    /// to be the type of, since that is where its members are checked.
+    pub(in crate::check) fn declared_specs(&mut self, specs: ast::DeclSpecsId) -> TypeId {
+        let span = self.ast[specs].span;
+        self.specified_type(specs, Subject { name: None, span }, Place::default())
+    }
+
+    /// Declares a typedef name in the current scope.
+    ///
+    /// Public for the same reason [`Checker::declare_object`] is: a caller that checks one
+    /// expression rather than a translation unit still needs a way to say that a name the
+    /// parser already decided was a type is one.
+    pub fn declare_typedef(&mut self, name: Symbol, ty: TypeId) {
+        self.scopes.declare(name, Binding::Typedef(ty));
+    }
+
+    /// The specifiers and the declarator, in the place they were written.
+    fn build_type(
+        &mut self,
+        specs: ast::DeclSpecsId,
+        declarator: ast::DeclaratorId,
+        place: Place,
+    ) -> TypeId {
+        let node = self.ast[declarator];
+        let subject = Subject {
+            name: node.name,
+            span: if node.name.is_some() { node.name_span } else { node.span },
+        };
+        let base = self.specified_type(specs, subject, place);
+        let ty = self.derive(base, declarator, subject, place);
+        if place.parameter || place.member {
+            let what = if place.member { "structure field" } else { "parameter" };
+            self.check_space(ty, subject.name, subject.span, what);
+        }
+        // A calling convention in the specifiers belongs to the function the whole declarator
+        // declares, or the one it points at, rather than to the type the specifiers name: in
+        // `int __attribute__((ms_abi)) f(int)` that type is `int`. So it is read here, once the
+        // declarator is folded on, and here is every place a declarator is, which is what makes
+        // a parameter, a member and a cast see it as a declaration does.
+        self.convened(ty, self.ast[specs].attrs)
+    }
+
+    /// The type the specifiers alone name, qualifiers included.
+    ///
+    /// Answered once per specifier list rather than once per declarator, because the
+    /// declarators of one declaration share one list and `struct { int x; } a, b;` declares one
+    /// structure. Building it twice would not be a slow way to the same answer, it would be two
+    /// structures and a second warning about anything the specifiers themselves got wrong.
+    fn specified_type(&mut self, id: ast::DeclSpecsId, subject: Subject, place: Place) -> TypeId {
+        if let Some(&ty) = self.built.specified.get(&id) {
+            return ty;
+        }
+        let specs = self.ast[id];
+        let base = self.type_spec(specs.ty, specs.span, subject, place);
+        let ty = self.qualify(base, specs.quals, specs.span);
+        self.built.specified.insert(id, ty);
+        ty
+    }
+
+    /// The type a single type specifier names.
+    fn type_spec(&mut self, spec: TypeSpec, span: Span, subject: Subject, place: Place) -> TypeId {
+        match spec {
+            TypeSpec::None => {
+                // C89 said a declaration with no type in it declares an `int`, and everything
+                // this compiler does below here is that reading. What the dialect decides is
+                // whether the program is told about it, which is the same question for the six
+                // rules gcc 14 promoted and is answered in one place for all of them.
+                if let Some(severity) = self.cx.promoted(Promoted::ImplicitInt) {
+                    let what = match subject.name {
+                        Some(name) => format!("in declaration of '{}'", self.text(name)),
+                        None => String::new(),
+                    };
+                    let message = format!("type defaults to 'int' {what}");
+                    self.report(
+                        Diagnostic::new(severity, message.trim_end().to_string(), subject.span)
+                            .with_code("E0526"),
+                    );
+                }
+                self.int()
+            }
+            TypeSpec::Builtin(builtin) => match builtin.resolve() {
+                Some(basic) => {
+                    // `_Complex` on its own means `_Complex double`, which is gcc's reading and
+                    // not a reading any edition of C wrote down, so `-pedantic` says so in the
+                    // words gcc says it in.
+                    if self.cx.pedantic && builtin.is_bare_complexity() {
+                        self.report(
+                            Diagnostic::warning(
+                                "ISO C does not support plain 'complex' meaning 'double complex'"
+                                    .to_string(),
+                                span,
+                            )
+                            .with_code("E0703"),
+                        );
+                    }
+                    self.basic_type(basic.scalar, basic.complexity, span)
+                }
+                None => {
+                    let message = match builtin.clash() {
+                        Some((one, other)) => {
+                            format!("both '{one}' and '{other}' in declaration specifiers")
+                        }
+                        None => "two or more data types in declaration specifiers".to_string(),
+                    };
+                    self.report(Diagnostic::error(message, span).with_code("E0525"));
+                    self.int()
+                }
+            },
+            TypeSpec::Record { kind, tag, fields, attrs, pragmas } => {
+                self.record_spec(kind, tag, fields, attrs, pragmas, span)
+            }
+            TypeSpec::Enum { tag, enumerators, underlying, attrs } => {
+                let ty = self.enum_spec(tag, enumerators, underlying, attrs, span);
+                if self.cx.kencc { self.kencc_enum(ty) } else { ty }
+            }
+            TypeSpec::Typedef(name) => match self.scopes.lookup(name) {
+                Some(Binding::Typedef(ty)) => {
+                    self.heed_deprecated_typedef(name, ty, span);
+                    ty
+                }
+                // The parser only writes this down for a name its own scope stack said was a
+                // type, so the two disagreeing means a declaration was checked in one and not
+                // in the other. Reported rather than assumed, since the alternative is a
+                // declaration that silently means something else.
+                _ => {
+                    let name = self.text(name).to_owned();
+                    self.report(
+                        Diagnostic::error(format!("unknown type name '{name}'"), span)
+                            .with_code("E0546"),
+                    );
+                    self.int()
+                }
+            },
+            TypeSpec::Typeof { unqual, operand } => self.typeof_type(unqual, operand),
+            TypeSpec::Atomic(inner) => {
+                let inner = self.type_name(inner);
+                self.atomic_type(inner, span)
+            }
+            TypeSpec::VaList => self.va_list_type(),
+            TypeSpec::Auto(which) => {
+                // The deduction itself is in `check/decl.rs`, which takes the declaration apart
+                // before it asks for a type at all. What reaches here is the specifier written
+                // where nothing deduces anything, and the two places that can happen are a
+                // member and a parameter: a type name cannot be written with it, and every
+                // other declaration goes through the deduction. gcc turns both away in its
+                // parser and says so in terms of its grammar. clang says what is wrong with the
+                // declaration instead, and that is the wording used here.
+                let spelled = which.spelling();
+                let place = if place.member { "struct member" } else { "function prototype" };
+                self.report(
+                    Diagnostic::error(format!("'{spelled}' not allowed in {place}"), span)
+                        .with_code("E0651"),
+                );
+                self.int()
+            }
+        }
+    }
+
+    /// One of the types a keyword or a run of keywords names.
+    fn basic_type(&mut self, scalar: Scalar, complexity: Complexity, span: Span) -> TypeId {
+        // kencc's `simplet` gives `signed char` the type of `char`, so games/v8e can write
+        // `typedef char s8int;` after u.h has `typedef signed char s8int;`.
+        let scalar = match scalar {
+            Scalar::SignedChar if self.cx.kencc => Scalar::Char,
+            scalar => scalar,
+        };
+        let kind = int_kind(scalar);
+        let float = float_kind(scalar, self.cx.target);
+
+        match complexity {
+            Complexity::Real => match (scalar, kind, float) {
+                (Scalar::Void, _, _) => self.types.void(),
+                (Scalar::Bool, _, _) => self.types.boolean(),
+                (Scalar::BitInt { width, unsigned }, _, _) => self.bit_int_type(width, !unsigned),
+                (_, Some(kind), _) => self.types.int(kind),
+                (_, _, Some(kind)) => self.types.float(kind),
+                // A floating type the target does not have. `_Float128x` is one no target gcc
+                // supports has, `__float80` is one only x86 has, and the three named ones are
+                // there on some machines and not on others. gcc turns all of them away in the
+                // same words, which are not the words for a type that is coming later.
+                (
+                    Scalar::Float128x
+                    | Scalar::Float80
+                    | Scalar::Float16
+                    | Scalar::Float128
+                    | Scalar::Float64x,
+                    _,
+                    _,
+                ) => {
+                    self.unavailable_type(spell_scalar(scalar), span);
+                    self.types.float(FloatKind::Double)
+                }
+                // A decimal floating type on a target the back end has no routines for, in the
+                // words gcc uses on a target it was built without them for.
+                _ => {
+                    self.report(
+                        Diagnostic::error(
+                            "decimal floating-point not supported for this target".to_string(),
+                            span,
+                        )
+                        .with_code("E0519"),
+                    );
+                    self.types.float(FloatKind::Double)
+                }
+            },
+            Complexity::Complex => match (scalar, kind, float) {
+                (_, _, Some(kind)) if !kind.is_decimal() => self.types.complex_float(kind),
+                // `_Complex int`, which is gcc's and not C's: the halves are integers and
+                // everything else about the type is the same. gcc has had it for as long as it
+                // has had complex types and the torture suite writes it, and `-pedantic` says
+                // that no edition of C has it in the words gcc says it in.
+                (_, Some(kind), _) => {
+                    if self.cx.pedantic {
+                        self.report(
+                            Diagnostic::warning(
+                                "ISO C does not support complex integer types".to_string(),
+                                span,
+                            )
+                            .with_code("E0703"),
+                        );
+                    }
+                    let part = self.types.int(kind);
+                    self.types.complex(part)
+                }
+                // The ones the keyword cannot go in front of. gcc refuses these in its parser, in
+                // terms of the two specifiers written rather than the type they would name, and
+                // the wording here is its. The decimal types are on the list, so a program that
+                // writes one with the keyword hears about the pair and not about the half, which
+                // is the same thing gcc tells it.
+                (
+                    Scalar::Void
+                    | Scalar::Bool
+                    | Scalar::BitInt { .. }
+                    | Scalar::Decimal32
+                    | Scalar::Decimal64
+                    | Scalar::Decimal128
+                    | Scalar::Decimal64x,
+                    _,
+                    _,
+                ) => {
+                    // gcc names this one by the keyword C99 gave it whichever spelling was
+                    // written, so `_Complex bool` and `_Complex _Bool` read the same.
+                    let spelled =
+                        if scalar == Scalar::Bool { "_Bool" } else { spell_scalar(scalar) };
+                    self.report(
+                        Diagnostic::error(
+                            format!("both 'complex' and '{spelled}' in declaration specifiers"),
+                            span,
+                        )
+                        .with_code("E0525"),
+                    );
+                    self.complex_double()
+                }
+                // A floating type this target does not have, which is the same list the real arm
+                // turns away. The complexity is not what is wrong with any of them, so the
+                // message is the one the half would get, which is what gcc says about
+                // `_Complex _Float128` on armv7 too.
+                (
+                    Scalar::Float128x
+                    | Scalar::Float80
+                    | Scalar::Float16
+                    | Scalar::Float128
+                    | Scalar::Float64x,
+                    _,
+                    _,
+                ) => {
+                    self.unavailable_type(spell_scalar(scalar), span);
+                    self.complex_double()
+                }
+                // Anything else with no type behind it, which is nothing today: every scalar is
+                // either an integer, a floating type, or named in one of the arms above.
+                _ => {
+                    self.unsupported_type(&format!("the type `{}`", spell_scalar(scalar)), span);
+                    self.complex_double()
+                }
+            },
+            // gcc parses this keyword and has never implemented the type behind it.
+            Complexity::Imaginary => {
+                self.unsupported_type("`_Imaginary`", span);
+                match float {
+                    Some(kind) if !kind.is_decimal() => self.types.complex_float(kind),
+                    _ => self.complex_double(),
+                }
+            }
+        }
+    }
+
+    /// `__builtin_va_list`, which is the one type the target names rather than the source.
+    ///
+    /// Built once and remembered, since every mention of the keyword is the same type and the
+    /// record ones would otherwise be a new record each time. The members are the psABI's, named
+    /// as the psABI names them: nothing here reads them, and a program that prints a `va_list`
+    /// in a debugger reads all of them.
+    pub(crate) fn va_list_type(&mut self) -> TypeId {
+        if let Some(ty) = self.built.va_list {
+            return ty;
+        }
+        let ty = match self.cx.target.va_list {
+            // A target whose `__builtin_va_list` this compiler does not build yet. Nothing can
+            // reach here today, because a target with no answer has no backend and the driver
+            // will not take it, and a pointer to `void` is the answer that keeps the type table
+            // buildable for a test that constructs one directly rather than a panic in a
+            // compiler.
+            None => {
+                let elem = self.types.void();
+                self.types.pointer(elem)
+            }
+            Some(VaList::CharPointer) => {
+                let elem = self.types.int(IntKind::Char);
+                self.types.pointer(elem)
+            }
+            Some(VaList::VoidPointer) => {
+                let elem = self.types.void();
+                self.types.pointer(elem)
+            }
+            Some(VaList::SysV) => {
+                let uint = self.types.int(IntKind::UInt);
+                let void = self.types.void();
+                let ptr = self.types.pointer(void);
+                let record = self.builtin_record(
+                    sym::VA_LIST_TAG,
+                    &[
+                        (sym::GP_OFFSET, uint),
+                        (sym::FP_OFFSET, uint),
+                        (sym::OVERFLOW_ARG_AREA, ptr),
+                        (sym::REG_SAVE_AREA, ptr),
+                    ],
+                );
+                // The array of one is the whole reason a SysV `va_list` can be handed to
+                // `vfprintf` and come back moved on: what is passed is the address of the one
+                // element, so the callee reads and writes the caller's list rather than a copy.
+                self.types.array(record, ArrayLen::Fixed(1))
+            }
+            Some(VaList::Aapcs) => {
+                let int = self.types.int(IntKind::Int);
+                let void = self.types.void();
+                let ptr = self.types.pointer(void);
+                self.builtin_record(
+                    sym::VA_LIST,
+                    &[
+                        (sym::STACK, ptr),
+                        (sym::GR_TOP, ptr),
+                        (sym::VR_TOP, ptr),
+                        (sym::GR_OFFS, int),
+                        (sym::VR_OFFS, int),
+                    ],
+                )
+            }
+        };
+        self.built.va_list = Some(ty);
+        // And a typedef name beside the table, which is what gcc describes a list as.
+        if let Some(name) = self.va_list_name() {
+            self.types.alias(name, ty, None);
+        }
+        ty
+    }
+
+    /// The typedef name gcc describes `__builtin_va_list` as, and nothing where it describes none.
+    ///
+    /// gcc's builtin typedef only names a type that has no name of its own. The AAPCS64 list is
+    /// `struct __va_list`, so a `va_list` there is described as a typedef of the structure, and a
+    /// `typedef __builtin_va_list` in between would be a type name only rucc's BTF has. The
+    /// keyword table interned the word before anything was read.
+    pub(in crate::check) fn va_list_name(&self) -> Option<Symbol> {
+        if self.cx.target.va_list == Some(VaList::Aapcs) {
+            return None;
+        }
+        self.cx.names.find("__builtin_va_list")
+    }
+
+    /// A complete record the compiler builds itself, with a tag and ordinary members.
+    ///
+    /// Not put in the tag scope. A program that writes `struct __va_list_tag` is writing about a
+    /// tag of its own, which is what gcc's own headers do not do and what the one program that
+    /// does would have meant either way.
+    fn builtin_record(&mut self, tag: Symbol, members: &[(Symbol, TypeId)]) -> TypeId {
+        let id = self.types.declare_record(RecordKind::Struct, Some(tag));
+        let decls: Vec<FieldDecl> =
+            members.iter().map(|&(name, ty)| FieldDecl::new(Some(name), ty)).collect();
+        let laid_out = rucc_types::layout_record(
+            &self.types,
+            RecordKind::Struct,
+            &decls,
+            &RecordOptions::default(),
+            self.cx.target,
+        )
+        .expect("a record of pointers and integers lays out");
+        self.types.complete_record(id, laid_out);
+        self.types.record(id)
+    }
+
+    /// `typeof(x)` or `typeof(T)`, and the C23 spelling that takes the qualifiers off.
+    fn typeof_type(&mut self, unqual: bool, operand: TypeofArg) -> TypeId {
+        // The expression is checked and never evaluated, 6.7.2.5p3. Checking it is what gives
+        // it a type at all, and an array or a function keeps its own type here, since nothing
+        // has asked for its value and it is the asking that decays it.
+        let ty = match operand {
+            TypeofArg::Expr(expr) => {
+                self.unevaluated += 1;
+                let node = self.expr(expr);
+                self.unevaluated -= 1;
+                // A bit-field's type is not the type of anything a declaration could make, since
+                // the width is not part of it, so 6.7.2.5p2 rules it out the way 6.5.3.4p1 rules
+                // out `sizeof` of one. gcc says `typeof` in every spelling, `__typeof__` and
+                // `typeof_unqual` included, and the declared type is kept so that what follows
+                // is still checked.
+                if self.tast[node].category == crate::expr::Category::Bitfield {
+                    let span = self.tast.expr_span(node);
+                    self.report(
+                        Diagnostic::error("'typeof' applied to a bit-field".to_string(), span)
+                            .with_code("E0570"),
+                    );
+                }
+                if let Some(spelled) = self.expr_spelled_with(node) {
+                    self.typeof_spellings.insert(expr, spelled);
+                }
+                self.tast[node].ty
+            }
+            TypeofArg::Type(name) => self.type_name(name),
+        };
+        if !unqual {
+            return ty;
+        }
+        // `typeof_unqual` takes off the qualifiers and `_Atomic` with them, which is the one
+        // place the two spellings of `_Atomic` are told apart again.
+        let canonical = self.types.canonical(ty);
+        let bare = match self.types.kind(canonical) {
+            TypeKind::Atomic(inner) => inner,
+            // The qualifiers of an array are those of what it holds, so they come off there. The
+            // kernel's `this_cpu_ptr` is `typeof_unqual` of a `__seg_gs` percpu variable, and a
+            // `cpumask_var_t` is an array of one.
+            TypeKind::Array { .. } if !self.types.object_quals(canonical).is_none() => {
+                return self.types.unqualified_object(canonical);
+            }
+            _ => ty,
+        };
+        self.types.unqualified(bare)
+    }
+
+    /// `_BitInt(N)`, whose width is a constant expression and has a range.
+    ///
+    /// A signed one is never narrower than two bits, because one of them is the sign and a type
+    /// with no value bits is not a type. An unsigned one may be a single bit, and
+    /// `unsigned _BitInt(1)` holding nothing but zero and one is a legal, if peculiar, type.
+    fn bit_int_type(&mut self, width: ast::ExprId, signed: bool) -> TypeId {
+        let value = self.expr(width);
+        let span = self.tast.expr_span(value);
+        let Ok(bits) = self.eval_integer(value) else {
+            // Poisoned or not a constant. The second case is worth its own sentence, since
+            // `_BitInt(n)` reads as if it might be a variably modified type and is not.
+            if !self.is_poisoned(value) {
+                self.report(
+                    Diagnostic::error(
+                        "'_BitInt' argument is not an integer constant expression".to_string(),
+                        span,
+                    )
+                    .with_code("E0529"),
+                );
+            }
+            return self.int();
+        };
+        if bits <= 0 {
+            let message = format!(
+                "'_BitInt' argument '{bits}' is not a positive integer constant expression"
+            );
+            self.report(Diagnostic::error(message, span).with_code("E0529"));
+            return self.int();
+        }
+        if signed && bits < 2 {
+            let message = "'signed _BitInt' argument must be at least 2".to_string();
+            self.report(Diagnostic::error(message, span).with_code("E0529"));
+            return self.int();
+        }
+        // The target's widest, which is gcc's 65535 where the back end computes a limb at a time
+        // and 128 where it does not. `__BITINT_MAXWIDTH__` in `rucc-pp` asks the same question.
+        let most = self.cx.target.bit_int_max_width();
+        if bits > i128::from(most) {
+            let message =
+                format!("'_BitInt' argument '{bits}' is larger than 'BITINT_MAXWIDTH' '{most}'");
+            self.report(Diagnostic::error(message, span).with_code("E0529"));
+            return self.int();
+        }
+        let bits = u32::try_from(bits).unwrap_or(most);
+        self.types.bit_int(signed, bits)
+    }
+
+    /// `_Atomic(T)`, which is a type and not a qualifier and which two things cannot be.
+    ///
+    /// Nothing about the object itself is refused here any more. The width used to be: an object
+    /// the machine does not reach all of in one instruction was turned down where it was written,
+    /// because gcc calls libatomic for one of those, libatomic takes a lock out of a table keyed by
+    /// the address, and a program half of whose accesses take that lock and half of which do not is
+    /// not atomic at all. `runtime/builtins/atomic.c` is that table now, under libatomic's names,
+    /// so a wide access is a call into it. A structure, a union, a complex object and a vector were
+    /// turned down after that, because the walk has no single value for one and an access to one is
+    /// a copy rather than a read. That is what the copy under the lock is for, and section 7.9 of
+    /// the spec has the shape of it.
+    ///
+    /// What is left are the three the language itself refuses, which are an array, a function and a
+    /// type that already carries a qualifier.
+    fn atomic_type(&mut self, inner: TypeId, span: Span) -> TypeId {
+        let canonical = self.types.canonical(inner);
+        let what = if rucc_types::is_array(&self.types, canonical) {
+            "'_Atomic'-qualified array type"
+        } else if is_function(&self.types, canonical) {
+            "'_Atomic'-qualified function type"
+        } else if !self.types.quals(inner).is_none() {
+            "'_Atomic' applied to a qualified type"
+        } else {
+            return self.types.atomic(inner);
+        };
+        self.report(Diagnostic::error(what.to_string(), span).with_code("E0527"));
+        inner
+    }
+
+    /// A `struct` or a `union`, referred to by tag or declared by one.
+    fn record_spec(
+        &mut self,
+        kind: ast::RecordKind,
+        tag: Option<Symbol>,
+        fields: Option<ast::MemberList>,
+        attrs: ast::AttrList,
+        pragmas: ast::RecordPragmas,
+        span: Span,
+    ) -> TypeId {
+        let (kind, tag_kind) = match kind {
+            ast::RecordKind::Struct => (RecordKind::Struct, TagKind::Struct),
+            ast::RecordKind::Union => (RecordKind::Union, TagKind::Union),
+        };
+        let Some(members) = fields else {
+            return match self.tag_use(tag, tag_kind, span) {
+                TagUse::Known(ty) => {
+                    self.heed_deprecated_tag(tag, ty, span);
+                    ty
+                }
+                found => {
+                    let id = self.types.declare_record(kind, tag);
+                    let ty = self.types.record(id);
+                    self.bind_tag(found, tag, tag_kind, ty);
+                    ty
+                }
+            };
+        };
+        // The tag is bound before the members are read, which is what makes
+        // `struct S { struct S *next; };` refer to the structure being defined rather than
+        // declare a second one inside it.
+        let (id, ty, again) = self.record_defined(kind, tag, tag_kind, span);
+        self.built.defined.insert(ty);
+        self.record_body(id, kind, members, attrs, pragmas, span);
+        self.read_deprecated_tag(ty, attrs, span);
+        self.flag_enum_misplaced(&[attrs], ty);
+        self.btf_decl_tag_on_type(attrs);
+        self.btf_tagged_record(id, attrs);
+        match again {
+            Some(first) => self.redefined(first, ty, span),
+            None => ty,
+        }
+    }
+
+    /// The type that an `enum` specifier gives under kencc, which is the integer type of its
+    /// values and not a type of its own (`cc/cc.y`). An enumeration with no body yet is `int`.
+    /// So two enumerations are the same type, and nfs3.h declares `nfs3Errstr(Nfs3Status)`
+    /// where nfs3.c defines `nfs3Errstr(SunStatus status)`.
+    fn kencc_enum(&mut self, ty: TypeId) -> TypeId {
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Enum(id) => self.types.enum_info(id).underlying.unwrap_or_else(|| self.int()),
+            _ => ty,
+        }
+    }
+
+    /// An `enum`, referred to by tag or declared by one, with C23's underlying type.
+    fn enum_spec(
+        &mut self,
+        tag: Option<Symbol>,
+        enumerators: Option<ast::EnumeratorList>,
+        underlying: Option<ast::TypeNameId>,
+        attrs: ast::AttrList,
+        span: Span,
+    ) -> TypeId {
+        let underlying = underlying.map(|name| {
+            let ty = self.type_name(name);
+            if is_integer(&self.types, self.types.canonical(ty)) {
+                return ty;
+            }
+            self.report(
+                Diagnostic::error("invalid 'enum' underlying type".to_string(), span)
+                    .with_code("E0530"),
+            );
+            self.int()
+        });
+
+        let Some(list) = enumerators else {
+            return match self.tag_use(tag, TagKind::Enum, span) {
+                TagUse::Known(ty) => {
+                    self.heed_deprecated_tag(tag, ty, span);
+                    ty
+                }
+                found => {
+                    let id = self.types.declare_enum(tag);
+                    // An enumeration whose representation the program wrote is complete from the
+                    // point it says so, which is the whole reason C23 lets it be written:
+                    // `enum E : int;` is a forward declaration usable by value straight away.
+                    if let Some(underlying) = underlying {
+                        self.types.complete_enum(id, underlying, true);
+                    }
+                    let ty = self.types.enumeration(id);
+                    self.bind_tag(found, tag, TagKind::Enum, ty);
+                    ty
+                }
+            };
+        };
+        let (id, ty, again) = self.enum_defined(tag, span);
+        self.built.defined.insert(ty);
+        // `packed` on an enumeration is `-fshort-enums` for that one type, which is how the
+        // kernel keeps `enum rw_hint` to a byte.
+        let stored = tag::Stored { short: self.packing(attrs).packed, mode: self.enum_mode(attrs) };
+        self.enum_body(id, list, underlying, stored, again.is_some(), span);
+        if let Some((asked, _)) = self.warn_alignment(&[attrs]) {
+            self.types.make_enum_checked(id, asked);
+        }
+        self.read_deprecated_tag(ty, attrs, span);
+        self.read_flag_enum(id, attrs);
+        self.warn_unused_misplaced(&[attrs], true);
+        self.btf_decl_tag_on_type(attrs);
+        self.btf_tagged_enum(id, attrs);
+        match again {
+            Some(first) => self.redefined(first, ty, span),
+            None => ty,
+        }
+    }
+
+    /// What a mention of a tag turns out to be.
+    ///
+    /// Which scope a tag goes in is not decided here. `struct S;` on its own declares a new type
+    /// in the current scope even where an outer one is visible, and `struct S *p;` refers to
+    /// whatever `S` already means, and the difference is whether the declaration had any
+    /// declarators, which is a fact about the declaration and not about the type. So this asks
+    /// the whole stack, and the declaration checking that knows the difference will ask
+    /// [`Scopes::tag_here`](crate::Scopes::tag_here) before it gets here.
+    pub(in crate::check) fn tag_use(
+        &mut self,
+        tag: Option<Symbol>,
+        kind: TagKind,
+        span: Span,
+    ) -> TagUse {
+        // No tag is nothing to look up and nothing to bind: the type is reachable only through
+        // the declarators of the one declaration that wrote it.
+        let Some(name) = tag else { return TagUse::Anonymous };
+        match self.scopes.tag(name) {
+            Some(found) if found.kind == kind => TagUse::Known(found.ty),
+            Some(_) => {
+                let spelled = self.text(name).to_owned();
+                self.report(
+                    Diagnostic::error(format!("'{spelled}' defined as wrong kind of tag"), span)
+                        .with_code("E0531"),
+                );
+                TagUse::Wrong
+            }
+            None => TagUse::New,
+        }
+    }
+
+    /// Binds a tag to the type just built for it, where this mention is what declares it.
+    pub(in crate::check) fn bind_tag(
+        &mut self,
+        found: TagUse,
+        tag: Option<Symbol>,
+        kind: TagKind,
+        ty: TypeId,
+    ) {
+        // A tag that already means something else keeps meaning it. Rebinding would turn one
+        // diagnostic into one per use, and the uses that follow were written against the
+        // declaration that is already there.
+        if !matches!(found, TagUse::New) {
+            return;
+        }
+        if let Some(name) = tag {
+            self.scopes.declare_tag(name, Tag { kind, ty });
+        }
+    }
+
+    /// The qualifiers a specifier list or a pointer wrote, applied to the type they qualify.
+    pub(in crate::check) fn qualify(
+        &mut self,
+        ty: TypeId,
+        quals: ast::Quals,
+        span: Span,
+    ) -> TypeId {
+        // `_Atomic` written where a qualifier goes qualifies whatever the declarator arrives at,
+        // and it constructs a type rather than adding a bit to one, which is why it is applied
+        // before the qualifiers rather than beside them.
+        let ty = if quals.has(ast::Quals::ATOMIC) { self.atomic_type(ty, span) } else { ty };
+        let mut result = Qualifiers::NONE;
+        if quals.has(ast::Quals::CONST) {
+            result = result.with(Qualifiers::CONST);
+        }
+        if quals.has(ast::Quals::VOLATILE) {
+            result = result.with(Qualifiers::VOLATILE);
+        }
+        match (quals.has(ast::Quals::SEG_FS), quals.has(ast::Quals::SEG_GS)) {
+            (true, true) => self.report(
+                Diagnostic::error(
+                    "incompatible address space qualifiers '__seg_fs' and '__seg_gs'".to_string(),
+                    span,
+                )
+                .with_code("E0761"),
+            ),
+            (true, false) => result = result.with(Qualifiers::SEG_FS),
+            (false, true) => result = result.with(Qualifiers::SEG_GS),
+            (false, false) => {}
+        }
+        if quals.has(ast::Quals::RESTRICT) {
+            if is_pointer(&self.types, self.types.canonical(ty)) {
+                result = result.with(Qualifiers::RESTRICT);
+            } else {
+                self.report(
+                    Diagnostic::error("invalid use of 'restrict'".to_string(), span)
+                        .with_code("E0528"),
+                );
+            }
+        }
+        self.types.qualified(ty, result)
+    }
+
+    /// Refuses a named address space on an object that has to live in the generic one, which is
+    /// a parameter, a structure member or an automatic variable, in gcc's words.
+    ///
+    /// The object has to be somewhere the compiler put it, and the compiler put it in the frame
+    /// or inside another object, neither of which is in `%gs`. A pointer to one is fine, since
+    /// the qualifier is then on what it points at, and so is a function returning one, since
+    /// what a call returns is a value and lvalue conversion has already dropped it.
+    pub(in crate::check) fn check_space(
+        &mut self,
+        ty: TypeId,
+        name: Option<Symbol>,
+        span: Span,
+        what: &str,
+    ) {
+        if is_function(&self.types, ty) {
+            return;
+        }
+        let Some(space) = space_spelling(self.types.object_quals(ty)) else { return };
+        let message = match name {
+            Some(name) => format!("'{space}' specified for {what} '{}'", self.text(name)),
+            None => format!("'{space}' specified for unnamed {what}"),
+        };
+        self.report(Diagnostic::error(message, span).with_code("E0761"));
+    }
+
+    /// Folds the declarator onto the type the specifiers named.
+    fn derive(
+        &mut self,
+        base: TypeId,
+        declarator: ast::DeclaratorId,
+        subject: Subject,
+        place: Place,
+    ) -> TypeId {
+        // The tree outlives the checker's own borrows, so taking the reference out first is
+        // what lets the loop below call methods that take the checker mutably.
+        let ast = self.ast;
+        let steps = &ast[ast[declarator].derived];
+        let mut ty = base;
+        // A convention written beside a star whose pointee is not a function, with a function
+        // declarator next, which is where gcc passes it on to. See the pointer step.
+        let mut passed_on = None;
+        for (index, step) in steps.iter().enumerate().rev() {
+            // Nearest the name, which is the step a parameter's adjustment applies to and the
+            // only one allowed to write `static` or a qualifier inside its brackets.
+            let nearest = index == 0;
+            ty = match *step {
+                // `const XML_Char *XMLCALL XML_GetBase(XML_Parser)`, which is expat's on 32-bit
+                // x86 with `XMLCALL` as `__attribute__((cdecl))`. The pointer is to a character
+                // and the convention is the function's: gcc's `decl_attributes` hands a
+                // function type attribute on a pointer to anything but a function on to the
+                // function declarator next to it, under `ATTR_FLAG_FUNCTION_NEXT`, and only
+                // warns when there is none.
+                Derived::Pointer { quals, attrs }
+                    if !is_function(&self.types, self.types.canonical(ty))
+                        && index > 0
+                        && matches!(steps[index - 1], Derived::Function { .. }) =>
+                {
+                    passed_on = Some(attrs);
+                    let pointer = self.types.pointer(ty);
+                    self.qualify(pointer, quals, subject.span)
+                }
+                Derived::Pointer { quals, attrs } => {
+                    // `EFI_STATUS (EFIAPI *F)(...)`, where the convention is written beside the
+                    // star and belongs to the function the pointer points at.
+                    let ty = self.convened_pointee(ty, attrs);
+                    let pointer = self.types.pointer(ty);
+                    self.qualify(pointer, quals, subject.span)
+                }
+                Derived::Array { size, quals, has_static } => {
+                    if (!quals.is_none() || has_static) && !(place.parameter && nearest) {
+                        self.report(
+                            Diagnostic::error(
+                                "static or type qualifiers in non-parameter array declarator"
+                                    .to_string(),
+                                subject.span,
+                            )
+                            .with_code("E0540"),
+                        );
+                    }
+                    self.array_of(ty, size, subject, place)
+                }
+                Derived::Function { params, variadic, kind } => {
+                    let function = self.function_of(ty, params, variadic, kind, subject);
+                    match passed_on.take() {
+                        Some(attrs) => self.convened(function, attrs),
+                        None => function,
+                    }
+                }
+            };
+        }
+        ty
+    }
+
+    /// An array of the element type the steps closer to the name arrived at.
+    fn array_of(
+        &mut self,
+        elem: TypeId,
+        size: ArraySize,
+        subject: Subject,
+        place: Place,
+    ) -> TypeId {
+        let canonical = self.types.canonical(elem);
+        let bad = if is_void(&self.types, canonical) {
+            Some(("as array of voids", "E0532"))
+        } else if is_function(&self.types, canonical) {
+            Some(("as array of functions", "E0533"))
+        } else {
+            None
+        };
+        if let Some((what, code)) = bad {
+            let who = self.declaration_of(subject);
+            self.report(Diagnostic::error(format!("{who} {what}"), subject.span).with_code(code));
+            return elem;
+        }
+        // kencc gives an array of a `struct` it has not seen the body of yet, and grap's lex
+        // output declares `extern struct symtab symtab[];` for a `struct` it never defines.
+        let later = self.cx.kencc && is_record(&self.types, canonical);
+        if !later && !is_complete(&self.types, canonical) {
+            let spelled = self.spell(elem);
+            self.report(
+                Diagnostic::error(
+                    format!("array type has incomplete element type '{spelled}'"),
+                    subject.span,
+                )
+                .with_code("E0534"),
+            );
+            return elem;
+        }
+        let len = self.array_len(elem, size, subject, place);
+        self.types.array(elem, len)
+    }
+
+    /// How many elements an array has, which is four different answers and three diagnostics.
+    fn array_len(
+        &mut self,
+        elem: TypeId,
+        size: ArraySize,
+        subject: Subject,
+        place: Place,
+    ) -> ArrayLen {
+        let expr = match size {
+            ArraySize::Unspecified => return ArrayLen::Unknown,
+            ArraySize::Star if place.prototype => return ArrayLen::Star,
+            ArraySize::Star => {
+                self.report(
+                    Diagnostic::error(
+                        "'[*]' not allowed in other than function prototype scope".to_string(),
+                        subject.span,
+                    )
+                    .with_code("E0539"),
+                );
+                return self.refused_size();
+            }
+            ArraySize::Expr(expr) => expr,
+        };
+
+        let value = self.expr(expr);
+        if self.is_poisoned(value) {
+            return self.refused_size();
+        }
+        // As a value, since this is a size and not an object, and because the same node is what
+        // `sizeof` of the array is built out of: the walk to the IR evaluates it once where the
+        // declaration is and answers with that afterwards, which only works if both are it.
+        let value = self.value(value);
+        let span = self.tast.expr_span(value);
+        if !is_integer(&self.types, self.types.canonical(self.tast[value].ty)) {
+            self.report(
+                Diagnostic::error("size of array has non-integer type".to_string(), span)
+                    .with_code("E0535"),
+            );
+            return self.refused_size();
+        }
+
+        // gcc reads a `const` object as its value here under the GNU dialects, so `const int n
+        // = 4; char b[n];` is an array of four rather than a variable length array, and one at
+        // file scope is not refused. See [`crate::Eval::objects`].
+        let mut eval = self.eval().objects(self.cx.gnu);
+        let folded = eval.integer(value);
+        let read_object = eval.read_object();
+        self.absorb(eval.finish());
+        match folded {
+            Ok(count) if count < 0 => {
+                let who = self.array_named(subject);
+                self.report(
+                    Diagnostic::error(format!("size of {who} is negative"), span)
+                        .with_code("E0536"),
+                );
+                self.refused_size()
+            }
+            Ok(count) => {
+                let count = u64::try_from(count).unwrap_or(u64::MAX);
+                if self.too_large(elem, count) {
+                    let who = self.array_named(subject);
+                    let max = self.cx.target.max_object_size();
+                    let message = format!("size of {who} exceeds maximum object size '{max}'");
+                    self.report(Diagnostic::error(message, span).with_code("E0537"));
+                    return self.refused_size();
+                }
+                if read_object && self.cx.pedantic {
+                    // gcc's words, which it says about an array in a body as well as one at file
+                    // scope, since what it is warning about is the size not being a constant in
+                    // the sense ISO C gives the word.
+                    let who = match subject.name {
+                        Some(name) => format!("'{}'", self.text(name)),
+                        None => "type name".to_string(),
+                    };
+                    self.report(
+                        Diagnostic::warning(
+                            format!("variably modified {who} at file scope"),
+                            subject.span,
+                        )
+                        .with_code("E0749"),
+                    );
+                }
+                ArrayLen::Fixed(count)
+            }
+            // A size that is not a constant is a variable length array, which is a type and not
+            // an error, except where there is no run time to evaluate it in.
+            Err(failure) => {
+                if failure.poisoned {
+                    return self.refused_size();
+                }
+                if self.scopes.at_file_scope() {
+                    let who = match subject.name {
+                        Some(name) => format!("'{}'", self.text(name)),
+                        None => "type name".to_string(),
+                    };
+                    self.report(
+                        Diagnostic::error(
+                            format!("variably modified {who} at file scope"),
+                            subject.span,
+                        )
+                        .with_code("E0538"),
+                    );
+                    return self.refused_size();
+                }
+                ArrayLen::Variable(self.tast.add_vla(value))
+            }
+        }
+    }
+
+    /// An array whose size did not check, which is answered with no size and counted.
+    ///
+    /// No size is the nearest type that does check, which is the rule the rest of the builder
+    /// follows, but it is also what `int a[]` is written as, and the two are not the same thing
+    /// anywhere the difference decides something. The count is what tells them apart. It is not
+    /// a flag saying that something went wrong, which `rucc_diag::errors` gives the reasons
+    /// against: it is read across one declarator by whoever is about to make a decision that
+    /// turns on the size having been left out, and a refusal that happened inside that
+    /// declarator is what the reader is asking about.
+    fn refused_size(&mut self) -> ArrayLen {
+        self.refused_sizes += 1;
+        ArrayLen::Unknown
+    }
+
+    /// Whether an array of this many of these does not fit in an object.
+    fn too_large(&self, elem: TypeId, count: u64) -> bool {
+        let Ok(elem) = layout(&self.types, elem, self.cx.target) else {
+            return false;
+        };
+        // A zero sized element is a GNU empty structure, and any number of them is nothing.
+        elem.size != 0 && count > self.cx.target.max_object_size() / elem.size
+    }
+
+    /// A function taking these parameters and returning the type the steps arrived at.
+    fn function_of(
+        &mut self,
+        ret: TypeId,
+        params: ast::ParamList,
+        variadic: bool,
+        kind: ParamKind,
+        subject: Subject,
+    ) -> TypeId {
+        let canonical = self.types.canonical(ret);
+        let bad = if rucc_types::is_array(&self.types, canonical) {
+            Some(("an array", "E0542"))
+        } else if is_function(&self.types, canonical) {
+            Some(("a function", "E0541"))
+        } else {
+            None
+        };
+        let ret = match bad {
+            Some((what, code)) => {
+                let who = self.declared_as(subject);
+                self.report(
+                    Diagnostic::error(format!("{who} as function returning {what}"), subject.span)
+                        .with_code(code),
+                );
+                self.int()
+            }
+            None => ret,
+        };
+
+        let mut written = Vec::new();
+        let (params, prototyped) = match kind {
+            ParamKind::Void => (Vec::new(), true),
+            // `int f()` says nothing about the parameters before C23 and says there are none
+            // from C23 onwards, and which of those it means is visible in every call.
+            ParamKind::Empty => (Vec::new(), self.cx.std >= Std::C23),
+            // An old-style definition's identifier list has no types in it at all. They arrive
+            // in the declarations between the parenthesis and the body, which is the function
+            // definition's business rather than this one's.
+            ParamKind::Identifiers => (Vec::new(), false),
+            ParamKind::Prototype => (self.prototype(params, &mut written), true),
+        };
+        // What the parameters were written as, which the type does not keep and the debug
+        // information for a pointer to it does, the way it does for a declaration.
+        let keep =
+            written.iter().zip(&params).any(|(one, &ty)| one.spelled.is_some() || one.ty != ty);
+        let convention = self.own_convention(variadic);
+        let ty = self.types.function(FunctionType {
+            ret,
+            params,
+            variadic,
+            prototyped,
+            convention,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
+        });
+        if let TypeKind::Function(id) = self.types.kind(ty) {
+            if keep {
+                self.types.record_params_written(id, written.clone());
+            }
+            self.types.record_prototype(id, written);
+        }
+        ty
+    }
+
+    /// Whether a parameter of a prototype was declared with a storage class it may not have.
+    ///
+    /// `register` is the only one 6.7.6.3p2 allows, and `_Thread_local` counts as one of the
+    /// others here, since a parameter has automatic storage and cannot have any other. gcc says
+    /// the same thing for every one of them, `typedef` included, and calls a parameter with no
+    /// name an unnamed one. The type is still built and the parameter still declared, so the body
+    /// is checked as if the storage class had not been written.
+    fn check_parameter_storage(
+        &mut self,
+        specs: ast::DeclSpecsId,
+        name: Option<Symbol>,
+        span: Span,
+    ) {
+        let written = &self.ast[specs];
+        if matches!(written.storage, None | Some(ast::StorageClass::Register))
+            && !written.thread_local
+        {
+            return;
+        }
+        let message = match name {
+            Some(name) => format!("storage class specified for parameter '{}'", self.text(name)),
+            None => "storage class specified for unnamed parameter".to_string(),
+        };
+        self.report(Diagnostic::error(message, span).with_code("E0682"));
+    }
+
+    /// The parameter types of a prototype, adjusted the way a parameter is.
+    ///
+    /// What each parameter was written as goes in `as_written`, one per parameter in order.
+    fn prototype(&mut self, params: ast::ParamList, as_written: &mut Vec<Written>) -> Vec<TypeId> {
+        let ast = self.ast;
+        let list = &ast[params];
+        // A prototype is a scope of its own, which is what makes the `n` in
+        // `void f(int n, int a[n])` mean the parameter and what makes it gone by the next
+        // declaration. A parameter is declared after its own type is built, since a name is not
+        // in scope for the declarator that declares it.
+        self.scopes.push();
+        let mut types = Vec::with_capacity(list.len());
+        let mut declared = Vec::new();
+        for (index, param) in list.iter().enumerate() {
+            let mark = self.types.prototypes_mark();
+            let ty = match param.specs {
+                Some(specs) => {
+                    let ty = self.build_type(
+                        specs,
+                        param.declarator,
+                        Place { parameter: true, member: false, prototype: true },
+                    );
+                    // `hardbool` makes a different type of the one written, on a parameter as
+                    // on a variable, and the call converts to that.
+                    let ty = self.hardened(ty, ast[specs].attrs);
+                    self.hardened(ty, param.attrs)
+                }
+                // An identifier list, which the caller told apart by its kind and which cannot
+                // reach here. Its parameters have no specifiers at all.
+                None => self.int(),
+            };
+            let declarator = ast[param.declarator];
+            let span = if declarator.name.is_some() { declarator.name_span } else { param.span };
+            // One unnamed parameter of type `void` is a list with no parameters, 6.7.6.3p10, also
+            // when a typedef name says `void`. The parser takes only the keyword, since it does
+            // not know what a typedef name stands for. FreeBSD's hptmv driver writes
+            // `MV_VOID f(MV_VOID)` with `typedef void MV_VOID`.
+            if list.len() == 1
+                && declarator.name.is_none()
+                && ast[declarator.derived].is_empty()
+                && self.types.kind(self.types.canonical(ty)) == TypeKind::Void
+                && self.types.quals(self.types.canonical(ty)) == Qualifiers::NONE
+            {
+                self.scopes.pop();
+                if let Some(first) = params.iter().next() {
+                    self.built.params.insert(first, Vec::new());
+                }
+                return Vec::new();
+            }
+            self.check_void_parameter(ty, declarator.name, index, span);
+            // Every check of a parameter's attributes reads the two lists and nothing else, and
+            // nearly every parameter a header declares has nothing in either, so a parameter with
+            // none is not walked through each of them to find that out.
+            let attributed = param
+                .specs
+                .is_some_and(|specs| !ast[specs].attrs.is_empty() || !param.attrs.is_empty());
+            if let Some(specs) = param.specs {
+                self.check_parameter_storage(specs, declarator.name, span);
+            }
+            if let Some(specs) = param.specs.filter(|_| attributed) {
+                self.no_reordered(&[ast[specs].attrs, param.attrs], false);
+                self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
+                self.counted_by_refused(&[ast[specs].attrs, param.attrs], declarator.name);
+                self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
+                self.warn_unused_misplaced(&[ast[specs].attrs, param.attrs], false);
+                self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
+                self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
+                self.shared_section(&[ast[specs].attrs, param.attrs], DeclKind::Type);
+                self.string_arg(&[ast[specs].attrs, param.attrs], ty);
+                self.nonnull_if_nonzero(&[ast[specs].attrs, param.attrs], ty);
+                self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
+                self.musttail_misplaced(&[ast[specs].attrs, param.attrs]);
+            }
+
+            // The type the function has and the type the object has are two different types,
+            // and the difference is the qualifiers. `void f(const int x)` is compatible with
+            // `void f(int x)`, because a `const` there is a promise the function makes to
+            // itself and says nothing to a caller, and inside the body `x = 1` is still an
+            // assignment to a read-only object. So the list gets the adjusted type and the
+            // declaration gets the written one.
+            let adjusted = adjust_parameter(&mut self.types, ty);
+            // Which of the two the object gets is decided by the written type and not by the
+            // declarator, because a `typedef int matrix[2][3];` puts an array parameter there
+            // with no brackets in sight. An array and a function are the adjusted type either
+            // way, since a pointer is what the object is: `sizeof m` inside the body is the
+            // size of a pointer, and a compiler that answers with the array says twenty four.
+            let written = self.types.canonical(ty);
+            let object = if rucc_types::is_array(&self.types, written) {
+                // The qualifiers in `int a[const 3]` are the pointer's, since the array is not
+                // what the parameter has: they were written inside the brackets and belong
+                // outside them. They are the object's alone and never the function type's.
+                match ast[declarator.derived].first() {
+                    Some(&Derived::Array { quals, .. }) => self.qualify(adjusted, quals, span),
+                    _ => adjusted,
+                }
+            } else if is_function(&self.types, written) {
+                adjusted
+            } else {
+                ty
+            };
+            types.push(adjusted);
+
+            // The typedef name the parameter was written with, which the type does not keep and
+            // which a debugger printing the parameter says in place of what the name stands for.
+            // Looked up before the parameter is declared, since `phandle phandle` names the
+            // typedef with its type and hides it with its name.
+            let named = param.specs.and_then(|specs| self.spelled_with(specs));
+            // The adjusted type and not the written one, because that is what the parameter is:
+            // `sizeof a` inside `void f(int a[3])` is the size of a pointer, and a compiler that
+            // declares the array here says twelve.
+            let decl = match declarator.name {
+                // The second of two parameters with one name, which is an error and still an
+                // object the call passes. It goes in the list without the name, since the name
+                // means the first one and the list has to stay as long as the types are.
+                // kencc does not check the names of a prototype, and mothra's panel.h has
+                // `plmenubar(Panel *pl, int, int, Icon *, Panel *pl, Icon *, ...)`.
+                Some(name) if self.scopes.lookup_here(name).is_some() => {
+                    if !self.cx.kencc {
+                        let spelled = self.text(name).to_owned();
+                        self.report(
+                            Diagnostic::error(
+                                format!("redefinition of parameter '{spelled}'"),
+                                span,
+                            )
+                            .with_code("E0545"),
+                        );
+                    }
+                    self.unnamed_object(object, span)
+                }
+                Some(name) => {
+                    let decl = self.declare_object(name, object, span);
+                    let written = param.specs.and_then(|specs| self.ast[specs].storage);
+                    if written == Some(ast::StorageClass::Register) {
+                        self.registers.insert(decl);
+                    }
+                    decl
+                }
+                // C23 6.7.7.4p1 lets a definition leave a parameter unnamed, which gcc has taken
+                // for far longer than that. The object is passed either way and the list is what
+                // says what the function takes and in what order, so a declaration goes in for
+                // it: a list one short of the types is a definition whose entry block cannot be
+                // built, which is what `int f(int a, int) { return a; }` used to be refused as.
+                None => self.unnamed_object(object, span),
+            };
+            // The adjustment above threw the outermost length away, and in `int a[i++]` that
+            // length is an expression with a side effect that the program still performs on
+            // entry to the function. Nothing else can find it once the type is a pointer, so
+            // the type it was written as is kept against the parameter for the walk to evaluate.
+            if let TypeKind::Array { len: ArrayLen::Variable(_), .. } = self.types.kind(written) {
+                self.tast.record_adjustment(decl, written);
+            }
+            if let Some((name, of)) = named {
+                self.tast.record_spelling(decl, name, of);
+            }
+            self.first_spellings.entry(decl).or_insert(named);
+            // A tag can be on a `*` of the declarator as well as in the two lists.
+            let starred = ast[declarator.derived]
+                .iter()
+                .any(|step| matches!(step, Derived::Pointer { attrs, .. } if !attrs.is_empty()));
+            if let Some(specs) = param.specs.filter(|_| attributed || starred) {
+                let mut lists = self.btf_starred_decl_tags(declarator.derived);
+                lists.extend([param.attrs, ast[specs].attrs]);
+                let tags = self.btf_decl_tags(&lists);
+                self.tast.record_btf_decl_tags(decl, tags);
+                let tags = self.btf_type_tags(&ast[specs], declarator.derived, param.attrs, object);
+                self.tast.record_btf_type_tags(decl, tags);
+            }
+            // Copied rather than taken, since they are a part of the declarator this prototype
+            // is in as well.
+            let inner = self.types.prototypes_since(mark);
+            self.tast.record_prototypes(decl, inner);
+            as_written.push(Written { ty: object, spelled: named });
+            declared.push(decl);
+        }
+        let carried = self.scopes.innermost_types();
+        self.scopes.pop();
+        if let Some(first) = params.iter().next() {
+            self.built.params.insert(first, declared);
+            if !carried.0.is_empty() || !carried.1.is_empty() {
+                self.built.param_types.insert(first, carried);
+            }
+        }
+        types
+    }
+
+    /// The parameter types of an old-style definition, read out of the declarations written
+    /// between its identifier list and its body.
+    ///
+    /// This is the one place a parameter is declared in two halves. The identifier list gives the
+    /// names and their order and says nothing about types, 6.7.6.3p14, and the declarations under
+    /// it give the types in whatever order they were written, 6.9.1p6. So the two can disagree in
+    /// every way two lists can, and each of those is a diagnostic gcc has a sentence for.
+    ///
+    /// The objects are stashed the way a prototype's are, so that the definition binds these same
+    /// declarations in its body rather than a second set that happens to share their names.
+    /// Nothing comes back: what the function's parameters are is a separate question, because the
+    /// answer to it is the promoted types and a prototype in scope can overrule even those.
+    pub(in crate::check) fn identifier_list(
+        &mut self,
+        params: ast::ParamList,
+        declarations: ast::DeclList,
+    ) {
+        let names = self.parameter_names(params);
+        // A scope of their own, which closes here, and the body opens another and binds these
+        // same declarations in it. A tag declared under the list is therefore not in reach of the
+        // body, so `int f(a) struct s { int x; } a; { struct s c; }` is an incomplete type in the
+        // body. gcc puts the list and the body in one scope and takes it; clang does what this
+        // does. Nothing can name such a tag from outside anyway, so there is nothing an old file
+        // could be relying on, and putting the two in one scope means opening it before the
+        // function's own name is merged into the scope outside it.
+        self.scopes.push();
+        let mut written = vec![None; names.len()];
+        let ids: Vec<ast::DeclId> = self.ast[declarations].to_vec();
+        for id in ids {
+            self.old_style_declaration(id, &names, &mut written);
+        }
+        let mut declared = Vec::with_capacity(names.len());
+        for (index, &(name, span)) in names.iter().enumerate() {
+            let ty = match written[index] {
+                Some(ty) => ty,
+                None => {
+                    // No declaration for this name, so it is an `int`. C89 said so and gcc still
+                    // takes it in that dialect; every dialect after it removed the rule.
+                    if let Some(severity) = self.cx.promoted(Promoted::ImplicitParam) {
+                        let spelled = self.text(name).to_owned();
+                        self.report(
+                            Diagnostic::new(
+                                severity,
+                                format!("type of '{spelled}' defaults to 'int'"),
+                                span,
+                            )
+                            .with_code("E0526"),
+                        );
+                    }
+                    self.int()
+                }
+            };
+            let object = adjust_parameter(&mut self.types, ty);
+            declared.push(self.declare_object(name, object, span));
+        }
+        self.scopes.pop();
+        if let Some(first) = params.iter().next() {
+            self.built.params.insert(first, declared);
+        }
+    }
+
+    /// The same function type again, taking these parameters.
+    ///
+    /// Still unprototyped, because an identifier list is not a prototype and a call through one
+    /// is not checked against anything, 6.7.6.3p14. What the parameters are there for is the
+    /// comparison against a prototype in 6.7.6.3p15 and the definition's own lowering, which has
+    /// to know what its parameters are to have anywhere to put them.
+    pub(in crate::check) fn function_taking(&mut self, ty: TypeId, params: Vec<TypeId>) -> TypeId {
+        let canonical = self.types.canonical(ty);
+        let TypeKind::Function(id) = self.types.kind(canonical) else {
+            // The declarator did not end in a parameter list after all, which the parser has
+            // already said something about.
+            return ty;
+        };
+        let signature = FunctionType { params, ..self.types.signature(id).clone() };
+        self.types.function(signature)
+    }
+
+    /// The names of an identifier list, in order and with the repeats taken out.
+    fn parameter_names(&mut self, params: ast::ParamList) -> Vec<(Symbol, Span)> {
+        let ast = self.ast;
+        let mut names: Vec<(Symbol, Span)> = Vec::with_capacity(params.len());
+        for param in &ast[params] {
+            let declarator = ast[param.declarator];
+            // The parser only puts a named declarator in an identifier list, since a list of
+            // anything else is a prototype.
+            let Some(name) = declarator.name else { continue };
+            if names.iter().any(|&(seen, _)| seen == name) {
+                let spelled = self.text(name).to_owned();
+                self.report(
+                    Diagnostic::error(
+                        format!("multiple parameters named '{spelled}'"),
+                        declarator.name_span,
+                    )
+                    .with_code("E0545"),
+                );
+                continue;
+            }
+            names.push((name, declarator.name_span));
+        }
+        names
+    }
+
+    /// One of the declarations under an identifier list, giving types to the names it mentions.
+    ///
+    /// A declaration that names no declarator is kept rather than refused, because
+    /// `int f(a) struct s { int x; } a; {}` declares the tag there and the body can use it.
+    fn old_style_declaration(
+        &mut self,
+        id: ast::DeclId,
+        names: &[(Symbol, Span)],
+        written: &mut [Option<TypeId>],
+    ) {
+        let ast::Decl::Var { specs, declarators } = self.ast[id] else {
+            // A `static_assert`, an `asm` or a stray `;`, none of which declares a parameter.
+            // Checked so that whatever is in it is still looked at, and then let alone.
+            self.check_decl(id);
+            return;
+        };
+        if self.ast[declarators].is_empty() {
+            self.declared_specs(specs);
+            return;
+        }
+        for index in 0..declarators.len() {
+            let item = self.ast[declarators][index];
+            let ty = self.build_type(
+                specs,
+                item.declarator,
+                Place { parameter: true, member: false, prototype: false },
+            );
+            let declarator = self.ast[item.declarator];
+            let span = if declarator.name.is_some() { declarator.name_span } else { item.span };
+            let Some(name) = declarator.name else {
+                self.report(
+                    Diagnostic::error("declaration for a parameter with no name".to_string(), span)
+                        .with_code("E0682"),
+                );
+                continue;
+            };
+            let spelled = self.text(name).to_owned();
+            // `register` is the one storage class a parameter may be declared with, 6.9.1p6,
+            // and it says nothing this compiler acts on.
+            if !matches!(self.ast[specs].storage, None | Some(ast::StorageClass::Register)) {
+                self.report(
+                    Diagnostic::error(
+                        format!("storage class specified for parameter '{spelled}'"),
+                        span,
+                    )
+                    .with_code("E0682"),
+                );
+            }
+            if item.init.is_some() {
+                self.report(
+                    Diagnostic::error(format!("parameter '{spelled}' is initialized"), span)
+                        .with_code("E0682"),
+                );
+            }
+            let Some(at) = names.iter().position(|&(seen, _)| seen == name) else {
+                self.report(
+                    Diagnostic::error(
+                        format!("declaration for parameter '{spelled}' but no such parameter"),
+                        span,
+                    )
+                    .with_code("E0682"),
+                );
+                continue;
+            };
+            if written[at].is_some() {
+                self.report(
+                    Diagnostic::error(format!("redefinition of parameter '{spelled}'"), span)
+                        .with_code("E0545"),
+                );
+                continue;
+            }
+            written[at] = Some(ty);
+        }
+    }
+
+    /// The default argument promotions applied to a type, 6.5.2.2p6.
+    ///
+    /// The integer promotions and `float` widened to `double`. This is the type version of what
+    /// [`Checker::default_promote`](crate::check::Checker) does to an argument, and it is here
+    /// because an old-style definition has to say what its parameters are before there is any
+    /// call to promote the arguments of.
+    pub(in crate::check) fn default_promoted(&mut self, ty: TypeId) -> TypeId {
+        let promoted = rucc_types::promote(&mut self.types, ty, self.cx.target);
+        let canonical = self.types.canonical(promoted);
+        if self.types.kind(canonical) == TypeKind::Float(FloatKind::Float) {
+            return self.types.float(FloatKind::Double);
+        }
+        promoted
+    }
+
+    /// The parameters a prototype declared, for the definition that binds them again.
+    ///
+    /// Empty for a list this has not seen, which is every list that is not a prototype.
+    /// The enumerators and the tags that the prototype `params` declared, which a function
+    /// definition declares again in the scope of its body.
+    pub(in crate::check) fn prototype_types(&self, params: ast::ParamList) -> ScopeTypes {
+        params
+            .iter()
+            .next()
+            .and_then(|first| self.built.param_types.get(&first))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(in crate::check) fn prototype_params(&self, params: ast::ParamList) -> Vec<DeclId> {
+        params
+            .iter()
+            .next()
+            .and_then(|first| self.built.params.get(&first))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A parameter declared `void`, which is one thing when it stands alone and two mistakes
+    /// otherwise.
+    fn check_void_parameter(&mut self, ty: TypeId, name: Option<Symbol>, index: usize, span: Span) {
+        if !is_void(&self.types, self.types.canonical(ty)) {
+            return;
+        }
+        let position = index + 1;
+        match name {
+            Some(name) => {
+                let spelled = self.text(name).to_owned();
+                self.report(
+                    Diagnostic::warning(
+                        format!("parameter {position} ('{spelled}') has void type"),
+                        span,
+                    )
+                    .with_code("E0544"),
+                );
+            }
+            // `(void)` on its own is a parameter list and not a parameter, and the parser
+            // already told the two apart, so an unnamed one here has something beside it.
+            None => {
+                self.report(
+                    Diagnostic::error("'void' must be the only parameter".to_string(), span)
+                        .with_code("E0543"),
+                );
+            }
+        }
+    }
+
+    /// `declaration of 'a'`, or the abstract declarator's version of the same phrase.
+    fn declaration_of(&self, subject: Subject) -> String {
+        match subject.name {
+            Some(name) => format!("declaration of '{}'", self.text(name)),
+            None => "declaration of type name".to_string(),
+        }
+    }
+
+    /// `'f' declared`, or the abstract declarator's version.
+    fn declared_as(&self, subject: Subject) -> String {
+        match subject.name {
+            Some(name) => format!("'{}' declared", self.text(name)),
+            None => "type name declared".to_string(),
+        }
+    }
+
+    /// `array 'a'`, or the abstract declarator's version.
+    fn array_named(&self, subject: Subject) -> String {
+        match subject.name {
+            Some(name) => format!("array '{}'", self.text(name)),
+            None => "unnamed array".to_string(),
+        }
+    }
+
+    /// Reports something the type builder does not do yet.
+    fn unsupported_type(&mut self, what: &str, span: Span) {
+        self.report(
+            Diagnostic::error(format!("{what} is not supported yet"), span).with_code("E0519"),
+        );
+    }
+
+    /// `_Complex double`, which is what a `_Complex` that could not be built stands in as.
+    ///
+    /// The keyword on its own means this, so it is the one answer that is never a surprise in a
+    /// message written about the expression the bad declaration is used in.
+    fn complex_double(&mut self) -> TypeId {
+        self.types.complex_float(FloatKind::Double)
+    }
+
+    /// A type the target does not have, which is not the same thing as one not written yet.
+    fn unavailable_type(&mut self, name: &str, span: Span) {
+        self.report(
+            Diagnostic::error(format!("'{name}' is not supported on this target"), span)
+                .with_code("E0589"),
+        );
+    }
+}
+
+/// The integer type a built-in names, if it names one.
+fn int_kind(scalar: Scalar) -> Option<IntKind> {
+    // `bool` is missing on purpose. It is an integer type in C and its own kind here, since it
+    // is the one integer type where the conversion is not a truncation.
+    let kind = match scalar {
+        Scalar::Char => IntKind::Char,
+        Scalar::SignedChar => IntKind::SChar,
+        Scalar::UnsignedChar => IntKind::UChar,
+        Scalar::Short => IntKind::Short,
+        Scalar::UnsignedShort => IntKind::UShort,
+        Scalar::Int => IntKind::Int,
+        Scalar::UnsignedInt => IntKind::UInt,
+        Scalar::Long => IntKind::Long,
+        Scalar::UnsignedLong => IntKind::ULong,
+        Scalar::LongLong => IntKind::LongLong,
+        Scalar::UnsignedLongLong => IntKind::ULongLong,
+        Scalar::Int128 => IntKind::Int128,
+        Scalar::UnsignedInt128 => IntKind::UInt128,
+        _ => return None,
+    };
+    Some(kind)
+}
+
+/// The floating type a built-in names, if the target has it.
+///
+/// The ones that depend on the target are the ones spelled for a format rather than for a rank.
+/// `__float80` is gcc's name for the x87 type and exists only where that type does, and there
+/// it is the same type as `long double` rather than a second one beside it, which is what gcc
+/// makes it and what `_Generic` can be used to see. `_Float128x` is a type no target gcc
+/// supports has at all, which is why it is missing here rather than mapped to something.
+///
+/// `_Float16`, `_Float128` and `_Float64x` are the three the machine decides. Only `float`,
+/// `double`, `long double` and the two interchange types at their widths are on every row, and
+/// the other three come and go with the formats the target has. The fields say which, and they
+/// carry the gcc 13 rows they were measured from.
+fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
+    match scalar {
+        Scalar::Float => Some(FloatKind::Float),
+        Scalar::Double => Some(FloatKind::Double),
+        Scalar::LongDouble => Some(FloatKind::LongDouble),
+        Scalar::Float16 if target.has_float16 => Some(FloatKind::Float16),
+        Scalar::Float32 => Some(FloatKind::Float32),
+        Scalar::Float64 => Some(FloatKind::Float64),
+        Scalar::Float128 if target.has_float128 => Some(FloatKind::Float128),
+        Scalar::Float32x => Some(FloatKind::Float32x),
+        Scalar::Float64x if target.float64x_format.is_some() => Some(FloatKind::Float64x),
+        Scalar::Float80 if target.long_double_format.is_x87() => Some(FloatKind::LongDouble),
+        Scalar::Decimal32 if target.has_decimal_float => Some(FloatKind::Decimal32),
+        Scalar::Decimal64 if target.has_decimal_float => Some(FloatKind::Decimal64),
+        Scalar::Decimal128 if target.has_decimal_float => Some(FloatKind::Decimal128),
+        Scalar::Decimal64x if target.has_decimal_float => Some(FloatKind::Decimal64x),
+        _ => None,
+    }
+}
+
+/// How a built-in type is spelled, for the ones that have no type to be given.
+fn spell_scalar(scalar: Scalar) -> &'static str {
+    match scalar {
+        Scalar::Void => "void",
+        Scalar::Bool => "bool",
+        Scalar::Char => "char",
+        Scalar::SignedChar => "signed char",
+        Scalar::UnsignedChar => "unsigned char",
+        Scalar::Short => "short",
+        Scalar::UnsignedShort => "unsigned short",
+        Scalar::Int => "int",
+        Scalar::UnsignedInt => "unsigned int",
+        Scalar::Long => "long",
+        Scalar::UnsignedLong => "unsigned long",
+        Scalar::LongLong => "long long",
+        Scalar::UnsignedLongLong => "unsigned long long",
+        Scalar::Int128 => "__int128",
+        Scalar::UnsignedInt128 => "unsigned __int128",
+        // Without the width, which is an expression rather than a number until it is checked
+        // and which no message this spells out has room for.
+        Scalar::BitInt { unsigned: false, .. } => "_BitInt",
+        Scalar::BitInt { unsigned: true, .. } => "unsigned _BitInt",
+        Scalar::Float => "float",
+        Scalar::Double => "double",
+        Scalar::LongDouble => "long double",
+        Scalar::Float16 => "_Float16",
+        Scalar::Float32 => "_Float32",
+        Scalar::Float64 => "_Float64",
+        Scalar::Float128 => "_Float128",
+        Scalar::Float32x => "_Float32x",
+        Scalar::Float64x => "_Float64x",
+        Scalar::Float128x => "_Float128x",
+        Scalar::Float80 => "__float80",
+        Scalar::Decimal32 => "_Decimal32",
+        Scalar::Decimal64 => "_Decimal64",
+        Scalar::Decimal128 => "_Decimal128",
+        Scalar::Decimal64x => "_Decimal64x",
+    }
+}
+
+/// The fixture the child module's tests use as well, which is why several of the helpers
+/// below are visible outside this module.
+#[cfg(test)]
+mod tests {
+    use rucc_ast::{Builtin, BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Quals};
+    use rucc_base::Interner;
+    use rucc_lex::{IntConstant, IntConstantType, Remarks};
+    use rucc_target::{TargetInfo, Triple};
+    use rucc_types::{TypeKind, spell};
+
+    use super::*;
+    use crate::check::Context;
+
+    /// The untyped tree a test checks, built by hand.
+    ///
+    /// The same shape as the expression tests next door and for the same reason: the checker
+    /// borrows the interner for as long as it lives, so everything a test needs to name is
+    /// named before the checker exists.
+    pub(super) struct Fixture {
+        pub(super) ast: rucc_ast::Ast,
+        names: Interner,
+        target: TargetInfo,
+    }
+
+    impl Fixture {
+        pub(super) fn new() -> Fixture {
+            Fixture::for_target("x86_64-unknown-linux-gnu")
+        }
+
+        /// The same, for a test whose answer is a property of the target.
+        pub(super) fn for_target(triple: &str) -> Fixture {
+            let target = TargetInfo::new(triple.parse::<Triple>().expect("a triple"));
+            Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
+        }
+
+        /// The same again, for a machine the three field triple cannot spell.
+        pub(super) fn for_tuple(tuple: &str) -> Fixture {
+            let target = TargetInfo::for_tuple(tuple.parse().expect("a row in the target table"));
+            Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
+        }
+
+        pub(super) fn name(&mut self, text: &str) -> Symbol {
+            self.names.intern(text)
+        }
+
+        /// A specifier list naming a built-in type, as the keywords that were written.
+        pub(super) fn keywords(&mut self, written: &[BuiltinSet]) -> DeclSpecsId {
+            let mut builtin = Builtin::NONE;
+            for &keyword in written {
+                builtin = builtin.add(keyword).expect("a keyword written once");
+            }
+            self.specs(TypeSpec::Builtin(builtin), Quals::NONE)
+        }
+
+        /// `int`, which is what most of these declarations are made of.
+        pub(super) fn int_specs(&mut self) -> DeclSpecsId {
+            self.keywords(&[BuiltinSet::INT])
+        }
+
+        pub(super) fn specs(&mut self, ty: TypeSpec, quals: Quals) -> DeclSpecsId {
+            let mut specs = DeclSpecs::empty(Span::DUMMY);
+            specs.ty = ty;
+            specs.quals = quals;
+            self.ast.add_specs(specs)
+        }
+
+        pub(super) fn declarator(
+            &mut self,
+            name: Option<&str>,
+            derived: &[Derived],
+        ) -> DeclaratorId {
+            let name = name.map(|text| self.name(text));
+            let derived = self.ast.add_derived_list(derived);
+            self.ast.add_declarator(Declarator {
+                name,
+                name_span: Span::DUMMY,
+                derived,
+                span: Span::DUMMY,
+            })
+        }
+
+        /// A type name, which is a specifier list and an abstract declarator.
+        pub(super) fn type_name(
+            &mut self,
+            specs: DeclSpecsId,
+            derived: &[Derived],
+        ) -> ast::TypeNameId {
+            let declarator = self.declarator(None, derived);
+            self.ast.add_type_name(ast::TypeName { specs, declarator, span: Span::DUMMY })
+        }
+
+        /// An integer constant, for the array bounds and the `_BitInt` widths.
+        pub(super) fn int(&mut self, value: u128) -> ast::ExprId {
+            let ty = IntConstantType::Standard(IntKind::Int);
+            let id = self.ast.add_int(IntConstant {
+                value,
+                ty,
+                imaginary: false,
+                remarks: Remarks::default(),
+            });
+            self.ast.expr(ast::Expr::Int(id), Span::DUMMY)
+        }
+
+        fn use_name(&mut self, text: &str) -> ast::ExprId {
+            let name = self.name(text);
+            self.ast.expr(ast::Expr::Name(name), Span::DUMMY)
+        }
+
+        pub(super) fn checker(&self) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+        }
+
+        /// The same in another dialect, for the rules C23 changed.
+        pub(super) fn checker_in(&self, std: Std) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, std))
+        }
+
+        /// The same under `-fshort-enums`, which changes what type an enumeration gets.
+        pub(super) fn checker_with_short_enums(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.short_enums = true;
+            Checker::new(&self.ast, cx)
+        }
+
+        /// The same under `-fms-extensions`, which widens what counts as an anonymous member.
+        pub(super) fn checker_with_ms_extensions(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.ms_extensions = true;
+            Checker::new(&self.ast, cx)
+        }
+
+        /// The same under `-pedantic`, which is where what gcc takes but ISO C never wrote down
+        /// is said out loud.
+        pub(super) fn checker_with_pedantic(&self) -> Checker<'_> {
+            let mut cx = Context::new(&self.names, &self.target, Std::C23);
+            cx.pedantic = true;
+            Checker::new(&self.ast, cx)
+        }
+    }
+
+    /// A fixed array bound, which is the common case and three lines every time.
+    fn fixed(fixture: &mut Fixture, count: u128) -> Derived {
+        let size = fixture.int(count);
+        Derived::Array { size: ArraySize::Expr(size), quals: Quals::NONE, has_static: false }
+    }
+
+    /// A pointer with no qualifiers on it.
+    fn pointer() -> Derived {
+        Derived::Pointer { quals: Quals::NONE, attrs: rucc_ast::AttrList::EMPTY }
+    }
+
+    /// `_BitInt(width)`, with `unsigned` written next to it or not.
+    fn bit_int(width: ast::ExprId, unsigned: bool) -> TypeSpec {
+        let mut builtin = Builtin::NONE.add_bit_int(width).expect("`_BitInt` rejected");
+        if unsigned {
+            builtin = builtin.add(BuiltinSet::UNSIGNED).expect("`unsigned` rejected");
+        }
+        TypeSpec::Builtin(builtin)
+    }
+
+    /// How a built type is written, which is what almost every assertion here is about.
+    pub(super) fn spelled(checker: &Checker<'_>, ty: TypeId) -> String {
+        spell(&checker.types, checker.cx.names, ty)
+    }
+
+    /// The type a declaration declares, as it would be written.
+    fn built(checker: &mut Checker<'_>, specs: DeclSpecsId, declarator: DeclaratorId) -> String {
+        let ty = checker.declared_type(specs, declarator);
+        spelled(checker, ty)
+    }
+
+    /// What was reported, as the messages alone.
+    pub(super) fn messages(checker: &Checker<'_>) -> Vec<String> {
+        checker.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
+    }
+
+    /// The one message that was reported, which is what most of these tests expect.
+    pub(super) fn message(checker: &Checker<'_>) -> String {
+        let mut reported = messages(checker);
+        assert_eq!(reported.len(), 1, "expected exactly one diagnostic, got {reported:?}");
+        reported.pop().expect("one message")
+    }
+
+    #[test]
+    fn the_keywords_of_a_specifier_list_name_one_type_between_them() {
+        let mut fixture = Fixture::new();
+        let long = fixture.keywords(&[BuiltinSet::UNSIGNED, BuiltinSet::LONG, BuiltinSet::INT]);
+        let double = fixture.keywords(&[BuiltinSet::LONG, BuiltinSet::DOUBLE]);
+        let void = fixture.keywords(&[BuiltinSet::VOID]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, long, plain), "unsigned long");
+        assert_eq!(built(&mut checker, double, plain), "long double");
+        assert_eq!(built(&mut checker, void, plain), "void");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn each_spelling_of_a_floating_type_names_a_type_of_its_own() {
+        let mut fixture = Fixture::new();
+        let written = [
+            (BuiltinSet::FLOAT16, "_Float16"),
+            (BuiltinSet::FLOAT32, "_Float32"),
+            (BuiltinSet::FLOAT64, "_Float64"),
+            (BuiltinSet::FLOAT128, "_Float128"),
+            (BuiltinSet::FLOAT32X, "_Float32x"),
+            (BuiltinSet::FLOAT64X, "_Float64x"),
+        ];
+        let specs: Vec<_> =
+            written.iter().map(|&(keyword, _)| fixture.keywords(&[keyword])).collect();
+        // `__float80` is gcc's name for the x87 type on the target that has one, and there it
+        // is the same type as `long double` rather than a second type beside it.
+        let float80 = fixture.keywords(&[BuiltinSet::FLOAT80]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        for (specs, expected) in specs.into_iter().zip(written.iter().map(|&(_, name)| name)) {
+            assert_eq!(built(&mut checker, specs, plain), expected);
+        }
+        assert_eq!(built(&mut checker, float80, plain), "long double");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn complex_written_on_its_own_is_a_complex_double() {
+        // gcc's reading of `_Complex x;`, which no edition of C wrote a rule for and which enough
+        // programs use that refusing it is refusing them. `-pedantic` is the only place it is
+        // mentioned, and the words there are gcc's.
+        let mut fixture = Fixture::new();
+        let bare = fixture.keywords(&[BuiltinSet::COMPLEX]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, bare, plain), "_Complex double");
+        assert!(messages(&checker).is_empty());
+
+        let mut pedantic = fixture.checker_with_pedantic();
+        assert_eq!(built(&mut pedantic, bare, plain), "_Complex double");
+        assert_eq!(
+            message(&pedantic),
+            "ISO C does not support plain 'complex' meaning 'double complex'"
+        );
+    }
+
+    #[test]
+    fn a_floating_type_the_target_does_not_have_is_refused_rather_than_given_another_one() {
+        // `_Float128x` is a type no target gcc supports has at all, and `__float80` is one that
+        // only x86 has. gcc turns both of them away in the same words, and the wording is worth
+        // keeping apart from the one for a type this compiler has not written yet: nothing here
+        // is coming later, the machine does not have the type.
+        let mut fixture = Fixture::for_target("aarch64-apple-darwin");
+        let float128x = fixture.keywords(&[BuiltinSet::FLOAT128X]);
+        let float80 = fixture.keywords(&[BuiltinSet::FLOAT80]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        // A `double`, so that the declaration is still a declaration and the uses of the name
+        // that follow are one error rather than one each.
+        assert_eq!(built(&mut checker, float128x, plain), "double");
+        assert_eq!(built(&mut checker, float80, plain), "double");
+        assert_eq!(
+            messages(&checker),
+            [
+                "'_Float128x' is not supported on this target",
+                "'__float80' is not supported on this target",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_named_floating_types_are_refused_on_a_machine_that_has_no_format_for_them() {
+        // armv7 has nothing wider than a `double` and no half precision format either, so gcc
+        // has none of these three types there and says the same sentence about each. The
+        // complex spelling gets the same sentence, because the complexity is not what is wrong.
+        let mut fixture = Fixture::for_tuple("armv7-linux-gnueabihf");
+        let float16 = fixture.keywords(&[BuiltinSet::FLOAT16]);
+        let float128 = fixture.keywords(&[BuiltinSet::FLOAT128]);
+        let float64x = fixture.keywords(&[BuiltinSet::FLOAT64X]);
+        let complex128 = fixture.keywords(&[BuiltinSet::COMPLEX, BuiltinSet::FLOAT128]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, float16, plain), "double");
+        assert_eq!(built(&mut checker, float128, plain), "double");
+        assert_eq!(built(&mut checker, float64x, plain), "double");
+        assert_eq!(built(&mut checker, complex128, plain), "_Complex double");
+        assert_eq!(
+            messages(&checker),
+            [
+                "'_Float16' is not supported on this target",
+                "'_Float128' is not supported on this target",
+                "'_Float64x' is not supported on this target",
+                "'_Float128' is not supported on this target",
+            ]
+        );
+
+        // The interchange types at the two widths every machine has are still there, and so is
+        // `_Float32x`, which is a `double` under another name.
+        let mut fixture = Fixture::for_tuple("armv7-linux-gnueabihf");
+        let kept = [
+            (BuiltinSet::FLOAT32, "_Float32"),
+            (BuiltinSet::FLOAT64, "_Float64"),
+            (BuiltinSet::FLOAT32X, "_Float32x"),
+        ];
+        let specs: Vec<_> = kept.iter().map(|&(keyword, _)| fixture.keywords(&[keyword])).collect();
+        let plain = fixture.declarator(Some("x"), &[]);
+        let mut checker = fixture.checker();
+        for (specs, expected) in specs.into_iter().zip(kept.iter().map(|&(_, name)| name)) {
+            assert_eq!(built(&mut checker, specs, plain), expected);
+        }
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_target_that_has_one_named_type_and_not_the_other_keeps_the_one_it_has() {
+        // s390x has quad precision and no half precision format, as gcc 13 has it. So the two
+        // types part company on this row, and that is the reason they are two target properties
+        // rather than one. i686 was the row before tamnd/rucc#4324 gave it `_Float16`.
+        let mut fixture = Fixture::for_tuple("s390x-linux-gnu");
+        let float16 = fixture.keywords(&[BuiltinSet::FLOAT16]);
+        let float128 = fixture.keywords(&[BuiltinSet::FLOAT128]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, float128, plain), "_Float128");
+        assert_eq!(built(&mut checker, float16, plain), "double");
+        assert_eq!(message(&checker), "'_Float16' is not supported on this target");
+    }
+
+    #[test]
+    fn a_decimal_floating_type_is_a_type_where_the_back_end_has_the_routines_for_it() {
+        let mut fixture = Fixture::for_tuple("x86_64-linux-gnu");
+        let specs = fixture.keywords(&[BuiltinSet::DECIMAL64]);
+        let plain = fixture.declarator(Some("x"), &[]);
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, plain), "_Decimal64");
+        assert!(messages(&checker).is_empty());
+
+        // Anywhere else it is turned away in the words gcc uses on a target it was built
+        // without them for, and stands in as `double`.
+        let mut fixture = Fixture::for_tuple("aarch64-linux-gnu");
+        let specs = fixture.keywords(&[BuiltinSet::DECIMAL64]);
+        let plain = fixture.declarator(Some("x"), &[]);
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, plain), "double");
+        assert_eq!(message(&checker), "decimal floating-point not supported for this target");
+    }
+
+    #[test]
+    fn keywords_that_name_no_type_between_them_are_one_message_and_not_one_per_keyword() {
+        let mut fixture = Fixture::new();
+        // `short double`, which gcc reports once at the specifier list rather than at the
+        // keyword, because the keyword that was wrong depends on which one was meant. It names
+        // the pair, since `short` changes a type rather than naming one.
+        let specs = fixture.keywords(&[BuiltinSet::SHORT, BuiltinSet::DOUBLE]);
+        let plain = fixture.declarator(Some("x"), &[]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, plain);
+        assert_eq!(spelled(&checker, ty), "int");
+        assert_eq!(message(&checker), "both 'short' and 'double' in declaration specifiers");
+
+        // Two keywords that each name a type are the other message.
+        let specs = fixture.keywords(&[BuiltinSet::INT, BuiltinSet::CHAR]);
+        let plain = fixture.declarator(Some("y"), &[]);
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, plain);
+        assert_eq!(message(&checker), "two or more data types in declaration specifiers");
+    }
+
+    #[test]
+    fn a_declaration_with_no_type_at_all_is_an_int_and_a_warning_that_says_whose() {
+        let mut fixture = Fixture::new();
+        // Two declarations rather than two declarators of one, since the specifiers of one
+        // declaration are read once however many names it declares.
+        let specs = fixture.specs(TypeSpec::None, Quals::CONST);
+        let again = fixture.specs(TypeSpec::None, Quals::NONE);
+        let named = fixture.declarator(Some("x"), &[]);
+        let abstracted = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, named);
+        assert_eq!(spelled(&checker, ty), "const int");
+        checker.declared_type(again, abstracted);
+        assert_eq!(
+            messages(&checker),
+            ["type defaults to 'int' in declaration of 'x'", "type defaults to 'int'"]
+        );
+    }
+
+    #[test]
+    fn a_declarator_is_folded_from_the_far_end_so_the_step_nearest_the_name_wins() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let char_specs = fixture.keywords(&[BuiltinSet::CHAR]);
+        let parameter = fixture.declarator(None, &[]);
+        let params = fixture.ast.add_param_list(&[ast::Param {
+            specs: Some(char_specs),
+            declarator: parameter,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        }]);
+        // `int (*f[3])(char)`: an array of three pointers to functions, which is the order the
+        // derivations are written in and the reverse of the order they are applied.
+        let three = fixed(&mut fixture, 3);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[three, pointer(), call]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int (*[3])(char)");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn the_qualifiers_of_a_pointer_are_the_pointers_and_not_the_pointees() {
+        let mut fixture = Fixture::new();
+        let konst = fixture.specs(
+            TypeSpec::Builtin(Builtin::NONE.add(BuiltinSet::INT).expect("int")),
+            Quals::CONST,
+        );
+        let plain = fixture.int_specs();
+        // `const int *p`, which is a pointer to a constant.
+        let to_const = fixture.declarator(Some("p"), &[pointer()]);
+        // `int *const p`, which is a constant pointer.
+        let const_pointer = fixture.declarator(
+            Some("p"),
+            &[Derived::Pointer { quals: Quals::CONST, attrs: rucc_ast::AttrList::EMPTY }],
+        );
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, konst, to_const), "const int *");
+        assert_eq!(built(&mut checker, plain, const_pointer), "int *const");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn restrict_is_only_for_a_pointer_and_says_so_where_it_is_not() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.specs(TypeSpec::None, Quals::RESTRICT);
+        let plain = fixture.declarator(Some("x"), &[]);
+        let restricted =
+            Derived::Pointer { quals: Quals::RESTRICT, attrs: rucc_ast::AttrList::EMPTY };
+        let int_specs = fixture.int_specs();
+        let p = fixture.declarator(Some("p"), &[restricted]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, int_specs, p), "int *restrict");
+        checker.declared_type(specs, plain);
+        assert!(
+            messages(&checker).contains(&"invalid use of 'restrict'".to_string()),
+            "got {:?}",
+            messages(&checker)
+        );
+    }
+
+    #[test]
+    fn an_array_of_something_there_can_be_no_array_of_says_which_it_was() {
+        let mut fixture = Fixture::new();
+        let void = fixture.keywords(&[BuiltinSet::VOID]);
+        let int = fixture.int_specs();
+        let three = fixed(&mut fixture, 3);
+        let params = fixture.ast.add_param_list(&[]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Void };
+
+        let voids = fixture.declarator(Some("a"), &[three]);
+        let functions = fixture.declarator(Some("a"), &[three, call]);
+        let anonymous = fixture.declarator(None, &[three]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(void, voids);
+        checker.declared_type(int, functions);
+        checker.declared_type(void, anonymous);
+        assert_eq!(
+            messages(&checker),
+            [
+                "declaration of 'a' as array of voids",
+                "declaration of 'a' as array of functions",
+                "declaration of type name as array of voids",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_array_of_a_tag_that_has_no_definition_yet_names_the_type_it_cannot_size() {
+        let mut fixture = Fixture::new();
+        let tag = fixture.name("S");
+        let specs = fixture.specs(
+            TypeSpec::Record {
+                kind: ast::RecordKind::Struct,
+                tag: Some(tag),
+                fields: None,
+                attrs: rucc_ast::AttrList::EMPTY,
+                pragmas: ast::RecordPragmas::NONE,
+            },
+            Quals::NONE,
+        );
+        let three = fixed(&mut fixture, 3);
+        let array = fixture.declarator(Some("a"), &[three]);
+        let star = fixture.declarator(Some("p"), &[pointer()]);
+
+        let mut checker = fixture.checker();
+        // A pointer to an incomplete type is perfectly ordinary, and both mentions of the tag
+        // are the same type, which is what makes the pointer usable once the definition lands.
+        let pointer_ty = checker.declared_type(specs, star);
+        assert_eq!(spelled(&checker, pointer_ty), "struct S *");
+        checker.declared_type(specs, array);
+        assert_eq!(message(&checker), "array type has incomplete element type 'struct S'");
+    }
+
+    #[test]
+    fn an_array_bound_is_folded_and_a_negative_one_is_refused() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let zero = fixed(&mut fixture, 0);
+        let four = fixed(&mut fixture, 4);
+        let negative = {
+            let one = fixture.int(1);
+            let size = fixture
+                .ast
+                .expr(ast::Expr::Unary { op: rucc_ast::UnaryOp::Minus, operand: one }, Span::DUMMY);
+            Derived::Array { size: ArraySize::Expr(size), quals: Quals::NONE, has_static: false }
+        };
+        let sized = fixture.declarator(Some("a"), &[four]);
+        // `int a[0]`, which gcc accepts in silence as an extension and which a great deal of
+        // real code uses as a flexible array member before C99 gave it a spelling.
+        let empty = fixture.declarator(Some("a"), &[zero]);
+        let unspecified = fixture.declarator(
+            Some("a"),
+            &[Derived::Array {
+                size: ArraySize::Unspecified,
+                quals: Quals::NONE,
+                has_static: false,
+            }],
+        );
+        let backwards = fixture.declarator(Some("a"), &[negative]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, sized), "int[4]");
+        assert_eq!(built(&mut checker, specs, empty), "int[0]");
+        assert_eq!(built(&mut checker, specs, unspecified), "int[]");
+        assert!(messages(&checker).is_empty());
+
+        checker.declared_type(specs, backwards);
+        assert_eq!(message(&checker), "size of array 'a' is negative");
+    }
+
+    #[test]
+    fn an_array_too_large_to_be_an_object_is_measured_in_its_elements() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        // Four times this is one element past the largest object, and the count on its own is
+        // not, which is what makes the check about the element type and not about the bound.
+        let count = u128::from(fixture.target.max_object_size() / 4 + 1);
+        let huge = fixed(&mut fixture, count);
+        let a = fixture.declarator(Some("a"), &[huge]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, a);
+        assert_eq!(
+            message(&checker),
+            "size of array 'a' exceeds maximum object size '9223372036854775807'"
+        );
+    }
+
+    #[test]
+    fn a_bound_that_is_not_a_constant_is_a_variable_length_array_where_there_is_a_run_time() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let n = fixture.use_name("n");
+        let variable =
+            Derived::Array { size: ArraySize::Expr(n), quals: Quals::NONE, has_static: false };
+        let a = fixture.declarator(Some("a"), &[variable]);
+        let name = fixture.name("n");
+
+        let mut checker = fixture.checker();
+        let int = checker.int();
+        checker.declare_object(name, int, Span::DUMMY);
+        // At file scope there is nothing to evaluate the bound in, which is the error gcc
+        // gives, and the type is not built rather than built wrong.
+        checker.declared_type(specs, a);
+        assert_eq!(message(&checker), "variably modified 'a' at file scope");
+
+        checker.scopes.push();
+        let ty = checker.declared_type(specs, a);
+        assert_eq!(spelled(&checker, ty), "int[*]");
+        // Two arrays written the same way are still two types, because the two bounds are
+        // evaluated at two different moments and may not agree.
+        let again = checker.declared_type(specs, a);
+        assert_ne!(ty, again);
+        assert_eq!(
+            checker.tast.vla_size(vla_id(&checker, ty)),
+            checker.tast.vla_size(vla_id(&checker, ty))
+        );
+    }
+
+    /// The identity of the variable length array a type is, which the assertions above want.
+    fn vla_id(checker: &Checker<'_>, ty: TypeId) -> rucc_types::VlaId {
+        match checker.types.kind(checker.types.canonical(ty)) {
+            TypeKind::Array { len: ArrayLen::Variable(id), .. } => id,
+            other => panic!("expected a variable length array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_star_bound_is_only_a_type_inside_a_prototype() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let star = Derived::Array { size: ArraySize::Star, quals: Quals::NONE, has_static: false };
+        let parameter = fixture.declarator(Some("a"), &[star]);
+        let params = fixture.ast.add_param_list(&[ast::Param {
+            specs: Some(specs),
+            declarator: parameter,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        }]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        // Inside the prototype it is a type, and the parameter it is on is adjusted to a
+        // pointer the same way any other array parameter is.
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int(int *)");
+        assert!(messages(&checker).is_empty());
+
+        checker.declared_type(specs, parameter);
+        assert_eq!(message(&checker), "'[*]' not allowed in other than function prototype scope");
+    }
+
+    #[test]
+    fn a_deduced_type_on_a_parameter_names_nothing_and_says_where_it_was_written() {
+        let mut fixture = Fixture::new();
+        // A parameter has no initializer to deduce from, so there is nothing here for either
+        // spelling to mean and the parameter is an `int` so that the rest is still checked.
+        let specs = fixture.int_specs();
+        let deduced = fixture.specs(TypeSpec::Auto(ast::Deduction::Auto), Quals::NONE);
+        let parameter = fixture.declarator(Some("p"), &[]);
+        let params = fixture.ast.add_param_list(&[ast::Param {
+            specs: Some(deduced),
+            declarator: parameter,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        }]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int(int)");
+        assert_eq!(message(&checker), "'auto' not allowed in function prototype");
+    }
+
+    #[test]
+    fn the_qualifiers_inside_a_parameters_brackets_are_the_object_s_and_not_the_type_s() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let three = fixture.int(3);
+        let qualified =
+            Derived::Array { size: ArraySize::Expr(three), quals: Quals::CONST, has_static: true };
+        let parameter = fixture.declarator(Some("a"), &[qualified]);
+        let params = fixture.ast.add_param_list(&[ast::Param {
+            specs: Some(specs),
+            declarator: parameter,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        }]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        // `void f(int a[static const 3])`. The object `a` is an `int *const` and the function
+        // takes an `int *`, because a qualifier on a parameter is dropped from the type: gcc
+        // matches this declaration against `void f(int *)` and answers a `_Generic` the same
+        // way. What the qualifier does reach is the body, where `a = 0` is an assignment to a
+        // read-only object, and the declaration the body binds is checked in `decl.rs`.
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int(int *)");
+        assert!(messages(&checker).is_empty());
+
+        // The same brackets on something that is not a parameter mean nothing at all.
+        checker.declared_type(specs, parameter);
+        assert_eq!(
+            message(&checker),
+            "static or type qualifiers in non-parameter array declarator"
+        );
+    }
+
+    #[test]
+    fn a_function_cannot_return_a_function_or_an_array_and_the_message_names_which() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let params = fixture.ast.add_param_list(&[]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Void };
+        let three = fixed(&mut fixture, 3);
+
+        let returns_function = fixture.declarator(Some("f"), &[call, call]);
+        let returns_array = fixture.declarator(Some("f"), &[call, three]);
+        let anonymous = fixture.declarator(None, &[call, three]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, returns_function);
+        checker.declared_type(specs, returns_array);
+        checker.declared_type(specs, anonymous);
+        assert_eq!(
+            messages(&checker),
+            [
+                "'f' declared as function returning a function",
+                "'f' declared as function returning an array",
+                "type name declared as function returning an array",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_parameter_list_says_nothing_before_c23_and_says_none_from_it() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let params = fixture.ast.add_param_list(&[]);
+        let empty = Derived::Function { params, variadic: false, kind: ParamKind::Empty };
+        let f = fixture.declarator(Some("f"), &[empty]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, f), "int(void)");
+
+        let mut old = fixture.checker();
+        old.cx.std = Std::C17;
+        assert_eq!(built(&mut old, specs, f), "int()");
+        assert!(messages(&old).is_empty());
+    }
+
+    #[test]
+    fn a_parameter_of_type_void_is_only_a_parameter_list_when_it_is_the_whole_of_one() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let void = fixture.keywords(&[BuiltinSet::VOID]);
+        let named = fixture.declarator(Some("v"), &[]);
+        let unnamed = fixture.declarator(None, &[]);
+        let param = |declarator| ast::Param {
+            specs: Some(void),
+            declarator,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        };
+        let params = fixture.ast.add_param_list(&[param(named), param(unnamed)]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(int, f);
+        assert_eq!(
+            messages(&checker),
+            ["parameter 1 ('v') has void type", "'void' must be the only parameter"]
+        );
+    }
+
+    #[test]
+    fn one_unnamed_void_parameter_in_a_prototype_is_a_list_with_no_parameters() {
+        // The parser makes a prototype of `(T)` when `T` is a typedef name for `void`, since it
+        // does not know what the name stands for. The list is still `(void)`.
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let void = fixture.keywords(&[BuiltinSet::VOID]);
+        let unnamed = fixture.declarator(None, &[]);
+        let param = ast::Param {
+            specs: Some(void),
+            declarator: unnamed,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        };
+        let params = fixture.ast.add_param_list(&[param]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, int, f), "int(void)");
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+    }
+
+    #[test]
+    fn a_parameter_is_in_scope_for_the_parameters_after_it_and_gone_after_the_prototype() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let n = fixture.declarator(Some("n"), &[]);
+        let bound = fixture.use_name("n");
+        let a = fixture.declarator(
+            Some("a"),
+            &[Derived::Array {
+                size: ArraySize::Expr(bound),
+                quals: Quals::NONE,
+                has_static: false,
+            }],
+        );
+        let param = |declarator| ast::Param {
+            specs: Some(specs),
+            declarator,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        };
+        let params = fixture.ast.add_param_list(&[param(n), param(a)]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+        let name = fixture.name("n");
+
+        let mut checker = fixture.checker();
+        // A prototype is a scope of its own, so the `n` in the bound is the parameter and the
+        // whole thing is a prototype rather than a use of an undeclared name.
+        let ty = checker.declared_type(specs, f);
+        assert_eq!(spelled(&checker, ty), "int(int, int *)");
+        assert!(messages(&checker).is_empty());
+        assert!(checker.scopes.lookup(name).is_none());
+    }
+
+    #[test]
+    fn a_parameter_declared_twice_in_one_prototype_is_reported_once() {
+        let mut fixture = Fixture::new();
+        let specs = fixture.int_specs();
+        let a = fixture.declarator(Some("a"), &[]);
+        let param = ast::Param {
+            specs: Some(specs),
+            declarator: a,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        };
+        let params = fixture.ast.add_param_list(&[param, param]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, f);
+        assert_eq!(message(&checker), "redefinition of parameter 'a'");
+    }
+
+    #[test]
+    fn a_tag_names_the_same_type_every_time_and_one_kind_of_thing_only() {
+        let mut fixture = Fixture::new();
+        let tag = fixture.name("S");
+        let record = |kind| TypeSpec::Record {
+            kind,
+            tag: Some(tag),
+            fields: None,
+            attrs: rucc_ast::AttrList::EMPTY,
+            pragmas: ast::RecordPragmas::NONE,
+        };
+        let structure = fixture.specs(record(ast::RecordKind::Struct), Quals::NONE);
+        let onion = fixture.specs(record(ast::RecordKind::Union), Quals::NONE);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        let first = checker.declared_type(structure, plain);
+        let second = checker.declared_type(structure, plain);
+        assert_eq!(first, second);
+        assert!(messages(&checker).is_empty());
+
+        let wrong = checker.declared_type(onion, plain);
+        assert_eq!(message(&checker), "'S' defined as wrong kind of tag");
+        // The tag keeps meaning what it did, so the declarations after this one are checked
+        // against the definition that is there rather than against a second one.
+        assert_ne!(wrong, first);
+        assert_eq!(checker.declared_type(structure, plain), first);
+    }
+
+    #[test]
+    fn an_anonymous_tag_is_a_new_type_every_time_it_is_written() {
+        let mut fixture = Fixture::new();
+        let anonymous = |fixture: &mut Fixture| {
+            fixture.specs(
+                TypeSpec::Record {
+                    kind: ast::RecordKind::Struct,
+                    tag: None,
+                    fields: None,
+                    attrs: rucc_ast::AttrList::EMPTY,
+                    pragmas: ast::RecordPragmas::NONE,
+                },
+                Quals::NONE,
+            )
+        };
+        let specs = anonymous(&mut fixture);
+        let written_again = anonymous(&mut fixture);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        let first = checker.declared_type(specs, plain);
+        let second = checker.declared_type(written_again, plain);
+        assert_ne!(first, second);
+        // And one that was written once is one type however many names it declares, which is
+        // what makes `struct { int x; } a, b;` two objects of the same type.
+        assert_eq!(checker.declared_type(specs, plain), first);
+    }
+
+    #[test]
+    fn an_enumeration_with_the_underlying_type_written_is_complete_from_there() {
+        let mut fixture = Fixture::new();
+        let long = fixture.keywords(&[BuiltinSet::LONG]);
+        let long_name = fixture.type_name(long, &[]);
+        let tag = fixture.name("E");
+        let fixed_enum = fixture.specs(
+            TypeSpec::Enum {
+                tag: Some(tag),
+                enumerators: None,
+                underlying: Some(long_name),
+                attrs: rucc_ast::AttrList::EMPTY,
+            },
+            Quals::NONE,
+        );
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(fixed_enum, plain);
+        assert_eq!(spelled(&checker, ty), "enum E");
+        assert!(is_complete(&checker.types, ty));
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn an_enumeration_cannot_be_kept_in_something_that_is_not_an_integer_type() {
+        let mut fixture = Fixture::new();
+        let double = fixture.keywords(&[BuiltinSet::DOUBLE]);
+        let double_name = fixture.type_name(double, &[]);
+        let specs = fixture.specs(
+            TypeSpec::Enum {
+                tag: None,
+                enumerators: None,
+                underlying: Some(double_name),
+                attrs: rucc_ast::AttrList::EMPTY,
+            },
+            Quals::NONE,
+        );
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, plain);
+        assert_eq!(message(&checker), "invalid 'enum' underlying type");
+    }
+
+    #[test]
+    fn vector_size_on_a_type_name_builds_the_vector_a_declaration_would() {
+        let mut fixture = Fixture::new();
+        let size = fixture.int(8);
+        let args = fixture.ast.add_attr_args(&[rucc_ast::AttrArg::Expr(size)]);
+        let name = fixture.name("vector_size");
+        let attrs = fixture.ast.add_attr_list(&[rucc_ast::Attribute {
+            namespace: None,
+            name,
+            args,
+            syntax: rucc_ast::AttrSyntax::Gnu,
+            span: Span::DUMMY,
+        }]);
+        let mut specs = DeclSpecs::empty(Span::DUMMY);
+        specs.ty = TypeSpec::Builtin(Builtin::NONE.add(BuiltinSet::INT).expect("int"));
+        specs.attrs = attrs;
+        let specs = fixture.ast.add_specs(specs);
+        let vector = fixture.type_name(specs, &[]);
+
+        let mut checker = fixture.checker();
+        let ty = checker.type_name(vector);
+
+        // A cast and a compound literal are the two places the attribute is written on a type
+        // name rather than on a declaration, which is what a macro taking a lane type and a lane
+        // count expands to. Reading it only in a declaration leaves those two naming the lane.
+        assert_eq!(spelled(&checker, ty), "__vector(2) int");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn atomic_is_a_type_and_not_a_qualifier_and_two_things_cannot_be_one() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let konst = fixture.specs(
+            TypeSpec::Builtin(Builtin::NONE.add(BuiltinSet::INT).expect("int")),
+            Quals::CONST,
+        );
+        let plain_name = fixture.type_name(int, &[]);
+        let three = fixed(&mut fixture, 3);
+        let array_name = fixture.type_name(int, &[three]);
+        let params = fixture.ast.add_param_list(&[]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Void };
+        let function_name = fixture.type_name(int, &[call]);
+        let const_name = fixture.type_name(konst, &[]);
+
+        let atomic = |fixture: &mut Fixture, name| {
+            let specs = fixture.specs(TypeSpec::Atomic(name), Quals::NONE);
+            let declarator = fixture.declarator(None, &[]);
+            (specs, declarator)
+        };
+        let (plain, hole) = atomic(&mut fixture, plain_name);
+        let (array, _) = atomic(&mut fixture, array_name);
+        let (function, _) = atomic(&mut fixture, function_name);
+        let (qualified, _) = atomic(&mut fixture, const_name);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, plain, hole), "_Atomic(int)");
+        assert!(messages(&checker).is_empty());
+
+        checker.declared_type(array, hole);
+        checker.declared_type(function, hole);
+        checker.declared_type(qualified, hole);
+        assert_eq!(
+            messages(&checker),
+            [
+                "'_Atomic'-qualified array type",
+                "'_Atomic'-qualified function type",
+                "'_Atomic' applied to a qualified type",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bit_int_is_as_wide_as_it_says_within_the_range_there_is() {
+        let mut fixture = Fixture::new();
+        let widths = [37, 1, 65536, 0];
+        let specs: Vec<_> = widths
+            .iter()
+            .map(|&width| {
+                let expr = fixture.int(width);
+                fixture.specs(bit_int(expr, false), Quals::NONE)
+            })
+            .collect();
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs[0], plain), "_BitInt(37)");
+        assert!(messages(&checker).is_empty());
+
+        checker.declared_type(specs[1], plain);
+        checker.declared_type(specs[2], plain);
+        checker.declared_type(specs[3], plain);
+        assert_eq!(
+            messages(&checker),
+            [
+                "'signed _BitInt' argument must be at least 2",
+                "'_BitInt' argument '65536' is larger than 'BITINT_MAXWIDTH' '65535'",
+                "'_BitInt' argument '0' is not a positive integer constant expression",
+            ]
+        );
+    }
+
+    /// gcc's 65535 is the widest on x86-64, AArch64 and i386, where the back end computes a limb
+    /// at a time, and 128 stays the widest on a target whose back end does not.
+    #[test]
+    fn a_bit_int_reaches_gcc_s_widest_where_the_back_end_computes_a_limb_at_a_time() {
+        for (triple, widest, wider) in [
+            ("x86_64-unknown-freebsd15.1", 65535, 65536),
+            ("aarch64-unknown-linux-gnu", 65535, 65536),
+            ("i386-unknown-freebsd15.1", 65535, 65536),
+            ("riscv64-unknown-linux-gnu", 128, 129),
+        ] {
+            let mut fixture = Fixture::for_target(triple);
+            let fits = fixture.int(widest);
+            let fits = fixture.specs(bit_int(fits, false), Quals::NONE);
+            let over = fixture.int(wider);
+            let over = fixture.specs(bit_int(over, false), Quals::NONE);
+            let plain = fixture.declarator(None, &[]);
+            let mut checker = fixture.checker();
+            assert_eq!(built(&mut checker, fits, plain), format!("_BitInt({widest})"), "{triple}");
+            assert!(messages(&checker).is_empty(), "{triple}");
+            checker.declared_type(over, plain);
+            assert_eq!(
+                messages(&checker),
+                [format!(
+                    "'_BitInt' argument '{wider}' is larger than 'BITINT_MAXWIDTH' '{widest}'"
+                )],
+                "{triple}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsigned_bit_int_holds_one_bit_where_a_signed_one_cannot() {
+        let mut fixture = Fixture::new();
+        let one = fixture.int(1);
+        let unsigned = fixture.specs(bit_int(one, true), Quals::NONE);
+        let eight = fixture.int(8);
+        let wide = fixture.specs(bit_int(eight, true), Quals::NONE);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, unsigned, plain), "unsigned _BitInt(1)");
+        assert_eq!(built(&mut checker, wide, plain), "unsigned _BitInt(8)");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_bit_int_next_to_anything_but_a_sign_names_no_type() {
+        let mut fixture = Fixture::new();
+        let width = fixture.int(8);
+        let mut both = Builtin::NONE.add(BuiltinSet::LONG).expect("`long` rejected");
+        both = both.add_bit_int(width).expect("`_BitInt` rejected");
+        let specs = fixture.specs(TypeSpec::Builtin(both), Quals::NONE);
+        let plain = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, plain);
+        assert_eq!(messages(&checker), ["both 'long' and '_BitInt' in declaration specifiers"]);
+    }
+
+    #[test]
+    fn a_typedef_name_is_the_type_it_was_declared_for_and_keeps_its_own_spelling() {
+        let mut fixture = Fixture::new();
+        let word = fixture.name("word");
+        let specs = fixture.specs(TypeSpec::Typedef(word), Quals::CONST);
+        let p = fixture.declarator(Some("p"), &[pointer()]);
+
+        let mut checker = fixture.checker();
+        let long = checker.types.int(IntKind::Long);
+        let alias = checker.types.typedef(word, long);
+        checker.declare_typedef(word, alias);
+
+        let ty = checker.declared_type(specs, p);
+        assert_eq!(spelled(&checker, ty), "const word *");
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn typeof_takes_the_type_of_an_expression_it_does_not_evaluate() {
+        let mut fixture = Fixture::new();
+        let x = fixture.use_name("x");
+        let plain = fixture
+            .specs(TypeSpec::Typeof { unqual: false, operand: TypeofArg::Expr(x) }, Quals::NONE);
+        let bare = fixture
+            .specs(TypeSpec::Typeof { unqual: true, operand: TypeofArg::Expr(x) }, Quals::NONE);
+        let hole = fixture.declarator(None, &[]);
+        let name = fixture.name("x");
+
+        let mut checker = fixture.checker();
+        let int = checker.int();
+        let konst = checker.types.qualified(int, Qualifiers::CONST);
+        checker.declare_object(name, konst, Span::DUMMY);
+
+        assert_eq!(built(&mut checker, plain, hole), "const int");
+        // `typeof_unqual` is the one that takes them off, which is what makes it worth having.
+        assert_eq!(built(&mut checker, bare, hole), "int");
+        assert!(messages(&checker).is_empty());
+    }
+}

@@ -1,0 +1,2396 @@
+//! Moves a computation whose operands do not change in a loop to the block in front of it.
+//!
+//! Design: `spec/optimizer/27-licm.md`, with 27.1 for the legality answer, 27.2 for the cost, 27.5
+//! for what is built and 27.6 for the ways it is wrong.
+//!
+//! The oldest loop optimization and the one whose interesting part is not the move. Taking an
+//! instruction out of a block and putting it in another is a dozen lines. The three questions in
+//! front of it are the pass.
+//!
+//! # Invariance is one walk, because the IR is in SSA
+//!
+//! A value does not change in a loop when what defines it is outside the loop, or when everything
+//! it reads does not change. The second clause looks like a fixpoint and is not: a definition
+//! dominates its uses, so walking the loop's blocks in reverse postorder reaches every definition
+//! before every use of it, and one pass gives the transitive answer.
+//!
+//! Memory is the part section 27.5 says needs a fixpoint, and what this does instead is ask a
+//! smaller question. The IR can thread memory through the instructions that touch it as an operand
+//! of type `mem`, and where it does, a load whose memory operand is defined outside the loop is a
+//! load nothing in the loop wrote before, which the same operand walk settles with nothing added.
+//! Where it does not, and none of the pipelines this pass runs in do, a load has only its address
+//! for an operand and an unchanging address says nothing at all about what is behind it.
+//!
+//! So a load in a loop that writes memory anywhere is left where it is. Not because it is not
+//! invariant, but because nothing here can tell. That is coarse and it is honest, and the two ways
+//! out of it are the same one: give the pass the memory chain, or give it the module so it can ask
+//! [`crate::alias`]. A load in a loop that writes nothing is invariant on the address alone, and
+//! that is most of the loops that read a global in the first place.
+//!
+//! # The three way answer, and why header copying comes first
+//!
+//! Section 27.1's enum: a store or a call may not move at all, pure arithmetic may move anywhere,
+//! and in between are the instructions that are fine to move as long as they were going to run.
+//! A load faults on a bad address and a division traps on a zero divisor, so moving one in front of
+//! a loop that runs zero times is a program that crashes where the original returned.
+//!
+//! What settles it is [`crate::PostDominators`]: an instruction in a block the header cannot get
+//! past without entering runs on every entry to the loop, so working it out in front of the loop is
+//! working it out exactly when it was going to be worked out anyway. In an unrotated `while` the
+//! only such block is the header itself. In the `do-while` that [`crate::header_copy`] leaves, it
+//! is the whole body. That is section 27.1's point made concrete: **header copying is a
+//! prerequisite for this pass being useful, not a separate nicety.**
+//!
+//! Post-dominance is only half of that, and the other half is what the instructions in front do.
+//! A block the header cannot get past is still a block the program never arrives at if something
+//! on the way stops it, and a call is the thing that stops it: a callee may exit, may loop forever
+//! or may jump out, and what a call does comes from the module, which a pass holding one function
+//! does not have. So a call ends the guarantee for everything behind it in the same turn round the
+//! loop, and so does a trapping instruction, for the same reason from the other side. That is
+//! `goes_on`, and `gcc.c-torture/execute/pr38819.c` is the program that says why: its loop body
+//! calls a function that calls `exit` and then divides by zero, so a pass that asked only about
+//! post-dominance would hoist the division and crash a program that returns.
+//!
+//! An infinite loop is the exception, and it is why the fake exits are consulted. Post-dominance
+//! over a loop with no way out is answered against an edge document 06.8's analysis invented, so a
+//! block that post-dominates the header there might still be one an infinite path avoids. This
+//! declines those loops rather than believing an invented edge.
+//!
+//! # Where it puts things, and the two shapes it will not touch
+//!
+//! The preheader, in front of its terminator. That placement is always legal and the argument is
+//! short: a value defined outside the loop dominates the header, the header's immediate dominator
+//! is the preheader, so the definition dominates the preheader too. A loop without a preheader is
+//! left alone, since there is nowhere to put anything, and section 26 owns making one.
+//!
+//! That is also the whole of the answer to section 27.6's irreducible region, which has several
+//! ways in and therefore no preheader. It does not get that far here: [`crate::loops`] reports an
+//! irreducible region separately from the natural loops and this pass is only handed the natural
+//! ones, so a region with two entries is not a loop it can see rather than a loop it declines.
+//!
+//! The preheader is also the block [`speculate`] is asked about, rather than the block the
+//! instruction is in, and the difference between those two is a miscompilation. A division under
+//! `if (d)` has a divisor the ranges know is not zero, because a range is narrowed by the branches
+//! that dominate the block it is asked about. Ask where the division is and the answer is that it
+//! may go anywhere. Ask where it would go and the answer is that it may not, which is the true one,
+//! since the guard that made it safe is not in front of the preheader.
+//!
+//! # The cost, which is a register rather than an instruction
+//!
+//! Moving a computation out of a loop is not free and section 27.2 is blunt about why: the value is
+//! now live across the whole loop, and a loop that ran in registers and now spills is paying a load
+//! and a store per iteration to save an add per iteration. So the question is not whether the
+//! computation is expensive, it is whether it is more expensive than a register.
+//!
+//! The answer is document 40.6's pressure model, which is a count rather than an estimate, and
+//! [`heuristics::LICM_EXPENSIVE`], which is GCC's line between the two. Where the loop already
+//! holds as many values as the machine has registers, less document 40.6's margin, only the
+//! genuinely expensive operations move and the rest stay where they are. Each move made in a loop
+//! is one more value live across it, so the room left is counted down as the pass spends it.
+//!
+//! A constant and the address of a symbol are free, and a free value moves only as a passenger of
+//! something that is not. So is a pointer a small constant past another that only loads and stores
+//! and other addresses in its own block read, because each of those takes the constant into its
+//! address. That is arranged in `trim`, which is also where the reason it cannot simply be refused
+//! up front is written down.
+//!
+//! # What this does not do yet
+//!
+//! Store motion, section 27.3, which turns a store to an unchanging address into a load in front of
+//! the loop and a store after it. It needs an alias query against every memory access in the loop,
+//! and an alias query needs the module, which a pass holding one function does not have. It is the
+//! half with the risk and it should arrive with the measurement section 27.7 asks for.
+//!
+//! Hoisting every call. The one that moves now is the call whose summary says the callee writes
+//! no memory, which is document 34's answer handed to this pass and read in `call_untouched` and
+//! in [`speculate::why_not`]. It moves on a division's argument rather than a load's: nothing it
+//! did can be observed after it returns, so what is left is whether the program was going to
+//! reach it and whether what it reads is the same in front of the loop as it was inside, and the
+//! second of those is the oracle's question and gets asked once per write in the loop. What does
+//! not move is the callee that writes, and the reason is not that the question is hard: moving
+//! the call takes its writes out of the loop along with it, which is section 27.3's store motion
+//! and a different proof.
+
+use std::cell::OnceCell;
+
+use rucc_base::hash::Set;
+use rucc_cost::heuristics;
+use rucc_ir::{Abi, Block, Def, Extra, Flags, Func, Inst, Opcode, Value};
+
+use crate::alias::{Access, Alias, Escapes, Origin, origin};
+use crate::cfg::Cfg;
+use crate::dom::{Dominators, PostDominators};
+use crate::live::Liveness;
+use crate::loops::{LoopId, Loops};
+use crate::machine::Machine;
+use crate::modref::{Summaries, Summary};
+use crate::outside::Outside;
+use crate::pressure::{Class, Pressure, class_of};
+use crate::range::query::Ranges;
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, discharge, speculate};
+
+const HOISTED: &str = "computation moved in front of the loop, nothing in the loop changes it";
+const SPECULATIVE: &str =
+    "left in the loop, it does not run on every entry and working it out early could fault";
+const EFFECTS: &str = "left in the loop, moving it would change what the program does";
+const PRESSURE: &str = "left in the loop, it is cheaper than the register holding it would cost";
+const MEMORY: &str = "left in the loop, the loop writes memory and nothing here says which memory";
+const NO_PREHEADER: &str = "loop left as it was, it has not been canonicalized";
+const SPINS: &str = "loop left as it was, it has no way out, so nothing in it is known to run";
+const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
+const NO_STEPS: &str =
+    "left in the loop, the oracle ran out of questions before it got through the loop's writes";
+
+/// How many questions this pass asks the alias oracle about one loop before it stops asking.
+///
+/// The walk below is one question per instruction in the loop that writes memory per load in it,
+/// which is quadratic in the loop, and section 09.2's rule for a quadratic thing in the optimizer
+/// is that it has a number written next to it rather than a hope. A loop that runs out is left
+/// exactly where the coarse answer would have left it, so the budget costs precision and never
+/// correctness.
+///
+/// 2000 rather than a larger number because a larger one was measured and bought nothing. On the
+/// SQLite amalgamation at `-O2` it is 773 loads that run out of questions, and at 20000 it is 545:
+/// the 228 in between all get a full answer of no. Not one extra load comes out of a loop for the
+/// ten times the questions, so what the bigger budget buys is a more accurate remark about loads
+/// that were staying anyway.
+const ALIAS_STEPS: usize = 2_000;
+
+/// Section 27.5's pass.
+#[derive(Debug)]
+pub struct Licm;
+
+/// The one instance, which is what the pipelines name.
+pub static LICM: Licm = Licm;
+
+impl Pass for Licm {
+    fn name(&self) -> &'static str {
+        "licm"
+    }
+
+    fn describe(&self) -> &'static str {
+        "moves a computation whose operands do not change in a loop in front of the loop"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
+    fn preserves(&self) -> Preserved {
+        // No edge moves and no block appears, so everything about the shape of the function is
+        // what it was. What changes is where values are live, and that is not a side effect of
+        // the transformation, it is the transformation.
+        Preserved::ALL.without(Analysis::Liveness)
+    }
+
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        if func.entry().is_none() {
+            return stats;
+        }
+        let machine = an.machine();
+        let cfg = an.cfg(func);
+        let loops = an.loops(func);
+        if loops.count() == 0 {
+            return stats;
+        }
+        let dom = an.dominators(func);
+        let post = an.post_dominators(func);
+        let invented: Set<Block> = post.fake_exits().iter().copied().collect();
+        let folded = displacements(func);
+
+        // Innermost first, so a value hoisted out of an inner loop lands in the outer loop's body
+        // and is looked at again on the outer loop's turn. That is what carries a computation all
+        // the way out of a nest in one run rather than one level per run.
+        let mut order: Vec<LoopId> = loops.all().collect();
+        order.sort_by_key(|&id| std::cmp::Reverse(loops.depth(id)));
+
+        // Worked out the first time a loop asks, since a loop with nothing in it worth moving never
+        // does, and a function where no loop does never needs the numbers at all. tamnd/rucc#3052.
+        let mut pressure: Option<(Liveness, Pressure)> = None;
+        // Blocks whose counts a hoist has changed since the numbers above were worked out. A hoist
+        // takes instructions from inside one loop and puts them in its preheader, so no block
+        // outside those can hold a different number afterwards, and a loop sharing none of them
+        // would read the same answer out of a fresh computation as out of this one. Recomputing
+        // for it anyway is a walk of the whole function, and a function with hundreds of loops
+        // side by side in it used to pay that hundreds of times. tamnd/rucc#1015.
+        let mut stale: Set<Block> = Set::default();
+        // Which locals escaped, kept for every loop's oracle rather than worked out again by each,
+        // which is a walk of the whole function per loop that asks. A hoist moves instructions and
+        // does nothing else to them, and the escape set is a question about what each instruction
+        // does with its operands, so every loop here would get the same answer. tamnd/rucc#3052.
+        let escapes = OnceCell::new();
+        for id in order {
+            if loops.blocks(id).iter().any(|block| stale.contains(block)) {
+                // For the same reason, a loop that does share one has the numbers worked out
+                // again over those blocks and nowhere else, rather than over the whole function
+                // for each loop that a loop inside it changed.
+                if let Some((live, counts)) = &mut pressure {
+                    let region: Vec<Block> = stale.iter().copied().collect();
+                    live.refresh(func, cfg, &region);
+                    counts.refresh(func, cfg, live, &region);
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh = Liveness::of(func, cfg);
+                        assert!(*live == fresh, "the liveness refreshed is the one built");
+                        assert!(*counts == Pressure::of(func, cfg, &fresh), "so are the counts");
+                    }
+                }
+                stale.clear();
+            }
+            let job = Job {
+                machine,
+                outside: an.outside(),
+                modref: an.modref(),
+                cfg,
+                dom,
+                post,
+                loops,
+                invented: &invented,
+                folded: &folded,
+                escapes: &escapes,
+            };
+            if job.run(func, &mut pressure, id, fuel, &mut stats) {
+                // The counts inside the loop just changed and the next loop out is about to be
+                // asked what it holds. The alternative to noticing that is deciding the outer loop
+                // against a number the inner loop invalidated.
+                stale.extend(loops.blocks(id).iter().copied());
+                stale.extend(loops.preheader(cfg, id));
+            }
+        }
+        stats
+    }
+}
+
+/// Section 27.1's three way legality answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Move {
+    /// It may go anywhere its operands reach.
+    Anywhere,
+    /// It may go only where it was going to run anyway.
+    IfItWasGoingToRun,
+    /// It stays.
+    Nowhere,
+}
+
+/// What one loop is being looked at against, gathered once so the walk below reads.
+struct Job<'a> {
+    machine: Machine,
+    outside: &'a Outside,
+    modref: &'a Summaries,
+    cfg: &'a Cfg,
+    dom: &'a Dominators,
+    post: &'a PostDominators,
+    loops: &'a Loops,
+    invented: &'a Set<Block>,
+    /// What [`displacements`] found, which costs nothing where it is.
+    folded: &'a Set<Inst>,
+    /// The escape set every loop's oracle shares. See [`Alias::sharing`].
+    escapes: &'a OnceCell<Escapes>,
+}
+
+/// Whether anything this loop writes can be what this instruction reads.
+///
+/// tamnd/rucc#1530 is this question. The pass used to answer it once for the whole loop,
+/// because the memory chain is built and taken off inside `crate::reload` and no instruction
+/// carries one by the time this runs, and one write anywhere in the loop therefore kept every
+/// load in it. On the SQLite amalgamation that was 7828 loads at `-O2`, and 463 of them are
+/// loads the oracle can clear one at a time.
+///
+/// Two things are left where they were on purpose. An instruction that writes is not asked about,
+/// since hoisting a write out of a loop is a different question with a different answer and the
+/// walk below would be answering it by accident. And a shape [`Alias::reads`] does not describe
+/// is refused, which is 874 of the 7828 and is the honest answer rather than a guess.
+///
+/// A call is the one exception to the first of those, and it is tamnd/rucc#1571. A call writes
+/// memory by opcode whatever the callee does, and tamnd/rucc#1530 counted 838 of them left in a
+/// loop by that line with nothing having asked which memory. It goes to `call_untouched`, because
+/// the question a call asks the oracle is the other way round from the one a load asks.
+///
+/// The lifetime boundaries are asked about one at a time for the same reason the writes are.
+/// `bounds_a_lifetime` is a per loop answer as well, and a loop with any call in it that is not
+/// `nofree` has one, which is most loops with a call in them. What a boundary threatens is a load
+/// of the object whose boundary it is, so the object is what gets asked about.
+fn untouched(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    writers: &[Inst],
+    boundaries: &[Inst],
+    oracle: Option<&mut Alias<'_>>,
+    asked: &mut usize,
+) -> Clear {
+    if func[inst].opcode == Opcode::Call {
+        return call_untouched(func, modref, inst, writers, boundaries, oracle, asked);
+    }
+    if func[inst].opcode.writes_memory() {
+        return Clear::No;
+    }
+    let Some(oracle) = oracle else {
+        return Clear::No;
+    };
+    let Some(it) = oracle.reads(inst) else {
+        return Clear::No;
+    };
+    // A `const` global lives for the whole run and nothing may write it, so neither a write nor a
+    // lifetime boundary in the loop is about it, and assembly with a memory clobber is no
+    // exception. That is `current` in the kernel, read in a loop that enables interrupts.
+    if oracle.invariant(&it) {
+        return Clear::Yes;
+    }
+    for &other in boundaries {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        match func[other].opcode {
+            // The one this pass has to ask about by hand. A load must not move above the
+            // instruction saying the object it reads has come into being, and these are not
+            // memory the oracle will answer about, since a plane is not memory the program can
+            // name. So the question is asked about the object the row is for instead.
+            Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                let args = &func[func[other].args];
+                let about = Access::through(func, args[0]);
+                if !oracle.query(&it, &about).is_no() {
+                    return Clear::No;
+                }
+            }
+            // A call that might free is in `writers` too, and a callee whose write of these bytes
+            // the oracle ruled out is one that did not free them either: freeing them is writing
+            // them in every answer this oracle gives, and a summary that says a callee touches
+            // nothing, or touches only what it was handed, is a summary of a callee that reaches
+            // no `free` at all. Section 27.5's own reason applies as well, which is that this
+            // moves a load earlier rather than later, and storage a loop-invariant address names
+            // is storage that was already there when the loop started.
+            Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => (),
+            // Assembly nobody can read, which is the honest no.
+            _ => return Clear::No,
+        }
+    }
+    for &other in writers {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let wrote = oracle.writes(other);
+        let answer = match wrote {
+            Some(wrote) => oracle.query(&it, &wrote),
+            // A call, which is the blocker for 5476 of the 7828 and what the mod and ref
+            // summaries of tamnd/rucc#1557 are read for.
+            None => oracle.clobbered_by(&it, other),
+        };
+        if !answer.is_no() {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether anything this loop writes can be what this call reads.
+///
+/// The same question `untouched` asks, turned around. A load has one access and the loop has many
+/// writes, so the walk there holds the load's access and asks about each write. A call has no
+/// access at all: a callee that reads may read anything its arguments reach and anything a global
+/// leads to, and there is no one address to hand the oracle. So what is held is the call and what
+/// varies is the write, and the question per write is [`Alias::read_by`] rather than
+/// [`Alias::query`]. GCC calls that one `ref_maybe_used_by_call_p`, and everything the oracle
+/// knows about a callee already sits behind it, so the attributes and the per parameter summary
+/// walk are not written again here.
+///
+/// A callee that writes is refused before any of that, and not because the question is hard.
+/// Hoisting a call that writes takes its writes out of the loop along with it, so a loop that ran
+/// ten times leaves the memory of one, which is not a question about aliasing at all. That is
+/// section 27.3's store motion and it wants its own proof.
+fn call_untouched(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    writers: &[Inst],
+    boundaries: &[Inst],
+    oracle: Option<&mut Alias<'_>>,
+    asked: &mut usize,
+) -> Clear {
+    let summary = modref.at(func, inst);
+    // A callee that reads nothing cannot read what the loop wrote, so there is no write in the
+    // loop worth asking about and the oracle is not needed. This is the one tamnd/rucc#1576 did.
+    // A structure the call takes by value is copied out of the caller's object at the call, so a
+    // callee that reads nothing still reads those bytes, and the writes in the loop are asked about.
+    if summary.is_some_and(Summary::touches_nothing) && !by_value(func, inst) {
+        return Clear::Yes;
+    }
+    if !summary.is_some_and(Summary::writes_nothing) {
+        return Clear::No;
+    }
+    let Some(oracle) = oracle else {
+        return Clear::No;
+    };
+    for &other in boundaries {
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        match func[other].opcode {
+            // The object a row is for, asked about the same way `untouched` asks about it and for
+            // the same reason: a call that reads the object must not be made before the
+            // instruction saying the object has come into being.
+            Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                let args = &func[func[other].args];
+                let about = Access::through(func, args[0]);
+                if !oracle.read_by(&about, inst).is_no() {
+                    return Clear::No;
+                }
+            }
+            // A call that might free, which is in `writers` as well and is answered there. The
+            // callee being moved writes nothing, so it is not one of these itself.
+            Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => (),
+            _ => return Clear::No,
+        }
+    }
+    for &other in writers {
+        // It is a call, so it is in this list too, and a call does not keep itself in a loop.
+        if other == inst {
+            continue;
+        }
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let clear = match oracle.writes(other) {
+            Some(wrote) => oracle.read_by(&wrote, inst).is_no(),
+            // Another call, so neither end of the question has an access and the oracle has
+            // nothing to be handed. One has to be made out of the writer, which is the helper.
+            None => match reads_what_call_wrote(func, modref, oracle, inst, other, asked) {
+                Clear::Yes => true,
+                Clear::No => false,
+                Clear::OutOfSteps => return Clear::OutOfSteps,
+            },
+        };
+        if !clear {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether the call passes an argument by value, which it copies out of memory the caller has.
+fn by_value(func: &Func, call: Inst) -> bool {
+    let Extra::Call(info) = func[call].extra else {
+        return false;
+    };
+    let info = &func[info];
+    let named = func[info.signature].params.iter().map(|param| param.abi);
+    named.chain(func[info.varargs].iter().copied()).any(|abi| matches!(abi, Abi::ByVal { .. }))
+}
+
+/// Whether the call being moved can read what another call in the loop wrote.
+///
+/// Neither of the two has an access [`Alias::writes`] describes, so there is no reference to hand
+/// the oracle and one has to be built. The writer's summary is what builds it: a callee that
+/// writes only through its arguments wrote through one of the pointers it was handed, and each of
+/// those is an address this function holds, so the question becomes [`Alias::read_by`] once per
+/// argument the writer writes through. A writer that writes anywhere else has no such address and
+/// is the honest no.
+fn reads_what_call_wrote(
+    func: &Func,
+    modref: &Summaries,
+    oracle: &mut Alias<'_>,
+    reader: Inst,
+    writer: Inst,
+    asked: &mut usize,
+) -> Clear {
+    let Some(summary) = modref.at(func, writer) else {
+        return Clear::No;
+    };
+    // Nothing was written, so there is nothing for the reader to have read. Freeing is writing in
+    // every answer this oracle gives, so this is a callee that did not free anything either.
+    if summary.writes_nothing() {
+        return Clear::Yes;
+    }
+    if !summary.only_through_arguments() {
+        return Clear::No;
+    }
+    let args = &func[func[writer].args];
+    for (at, &arg) in args.iter().enumerate() {
+        // Only the arguments it writes through, and only the ones that are addresses. A position
+        // past the end of the summary is an argument no parameter stands for, and `Summary::param`
+        // answers that one with everything, so a variadic call is refused here rather than missed.
+        if !func[arg].ty.is_ptr() || !summary.param(at).effect.writes() {
+            continue;
+        }
+        if *asked >= ALIAS_STEPS {
+            return Clear::OutOfSteps;
+        }
+        *asked += 1;
+        let through = Access::through(func, arg);
+        if !oracle.read_by(&through, reader).is_no() {
+            return Clear::No;
+        }
+    }
+    Clear::Yes
+}
+
+/// Whether the loop's writes are clear of one load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clear {
+    Yes,
+    No,
+    OutOfSteps,
+}
+
+/// Memory a name in the program reaches, which is not every write.
+///
+/// The safety instrumentation writes the planes and a plane is storage the runtime keeps for
+/// itself, so a loop whose only writes are those is a loop that writes nothing a load in it could
+/// read. Leaving that out is what made this useless on a `-fsafety=detect` build, where there is a
+/// `meta_` beside almost every access and every loop therefore wrote memory.
+fn writes_named_memory(func: &Func, inst: Inst) -> bool {
+    let opcode = func[inst].opcode;
+    opcode.writes_memory() && !opcode.touches_only_planes()
+}
+
+/// Whether this reads a `const` global through `%fs` or `%gs`, which is `current` in the kernel.
+///
+/// A segment access carries [`Flags::KEEP`], so `speculate` calls it volatile and it never moves.
+/// gcc reads `current` once in front of the loop instead, since the declaration says nothing
+/// writes it, and the read of a global that exists cannot fault wherever it is made.
+fn reads_constant_segment(func: &Func, outside: &Outside, inst: Inst) -> bool {
+    let data = func[inst];
+    if data.opcode != Opcode::Load || data.flags.contains(Flags::VOLATILE) {
+        return false;
+    }
+    if !data.flags.intersects(Flags::SEG_FS.union(Flags::SEG_GS)) {
+        return false;
+    }
+    let Some(&pointer) = func[data.args].first() else {
+        return false;
+    };
+    matches!(origin(func, pointer).0, Origin::Global(name) if outside.constant(name))
+}
+
+impl Job<'_> {
+    /// Hoists what this loop will let go of, and says whether anything moved.
+    fn run(
+        &self,
+        func: &mut Func,
+        pressure: &mut Option<(Liveness, Pressure)>,
+        id: LoopId,
+        fuel: &mut Fuel,
+        stats: &mut Stats,
+    ) -> bool {
+        let Some(preheader) = self.loops.preheader(self.cfg, id) else {
+            stats.missed(NO_PREHEADER);
+            return false;
+        };
+        let Some(landing) = func.terminator(preheader) else {
+            return false;
+        };
+        let plan = self.plan(func, pressure, id, preheader, fuel, stats);
+        for inst in &plan {
+            // Unlink and relink, in the order the plan was made, which is dominator order, so an
+            // operand hoisted with its user arrives in front of it. Section 27.6 names the other
+            // order as the way a chain comes out wrong.
+            func.remove_inst(*inst);
+            func.insert_before(*inst, landing);
+            stats.optimized(HOISTED);
+        }
+        !plan.is_empty()
+    }
+
+    /// Which instructions of this loop are worth moving and legal to move, in the order to move
+    /// them in.
+    ///
+    /// Separate from the moving because the range query holds the function and the moving needs it
+    /// back. That is Rust noticing something real: deciding against a function while changing it is
+    /// how a pass ends up reading an answer about a program that no longer exists.
+    ///
+    /// `preheader` is where everything in the plan is going, and it is passed in rather than worked
+    /// out here because it is what the safety question is asked about. A fact that holds inside the
+    /// loop is not a fact in front of it.
+    fn plan(
+        &self,
+        func: &Func,
+        pressure: &mut Option<(Liveness, Pressure)>,
+        id: LoopId,
+        preheader: Block,
+        fuel: &mut Fuel,
+        stats: &mut Stats,
+    ) -> Vec<Inst> {
+        let header = self.loops.header(id);
+        // The loop's own blocks in reverse postorder, which is the order the walk below needs.
+        // Sorted out of the loop rather than filtered out of the function's order, because the
+        // second is a walk of every block in the function for every loop, and jtckdint's main has
+        // thousands of loops in 22000 blocks.
+        let mut walk: Vec<(u32, Block)> = self
+            .loops
+            .blocks(id)
+            .iter()
+            .filter_map(|&block| Some((self.cfg.rank(block)?, block)))
+            .collect();
+        walk.sort_unstable();
+        // A loop with a way out has its post-dominance answered against edges the program has.
+        // One without does not, so it is declined rather than decided on an invented edge.
+        let spins = self.loops.blocks(id).iter().any(|block| self.invented.contains(block));
+        if spins {
+            stats.missed(SPINS);
+        }
+        // Asked once for the loop rather than once per load, because the answer is about the loop.
+        //
+        // Memory the program can name, which is not every write. The safety instrumentation writes
+        // the planes and a plane is storage the runtime keeps for itself, so a loop whose only
+        // writes are those is a loop that writes nothing a load in it could read. Leaving that out
+        // is what made this useless on a `-fsafety=detect` build, where there is a `meta_` beside
+        // almost every access and every loop therefore wrote memory.
+        let writers: Vec<Inst> = self
+            .loops
+            .blocks(id)
+            .iter()
+            .flat_map(|block| func.insts(*block))
+            .filter(|&inst| writes_named_memory(func, inst))
+            .collect();
+        let writes = !writers.is_empty();
+        let boundaries: Vec<Inst> = self
+            .loops
+            .blocks(id)
+            .iter()
+            .flat_map(|block| func.insts(*block))
+            .filter(|&inst| bounds_a_lifetime(func, inst))
+            .collect();
+        let bounds = !boundaries.is_empty();
+        let mut ranges = Ranges::new(func, self.cfg, self.dom).knowing(self.loops);
+        // One oracle for the loop, built only where there is something to ask about, with the
+        // escape set every other loop's oracle reads as well. The count is shared by every load in
+        // the loop, so one loop cannot ask more than [`ALIAS_STEPS`] however many candidates it
+        // has.
+        let mut oracle = writes
+            .then(|| Alias::new(func, self.outside).knowing(self.modref).sharing(self.escapes));
+        #[cfg(debug_assertions)]
+        if let Some(kept) = self.escapes.get() {
+            assert_eq!(*kept, Escapes::knowing(func, self.modref), "a hoist changed what escapes");
+        }
+        let mut asked = 0usize;
+        let mut plan = Vec::new();
+        // The ones in the plan that are only in it because something after them might want them.
+        // A cheap computation under pressure is worth moving when it is a link in a chain that
+        // ends in something expensive and is not worth moving on its own, and which of those it
+        // is cannot be known at the point it is read, because what reads it has not been read
+        // yet. So it goes in provisionally and [`trim`] takes it out again, which is the same
+        // answer a cost free instruction already gets and for the same reason.
+        let mut passengers: Set<Inst> = Set::default();
+        let mut moved: Set<Value> = Set::default();
+        // Every value moved out is one more live across the loop, which is one register less to
+        // decide the next one against. Taking it off the allocatable count says that once instead
+        // of at each of the comparisons below, and it is per bank because a value moved into a
+        // floating point register does not take an integer one.
+        //
+        // The two banks do not start at the same number, because the general purpose one gives up
+        // the stack pointer and the frame pointer and the vector one gives up neither. A target
+        // with no cost table answers nothing, and nothing here means no room at all rather than a
+        // number invented on its behalf: the pressure test then refuses every hoist that is not
+        // free, which is the same thing this pass does under real pressure.
+        let mut room = [0; Class::COUNT];
+        for class in Class::ALL {
+            room[class.index()] = self.machine.allocatable(class).unwrap_or(0);
+        }
+
+        // Whether the program is still known to be on its way to what comes next. It starts true
+        // at the header and goes false at the first instruction the program might not come back
+        // from, and it never goes true again, because reverse postorder is the order one turn
+        // round the loop runs its blocks in and a block seen later cannot run earlier.
+        let mut reaching = !spins;
+
+        for (_, block) in walk {
+            let entered = self.post.post_dominates(block, header);
+            for inst in func.insts(block) {
+                // Both halves are needed and neither implies the other. The block being one the
+                // header cannot get past says every entry to the loop arrives here. `reaching`
+                // says nothing in front of it stops the program on the way.
+                let runs = reaching && entered;
+                if !goes_on(func, self.modref, inst, &mut ranges, block) {
+                    reaching = false;
+                }
+                if func.is_terminator(inst) {
+                    continue;
+                }
+                let Some(result) = func[inst].results().next() else {
+                    continue;
+                };
+                let Some(class) = class_of(func[result].ty) else {
+                    continue;
+                };
+                if !self.unchanging(func, id, inst, &moved) {
+                    continue;
+                }
+                // The address does not change, which is not the question. What is behind it is,
+                // and that is [`Job::untouched`], which asks the alias oracle about this one load
+                // against every write in the loop. It used to be that anything reading memory
+                // stayed in a loop that wrote any, because the memory chain is not in this
+                // function and the module is not handed to a pass, and tamnd/rucc#1530 measured
+                // what that cost.
+                //
+                // A question about an allocation is not a question about what is in it, which is
+                // why [`Opcode::touches_only_planes`] is allowed past this. `cap_extent` and
+                // `cap_extent_back` are the only two of those with a result, so they are the only
+                // two that reach here, and what they answer is how much room there is from a
+                // pointer to the end of whatever holds it, which a store does not change. The loop
+                // still has to be one that does not move a lifetime boundary, and that is
+                // [`bounds_a_lifetime`] rather than `writes`.
+                let settled = func[inst].opcode.touches_only_planes() && !bounds;
+                if (writes || bounds)
+                    && !settled
+                    && func[inst].opcode.touches_memory()
+                    && func.mem_in(inst).is_none()
+                {
+                    let answer = untouched(
+                        func,
+                        self.modref,
+                        inst,
+                        &writers,
+                        &boundaries,
+                        oracle.as_mut(),
+                        &mut asked,
+                    );
+                    match answer {
+                        Clear::Yes => (),
+                        Clear::No => {
+                            stats.missed(MEMORY);
+                            continue;
+                        }
+                        Clear::OutOfSteps => {
+                            stats.missed(NO_STEPS);
+                            continue;
+                        }
+                    }
+                }
+                // A read of `current` is one instruction that is as cheap to make again in the loop
+                // as it is to load back from the stack, so it only moves when there is room for it.
+                let constant = reads_constant_segment(func, self.outside, inst);
+                let cost = if self.folded.contains(&inst) {
+                    0
+                } else if constant {
+                    1
+                } else {
+                    cost(func, inst)
+                };
+                let why = if constant {
+                    None
+                } else {
+                    speculate::why_not(func, self.modref, inst, &mut ranges, preheader)
+                };
+                match movement(why) {
+                    Move::Anywhere => (),
+                    Move::IfItWasGoingToRun if runs => (),
+                    Move::IfItWasGoingToRun => {
+                        stats.missed(SPECULATIVE);
+                        continue;
+                    }
+                    Move::Nowhere => {
+                        stats.missed(EFFECTS);
+                        continue;
+                    }
+                }
+                let bank = class.index();
+                // A free instruction is not asked to pay, because it is only in the plan as a
+                // passenger and [`trim`] takes it out again if nothing else in the plan wanted it.
+                if cost > 0 {
+                    // Only a cheap one asks, since an expensive one is worth moving however full
+                    // the loop is.
+                    if cost < rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
+                        let (_, pressure) = pressure.get_or_insert_with(|| {
+                            let live = Liveness::of(func, self.cfg);
+                            let pressure = Pressure::of(func, self.cfg, &live);
+                            (live, pressure)
+                        });
+                        if pressure.is_tight(self.loops, id, class, room[bank]) {
+                            passengers.insert(inst);
+                        }
+                    }
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL);
+                        return trim(func, plan, &passengers, self.folded, stats);
+                    }
+                    room[bank] = room[bank].saturating_sub(1);
+                }
+                moved.extend(func[inst].results());
+                plan.push(inst);
+            }
+        }
+        trim(func, plan, &passengers, self.folded, stats)
+    }
+
+    /// Whether nothing in the loop changes what this instruction reads.
+    ///
+    /// The memory operand is one of the operands, so a load of memory the loop wrote is answered
+    /// here along with everything else and needs no separate walk.
+    fn unchanging(&self, func: &Func, id: LoopId, inst: Inst, moved: &Set<Value>) -> bool {
+        func[func[inst].args]
+            .iter()
+            .all(|arg| self.loops.is_invariant(func, id, *arg) || moved.contains(arg))
+    }
+}
+
+/// Takes the instructions nothing else in the plan needed back out of it.
+///
+/// Two kinds ride along. A constant or the address of a symbol costs nothing to work out again, and
+/// neither does an address the loads and stores reading it fold, so moving one out of a loop on its
+/// own buys nothing and costs a register held for the length of the loop. It still has to be in the
+/// plan while the plan is being made, because a load of a global is only invariant once the address
+/// it reads is going with it, and refusing the address up front would refuse the load as well. The
+/// other kind is `passengers`, the ones a full loop would have turned down on their own: a cheap
+/// computation under pressure is worth moving when something expensive downstream is waiting on it
+/// and is not worth moving otherwise, and what reads it has not been read yet at the point it is
+/// decided. Both come out here if nobody boarded behind them.
+///
+/// Backwards, because the plan is in dependency order and a passenger is wanted by something after
+/// it. One walk answers the whole chain for the same reason the invariance walk does, and a chain
+/// of ten cheap links ending in nothing comes out in that one walk rather than one link per run.
+///
+/// The pressure miss is counted here rather than where it is decided, because an instruction that
+/// went on to carry an expensive one out of the loop was not left in the loop and reporting it as
+/// missed would say the opposite of what happened.
+fn trim(
+    func: &Func,
+    plan: Vec<Inst>,
+    passengers: &Set<Inst>,
+    folded: &Set<Inst>,
+    stats: &mut Stats,
+) -> Vec<Inst> {
+    let mut wanted: Set<Value> = Set::default();
+    let mut keep = Vec::with_capacity(plan.len());
+    for inst in plan.into_iter().rev() {
+        if !func[inst].results().any(|value| wanted.contains(&value)) {
+            if cost(func, inst) == 0 || folded.contains(&inst) {
+                continue;
+            }
+            if passengers.contains(&inst) {
+                stats.missed(PRESSURE);
+                continue;
+            }
+        }
+        wanted.extend(func[func[inst].args].iter().copied());
+        keep.push(inst);
+    }
+    keep.reverse();
+    keep
+}
+
+/// Section 27.1's enum, read off why the value may not be worked out early.
+///
+/// The reason matters rather than the opcode. A load whose address is proved good may go anywhere
+/// and a volatile load may go nowhere, and both of them are loads.
+fn movement(why: Option<&'static str>) -> Move {
+    match why {
+        None => Move::Anywhere,
+        // The four that are only a problem on a run that was not going to reach them. The call is
+        // the one of them that is not about this function at all: it is here because the summaries
+        // say the callee writes no memory, so nothing it did outlives it, and what is left of the
+        // question is whether the program was going to reach it and come back.
+        Some(
+            speculate::BY_ZERO
+            | speculate::OVERFLOW
+            | speculate::ADDRESS
+            | speculate::INSIDE_THE_CALL,
+        ) => Move::IfItWasGoingToRun,
+        Some(_) => Move::Nowhere,
+    }
+}
+
+/// Whether the program, having started this instruction, is certain to go on to the next one.
+///
+/// Post-dominance answers a question about the shape of the function and this answers the other
+/// half, which is about what the instructions in front do. A block the header cannot get past is
+/// still a block the program never arrives at if something on the way stops it, and there are two
+/// ways to stop it. One is a call, since a callee may exit, may loop forever or may jump out, so
+/// every call is one that might not come back. The summaries do not change that and are not asked
+/// here: what they say is which memory a callee touches, and a callee that touches none of it can
+/// still spin forever. The other is an instruction that traps, which is
+/// exactly the instruction this pass is careful about moving, read here at the block it is in
+/// rather than at the preheader because the question is whether it traps where it stands.
+///
+/// `gcc.c-torture/execute/pr38819.c` is the program that says why. Its loop body calls a function
+/// that calls `exit` and then divides by zero, and the division is invariant, so a pass that asked
+/// only whether the body post-dominates the header would work it out in front of the loop and
+/// crash a program that returns.
+fn goes_on(
+    func: &Func,
+    modref: &Summaries,
+    inst: Inst,
+    ranges: &mut Ranges<'_>,
+    at: Block,
+) -> bool {
+    match func[inst].opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall | Opcode::Apply => false,
+        // A promise that control does not get here, so nothing after it runs either.
+        Opcode::UnreachableHint => false,
+        // Stopping, which is the same answer for a plainer reason: nothing after it runs because
+        // there is no after.
+        Opcode::Trap => false,
+        Opcode::SDiv | Opcode::SRem | Opcode::UDiv | Opcode::URem | Opcode::Load => {
+            movement(speculate::why_not(func, modref, inst, ranges, at)) != Move::IfItWasGoingToRun
+        }
+        _ => true,
+    }
+}
+
+/// Whether this could move the boundary of something a plane holds a row for.
+///
+/// Nearly the list `crate::split` refuses a loop for, and for the same reason: a call that might
+/// free changes what the planes say, and so does assembly nobody can read and the instructions that
+/// say a lifetime has started or finished. A call the module summary calls `nofree` is not one of
+/// them, which is what makes this worth asking at all, since a loop with a `memcpy` in it is still
+/// a loop whose allocations stay where they are.
+///
+/// `meta_begin` is here and is the one `crate::split` does not need. A load whose address is
+/// loop-invariant but whose object is created inside the loop must not move above the instruction
+/// that says the object now exists, and since the planes stopped counting as memory the loop writes
+/// there is nothing else left to stop it.
+fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
+    match func[inst].opcode {
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
+            !func[inst].flags.contains(Flags::NOFREE)
+        }
+        Opcode::InlineAsm
+        | Opcode::Apply
+        | Opcode::MetaBegin
+        | Opcode::MetaEnd
+        | Opcode::MetaTransfer => true,
+        _ => false,
+    }
+}
+
+/// The `ptr_add`s of a small constant that nothing reads but loads and stores in the same block,
+/// each of them at that address, and other `ptr_add`s in the same block, each of them adding to it.
+///
+/// The backend writes the constant into the displacement of each of those loads and stores, so
+/// where it stands the `ptr_add` is no instruction at all. Moved out of a loop it is a register
+/// held for the whole of it, and in a loop that calls something it is a register the callee has
+/// to leave alone, which is one more push and pop each time the function runs. PostgreSQL's
+/// `list_free_deep` held the address of a list's length and the address of its elements that
+/// way, around a loop that calls `pfree`, and its frame was 48 bytes against gcc's 8.
+///
+/// A `ptr_add` that adds to it is the same answer one step further out. `h->nodes[i]` on a flexible
+/// array is the array's offset added first and the scaled subscript added to that, and x86 writes
+/// the two together as `32(%rbx,%rcx,8)` in the load at the end. PostgreSQL's binaryheap `sift_up`
+/// held `h->nodes` in a register across the comparator call in its loop, and spilled it.
+///
+/// Small is what every target puts in a load without help, which on aarch64 is the unscaled
+/// range below and the scaled one above. Past it the add stays in the loop as an add, which is
+/// one cycle rather than a register, so a guess at the edge costs little either way.
+pub(crate) fn displacements(func: &Func) -> Set<Inst> {
+    let mut found: Set<Inst> = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let offset = func[func[inst].args].get(1).and_then(|&k| discharge::constant(func, k));
+            if func[inst].opcode == Opcode::PtrAdd
+                && offset.is_some_and(|k| (-256..4096).contains(&k))
+            {
+                found.insert(inst);
+            }
+        }
+    }
+    if found.is_empty() {
+        return found;
+    }
+    let made = |value: Value| match func[value].def {
+        Def::Result { inst, .. } => Some(inst),
+        Def::Param { .. } => None,
+    };
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let at = match func[inst].opcode {
+                Opcode::Load | Opcode::PtrAdd => Some(0),
+                Opcode::Store => Some(1),
+                _ => None,
+            };
+            for (position, &value) in func[func[inst].args].iter().enumerate() {
+                let Some(def) = made(value) else { continue };
+                if at != Some(position) || func.block_of(def) != Some(block) {
+                    found.remove(&def);
+                }
+            }
+            for call in func.successors(inst) {
+                for &value in &func[call.args] {
+                    if let Some(def) = made(value) {
+                        found.remove(&def);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Section 27.2's table, which GCC's `stmt_cost` opens by admitting is ad hoc.
+///
+/// The numbers are not prices. They sort instructions into three groups: the ones there is no point
+/// moving, the ones worth moving when there is room, and the ones worth moving even when there is
+/// not. What makes the table worth copying rather than inventing is the reasoning behind two of its
+/// entries. A conditional is expensive here because moving it in front of the loop is what lets
+/// document 30 split the loop on it, so the cost model is encoding a pass interaction rather than a
+/// price. Anything touching memory is expensive because, as GCC puts it, hoisting memory references
+/// out should almost surely be a win.
+pub(crate) fn cost(func: &Func, inst: Inst) -> u32 {
+    match func[inst].opcode {
+        // Worked out again wherever it is wanted, so there is nothing to move. The address of a
+        // symbol is in here with the constants because that is what it is on the only target there
+        // is: one instruction reading the program counter and a link time constant, with no
+        // operands, so a copy of it costs what recomputing it costs and holding one across a loop
+        // costs a register for nothing.
+        Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr => 0,
+        // `crate::pass` never sees one of these reach the back end: `rucc_safety::lower` removes
+        // every `cap_of` once the checks that read it have become calls. So it holds no register
+        // and a copy of it costs nothing, which is what the four above have in common.
+        Opcode::CapOf => 0,
+        Opcode::Load
+        | Opcode::Select
+        | Opcode::Call
+        | Opcode::CallIndirect
+        | Opcode::Mul
+        | Opcode::SDiv
+        | Opcode::UDiv
+        | Opcode::SRem
+        | Opcode::URem
+        | Opcode::FMul
+        | Opcode::FDiv
+        | Opcode::FRem
+        | Opcode::Shl
+        | Opcode::LShr
+        | Opcode::AShr
+        | Opcode::ICmp
+        | Opcode::FCmp => rucc_cost::param!(heuristics::LICM_EXPENSIVE),
+        // Both become a call to the runtime in `rucc_safety::lower`, and the census in
+        // `spec/safe-memory/13-performance.md` section 13.1 measured one at about 377 instructions.
+        // Left at the default they price as an add, and then the pressure test throws them out of
+        // exactly the loops where they cost the most.
+        Opcode::CapExtent | Opcode::CapExtentBack => rucc_cost::param!(heuristics::LICM_EXPENSIVE),
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::{Interner, Symbol};
+    use rucc_ir::{
+        Block, Builder, Def, Extra, Flags, Func, Global, Inst, InstData, IntPred, MemInfo,
+        MemOrder, Module, Opcode, Restrict, Signature, StorageClass, Type, Value, verify_func,
+    };
+    use rucc_target::{TargetInfo, Triple};
+
+    use super::{
+        ALIAS_STEPS, EFFECTS, HOISTED, LICM, MEMORY, NO_FUEL, NO_PREHEADER, NO_STEPS, PRESSURE,
+        SPECULATIVE, SPINS,
+    };
+    use crate::canon::Canon;
+    use crate::header_copy::SPEED;
+    use crate::modref::{Effect, Summaries, Summary, Touch};
+    use crate::outside::Outside;
+    use crate::stats::Kind;
+    use crate::{Fuel, Pass, Stats};
+    use std::sync::Arc;
+
+    /// Runs the pass over the function as it stands.
+    fn hoist(func: &mut Func, fuel: &mut Fuel) -> Stats {
+        LICM.run(func, &mut crate::machine::fixtures::analyses(), fuel)
+    }
+
+    /// Insists the function is one the rest of the compiler may believe.
+    ///
+    /// Moving a definition is the edit that breaks a definition's dominance over its uses, so this
+    /// is where most of the strength of these tests is.
+    fn sound(func: &Func, names: &mut Interner) {
+        checked(func, names, &[]);
+    }
+
+    /// The same, in a module that declares those globals.
+    fn checked(func: &Func, names: &mut Interner, globals: &[Symbol]) {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        for name in globals {
+            module.add_global(Global::new(*name, 16, 8));
+        }
+        if let Err(errors) = verify_func(&module, func, names) {
+            panic!("{errors:#?}");
+        }
+    }
+
+    /// The instruction that worked that value out.
+    fn made(func: &Func, value: Value) -> Inst {
+        match func[value].def {
+            Def::Result { inst, .. } => inst,
+            other => panic!("{other:?} is not something an instruction worked out"),
+        }
+    }
+
+    /// Which block that value is worked out in now.
+    fn lives_in(func: &Func, value: Value) -> Block {
+        func.block_of(made(func, value)).expect("it is in a block")
+    }
+
+    /// Where in its block that value is worked out, counting from the top.
+    fn position(func: &Func, value: Value) -> usize {
+        let inst = made(func, value);
+        let block = func.block_of(inst).expect("it is in a block");
+        func.insts(block).position(|other| other == inst).expect("it is in that block")
+    }
+
+    /// Moves whatever the caller appended after a block's terminator to in front of it.
+    ///
+    /// A builder appends, and a block that already ends in a jump has nowhere to append to that is
+    /// legal. Writing the loop first and the body second reads better than the other order, so the
+    /// tests do that and this puts the instructions back where they belong, in the order they were
+    /// written in.
+    fn tucked(func: &mut Func, block: Block) {
+        let term = func
+            .insts(block)
+            .find(|inst| func.is_terminator(*inst))
+            .expect("the block ends in something");
+        let stragglers: Vec<Inst> =
+            func.insts(block).skip_while(|inst| *inst != term).skip(1).collect();
+        for inst in stragglers {
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+    }
+
+    /// A memory record of that many bytes.
+    fn record(size: u64) -> MemInfo {
+        MemInfo {
+            size,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
+    }
+
+    /// A module with nothing in it but a declaration of each of these.
+    ///
+    /// What the alias oracle wants before it will read a summary. A callee it cannot find in the
+    /// module is one it knows nothing about, and it says so before the summaries get a turn, so a
+    /// test about a summary has to put the name somewhere the oracle can find it.
+    fn declaring(names: &mut Interner, called: &[Symbol]) -> Outside {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        for &name in called {
+            module.add_func(Func::new(name, Signature::new()));
+        }
+        Outside::of(&module)
+    }
+
+    /// A local of that many bytes, written where the builder is writing.
+    fn local(build: &mut Builder<'_>, size: u64) -> Value {
+        let mem = build.func().add_mem(record(size));
+        build.value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    /// A counted loop that tests at the top, which is what `while (i < n)` lowers to.
+    ///
+    /// ```text
+    /// entry: jump head(0)
+    /// head(i): t = i < n; br t -> body, done
+    /// body: next = i + 1; jump head(next)
+    /// done: ret i + the spares
+    /// ```
+    ///
+    /// The spare parameters are added up after the loop and used nowhere else, which is how a test
+    /// makes the loop hold values without putting anything in it. The pointer is there because the
+    /// only address the function cannot say anything about is one it was handed.
+    struct Counted {
+        names: Interner,
+        func: Func,
+        entry: Block,
+        head: Block,
+        body: Block,
+        limit: Value,
+        pointer: Value,
+    }
+
+    fn counted(spare: usize) -> Counted {
+        let mut names = Interner::new();
+        let mut types = vec![Type::int(32); spare + 1];
+        types.push(Type::PTR);
+        let signature = Signature::new().with_params(&types).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let done = func.create_block();
+        let handed: Vec<Value> =
+            types.iter().map(|ty| func.append_param(entry, *ty)).collect::<Vec<_>>();
+        let limit = handed[0];
+        let pointer = *handed.last().expect("the pointer is the last of them");
+        let i = func.append_param(head, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+        let test = Builder::new(&mut func, head).icmp(IntPred::Slt, i, limit);
+        Builder::new(&mut func, head).br_if(test, body, &[], done, &[]);
+        let one = Builder::new(&mut func, body).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, body).binary(Opcode::Add, i, one, Flags::NONE);
+        Builder::new(&mut func, body).jump(head, &[next]);
+        let mut build = Builder::new(&mut func, done);
+        let mut total = i;
+        for value in &handed[1..=spare] {
+            total = build.binary(Opcode::Add, total, *value, Flags::NONE);
+        }
+        build.ret(&[total]);
+        Counted { names, func, entry, head, body, limit, pointer }
+    }
+
+    #[test]
+    fn an_invariant_computation_moves_in_front_of_the_loop() {
+        let mut it = counted(0);
+        let product = Builder::new(&mut it.func, it.body).binary(
+            Opcode::Mul,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(lives_in(&it.func, product), it.entry, "it is in front of the loop now");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_computation_the_loop_changes_stays_where_it_is() {
+        let mut it = counted(0);
+        let i = it.func[it.head].params[0];
+        let square = Builder::new(&mut it.func, it.body).binary(Opcode::Mul, i, i, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, square), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_loop_with_nothing_invariant_in_it_is_left_alone() {
+        // The counter, the constant one and the comparison are the whole of the loop, and the
+        // constant is the case the cost table gives nothing to, since it is worked out again
+        // wherever it is wanted.
+        let mut it = counted(0);
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_the_loop_might_not_reach_stays_where_it_is() {
+        let mut it = counted(0);
+        let read = Builder::new(&mut it.func, it.body).load(
+            Type::int(32),
+            it.pointer,
+            record(4),
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, read), it.body, "the loop may run zero times");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_load_moves_once_the_loop_tests_at_the_bottom() {
+        // Section 27.1's claim that header copying is a prerequisite rather than a nicety, run as
+        // a test. Nothing about the load changed. What changed is that the body now runs on every
+        // entry to the loop, so working it out in front is working it out when it was going to be.
+        // The three passes in front of it are the order the pipeline runs them in, and the second
+        // canonicalization is not spare: the copy leaves the rotated loop entered from a block
+        // that also leaves it, and making a preheader out of that is what canonicalization does.
+        let mut it = counted(0);
+        let read = Builder::new(&mut it.func, it.body).load(
+            Type::int(32),
+            it.pointer,
+            record(4),
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.body);
+        let mut an = crate::machine::fixtures::analyses();
+        Canon.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        SPEED.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        Canon.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_ne!(lives_in(&it.func, read), it.body, "it left the body");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn something_that_could_trap_moves_when_it_runs_on_every_entry() {
+        // The header of an unrotated loop is the one block that does, which is why this is the
+        // only hoist an uncanonicalized `while` gets out of the pass.
+        let mut it = counted(0);
+        let share = Builder::new(&mut it.func, it.head).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(lives_in(&it.func, share), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn something_that_could_trap_stays_behind_a_call_that_might_not_come_back() {
+        // The shape of `gcc.c-torture/execute/pr38819.c`, which is what found this. The head runs
+        // on every entry to the loop and the division is invariant, and neither of those is the
+        // question. The call in front of it may exit, so the division is not something the program
+        // was going to work out, and hoisting it crashes a program that returns.
+        let mut it = counted(0);
+        let callee = it.names.intern("g");
+        let mut build = Builder::new(&mut it.func, it.head);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        let share = Builder::new(&mut it.func, it.head).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, share), it.head, "the call in front is what keeps it there");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_division_moves_when_the_call_is_behind_it() {
+        // The other half of the rule, and the reason it is not a count of the calls in the loop.
+        // A call after the division says nothing about whether the division ran.
+        let mut it = counted(0);
+        let callee = it.names.intern("g");
+        let share = Builder::new(&mut it.func, it.head).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        let mut build = Builder::new(&mut it.func, it.head);
+        let signature = build.func().add_signature(Signature::new());
+        build.call(callee, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(lives_in(&it.func, share), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_call_in_one_block_keeps_something_in_a_later_one_where_it_is() {
+        // The flag has to outlive the block it went false in, because the blocks of one turn round
+        // the loop run in the order this walks them and the call is still in front of everything
+        // behind it. A `do-while` written out by hand, so that both blocks of the loop post-dominate
+        // its header and the division would be a hoist this pass makes if it looked at that alone.
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let callee = names.intern("g");
+        let entry = func.create_block();
+        let head = func.create_block();
+        let rest = func.create_block();
+        let done = func.create_block();
+        let limit = func.append_param(entry, Type::int(32));
+        let i = func.append_param(head, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+        let mut build = Builder::new(&mut func, head);
+        let taken = build.func().add_signature(Signature::new());
+        build.call(callee, taken, &[]);
+        Builder::new(&mut func, head).jump(rest, &[]);
+        let share = Builder::new(&mut func, rest).binary(Opcode::SDiv, limit, limit, Flags::NONE);
+        let one = Builder::new(&mut func, rest).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, rest).binary(Opcode::Add, i, one, Flags::NONE);
+        let test = Builder::new(&mut func, rest).icmp(IntPred::Slt, next, limit);
+        Builder::new(&mut func, rest).br_if(test, head, &[next], done, &[]);
+        Builder::new(&mut func, done).ret(&[i]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&func, share), rest, "the call is in front of it in the same turn");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_division_a_test_inside_the_loop_made_safe_stays_inside_that_test() {
+        // The one that looks safe and is not. Inside `if (limit)` the ranges know the divisor is
+        // not zero, so asking about the division where it stands gets a yes. The preheader is not
+        // inside that test and the same question there gets a no, which is the question the pass
+        // has to be asking, because the preheader is where the answer would be used.
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let safe = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let limit = func.append_param(entry, Type::int(32));
+        let i = func.append_param(head, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(head, &[zero]);
+        let test = Builder::new(&mut func, head).icmp(IntPred::Slt, i, limit);
+        Builder::new(&mut func, head).br_if(test, body, &[], done, &[]);
+        let guard = Builder::new(&mut func, body).icmp(IntPred::Ne, limit, zero);
+        Builder::new(&mut func, body).br_if(guard, safe, &[], latch, &[]);
+        let share = Builder::new(&mut func, safe).binary(Opcode::SDiv, limit, limit, Flags::NONE);
+        Builder::new(&mut func, safe).jump(latch, &[]);
+        let one = Builder::new(&mut func, latch).iconst(Type::int(32), 1);
+        let next = Builder::new(&mut func, latch).binary(Opcode::Add, i, one, Flags::NONE);
+        Builder::new(&mut func, latch).jump(head, &[next]);
+        Builder::new(&mut func, done).ret(&[i]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&func, share), safe, "the guard is what made it safe");
+        // The test itself is invariant and does come out, which is worth asserting because it is
+        // the difference between the pass declining this division and the pass declining the loop.
+        assert_eq!(lives_in(&func, guard), entry);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn the_same_division_in_the_body_stays() {
+        let mut it = counted(0);
+        let share = Builder::new(&mut it.func, it.body).binary(
+            Opcode::SDiv,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, share), it.body, "the divisor could be zero");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_volatile_load_stays_even_where_it_runs_on_every_entry() {
+        let mut it = counted(0);
+        let read = Builder::new(&mut it.func, it.head).load(
+            Type::int(32),
+            it.pointer,
+            record(4),
+            Flags::VOLATILE,
+        );
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, EFFECTS), 1);
+        assert_eq!(lives_in(&it.func, read), it.head, "one access per iteration is the point");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_chain_comes_out_in_the_order_it_was_written_in() {
+        // Section 27.6's fourth way of getting it wrong. The sum reads the product, so the product
+        // has to arrive in front of it and not merely arrive.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let product = build.binary(Opcode::Mul, it.limit, it.limit, Flags::NONE);
+        let sum = build.binary(Opcode::Mul, product, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 2);
+        assert_eq!(lives_in(&it.func, product), it.entry);
+        assert_eq!(lives_in(&it.func, sum), it.entry);
+        assert!(position(&it.func, product) < position(&it.func, sum));
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_pass_stops_where_the_fuel_runs_out() {
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let product = build.binary(Opcode::Mul, it.limit, it.limit, Flags::NONE);
+        build.binary(Opcode::Mul, product, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::of(1));
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(stats.count(Kind::Missed, NO_FUEL), 1);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_cheap_computation_stays_where_the_loop_is_already_full() {
+        // Fourteen values arriving and nothing in the loop to spare, so section 27.2's line is
+        // what decides. The add is cheaper than the register it would want and the multiply is
+        // not.
+        let mut it = counted(14);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let sum = build.binary(Opcode::Add, it.limit, it.limit, Flags::NONE);
+        let product = build.binary(Opcode::Mul, it.limit, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 1);
+        assert_eq!(lives_in(&it.func, sum), it.body);
+        assert_eq!(lives_in(&it.func, product), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_cheap_link_moves_when_it_is_carrying_an_expensive_one_out() {
+        // The same full loop and the same add, with the multiply now reading it. On its own the
+        // add is not worth a register and the test above is that. Here it is the only thing
+        // between the multiply and the front of the loop, and refusing it refuses the multiply
+        // too, silently, because an instruction whose operand stayed behind is not invariant.
+        let mut it = counted(14);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let sum = build.binary(Opcode::Add, it.limit, it.limit, Flags::NONE);
+        let product = build.binary(Opcode::Mul, sum, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 0);
+        assert_eq!(lives_in(&it.func, sum), it.entry, "it is carrying the multiply");
+        assert_eq!(lives_in(&it.func, product), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_chain_of_cheap_links_that_carries_nothing_stays_where_it_is() {
+        // Every link rides along while the plan is being made, since what reads it has not been
+        // read yet, and the whole chain comes back out in one walk when the end of it turns out
+        // to be nothing. Two links, so the walk has to answer the second one before the first.
+        let mut it = counted(14);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let first = build.binary(Opcode::Add, it.limit, it.limit, Flags::NONE);
+        let second = build.binary(Opcode::Add, first, it.limit, Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 2);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, first), it.body);
+        assert_eq!(lives_in(&it.func, second), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_add_moves_when_the_loop_has_room() {
+        let mut it = counted(0);
+        let sum = Builder::new(&mut it.func, it.body).binary(
+            Opcode::Add,
+            it.limit,
+            it.limit,
+            Flags::NONE,
+        );
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PRESSURE), 0);
+        assert_eq!(lives_in(&it.func, sum), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_load_beside_it_folds_stays_with_the_load() {
+        // `list->length` read where the loop may not get to it, which keeps the load in. The
+        // address four bytes into the list is no instruction beside the load, since the four goes
+        // in the load's displacement, and out in front of the loop on its own it would be one
+        // more register held across the whole of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        let read = build.load(Type::int(32), at, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        assert_eq!(lives_in(&it.func, at), it.body, "it stays with what folds it");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_load_beside_it_folds_goes_with_the_load() {
+        // The same load where every entry reaches it, so it comes out, and the address is what it
+        // reads and has to come out in front of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.head);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        let read = build.load(Type::int(32), at, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, read), it.entry);
+        assert_eq!(lives_in(&it.func, at), it.entry);
+        assert!(position(&it.func, at) < position(&it.func, read));
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_next_address_adds_to_stays_with_it() {
+        // `h->nodes[i]` with `i` read in the loop. The 32 the array is into the structure goes in
+        // the displacement of the load at the end along with the scaled subscript, so it is no
+        // instruction where it is and a register held across the loop in front of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let i = build.load(Type::int(64), it.pointer, record(8), Flags::NONE);
+        let thirty_two = build.iconst(Type::int(64), 32);
+        let nodes = build.binary(Opcode::PtrAdd, it.pointer, thirty_two, Flags::NONE);
+        let at = build.binary(Opcode::PtrAdd, nodes, i, Flags::NONE);
+        build.load(Type::int(64), at, record(8), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, nodes), it.body, "it stays with what adds to it");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_kept_as_a_value_moves_like_any_add() {
+        // Stored rather than read through, so nothing folds it and it is an add the loop does
+        // not change.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        build.store(at, it.pointer, record(8), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, at), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_loop_with_two_ways_in_is_left_alone() {
+        // No preheader means nowhere to put anything, and section 26 owns making one.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::I1, Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let low = func.create_block();
+        let high = func.create_block();
+        let head = func.create_block();
+        let body = func.create_block();
+        let done = func.create_block();
+        let either = func.append_param(entry, Type::I1);
+        let n = func.append_param(entry, Type::int(32));
+        let i = func.append_param(head, Type::int(32));
+        Builder::new(&mut func, entry).br_if(either, low, &[], high, &[]);
+        let zero = Builder::new(&mut func, low).iconst(Type::int(32), 0);
+        Builder::new(&mut func, low).jump(head, &[zero]);
+        let one = Builder::new(&mut func, high).iconst(Type::int(32), 1);
+        Builder::new(&mut func, high).jump(head, &[one]);
+        let test = Builder::new(&mut func, head).icmp(IntPred::Slt, i, n);
+        Builder::new(&mut func, head).br_if(test, body, &[], done, &[]);
+        let product = Builder::new(&mut func, body).binary(Opcode::Mul, n, n, Flags::NONE);
+        let next = Builder::new(&mut func, body).binary(Opcode::Add, i, product, Flags::NONE);
+        Builder::new(&mut func, body).jump(head, &[next]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, NO_PREHEADER), 1);
+        assert_eq!(lives_in(&func, product), body);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_loop_with_no_way_out_gets_the_pure_hoist_and_not_the_other_one() {
+        // Post-dominance in here is answered against an edge document 06.8's analysis invented, so
+        // nothing in the loop counts as running and only what may move anywhere moves.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32), Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let head = func.create_block();
+        let n = func.append_param(entry, Type::int(32));
+        let pointer = func.append_param(entry, Type::PTR);
+        Builder::new(&mut func, entry).jump(head, &[]);
+        let mut build = Builder::new(&mut func, head);
+        let product = build.binary(Opcode::Mul, n, n, Flags::NONE);
+        let read = build.load(Type::int(32), pointer, record(4), Flags::NONE);
+        build.jump(head, &[]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, SPINS), 1);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&func, product), entry, "arithmetic is safe anywhere");
+        assert_eq!(lives_in(&func, read), head, "the address is still one nobody has vouched for");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn an_invariant_comes_all_the_way_out_of_a_nest_in_one_run() {
+        // Innermost first, so the inner loop leaves the product in the outer loop's preheader,
+        // which is a block of the outer loop, and the outer loop's turn takes it the rest of the
+        // way.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let ready = func.create_block();
+        let inner = func.create_block();
+        let deep = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let n = func.append_param(entry, Type::int(32));
+        let i = func.append_param(outer, Type::int(32));
+        let j = func.append_param(inner, Type::int(32));
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(32), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+        let outer_test = Builder::new(&mut func, outer).icmp(IntPred::Slt, i, n);
+        Builder::new(&mut func, outer).br_if(outer_test, ready, &[], done, &[]);
+        let start = Builder::new(&mut func, ready).iconst(Type::int(32), 0);
+        Builder::new(&mut func, ready).jump(inner, &[start]);
+        let inner_test = Builder::new(&mut func, inner).icmp(IntPred::Slt, j, n);
+        Builder::new(&mut func, inner).br_if(inner_test, deep, &[], latch, &[]);
+        let mut build = Builder::new(&mut func, deep);
+        let product = build.binary(Opcode::Mul, n, n, Flags::NONE);
+        let one = build.iconst(Type::int(32), 1);
+        let next_j = build.binary(Opcode::Add, j, one, Flags::NONE);
+        build.jump(inner, &[next_j]);
+        let mut build = Builder::new(&mut func, latch);
+        let step = build.iconst(Type::int(32), 1);
+        let next_i = build.binary(Opcode::Add, i, step, Flags::NONE);
+        build.jump(outer, &[next_i]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 2, "one level and then the other");
+        assert_eq!(lives_in(&func, product), entry);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_function_with_no_loop_in_it_is_untouched() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        Builder::new(&mut func, entry).ret(&[]);
+
+        let stats = hoist(&mut func, &mut Fuel::unlimited());
+        assert!(!stats.changed());
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn the_address_of_a_global_moves_only_when_something_that_reads_it_moves() {
+        // The load is what is worth hoisting and the address is free, so the address goes with it
+        // and would have gone nowhere on its own. Getting this wrong in the other direction is
+        // what refusing a free value up front does: the load reads an address defined in the loop,
+        // so refusing the address makes the load look like something the loop changes.
+        let mut it = counted(0);
+        let grid = it.names.intern("grid");
+        let mut build = Builder::new(&mut it.func, it.head);
+        let at = build.value(
+            InstData { extra: Extra::Symbol(grid), ..InstData::new(Opcode::GlobalAddr) },
+            Type::PTR,
+        );
+        let read = build.load(Type::int(32), at, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 2, "the load and its address");
+        assert_eq!(lives_in(&it.func, at), it.entry);
+        assert_eq!(lives_in(&it.func, read), it.entry);
+        assert!(position(&it.func, at) < position(&it.func, read));
+        checked(&it.func, &mut it.names, &[grid]);
+    }
+
+    #[test]
+    fn the_address_of_a_global_on_its_own_stays_where_it_is() {
+        // Nothing to carry, so it is a register held for the length of the loop to save an
+        // instruction that costs what a copy of it costs.
+        let mut it = counted(0);
+        let grid = it.names.intern("grid");
+        let at = Builder::new(&mut it.func, it.body).value(
+            InstData { extra: Extra::Symbol(grid), ..InstData::new(Opcode::GlobalAddr) },
+            Type::PTR,
+        );
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, at), it.body);
+        checked(&it.func, &mut it.names, &[grid]);
+    }
+
+    /// An alloca is here so the load below has an address the function can vouch for.
+    #[test]
+    fn a_load_of_a_local_comes_out_of_a_loop_that_writes_somewhere_else() {
+        // The store is through a pointer this function was handed and the load is of storage it
+        // made itself and never let out, so nothing the loop writes is what the load reads. Until
+        // tamnd/rucc#1530 this stayed, because the answer was taken once for the loop and the loop
+        // writes: the pass carries no memory chain and had nothing else to read. It asks the alias
+        // oracle about the one load now.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), slot, record(4), Flags::NONE);
+        build.store(read, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, read), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_stays_where_the_loop_writes_the_address_it_reads() {
+        // The same shape with the store through the pointer the load reads, which is the case the
+        // coarse answer was right about all along.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.store(read, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_stays_where_a_call_in_the_loop_might_have_written_it() {
+        // The address is one the function was handed, so the escape analysis has nothing to say
+        // about it, and without a summary of `g` the honest answer about the call is that it may
+        // have written anything.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new());
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 0, "it never got that far");
+        assert_eq!(lives_in(&it.func, read), it.body);
+    }
+
+    #[test]
+    fn a_load_comes_out_past_a_call_the_summaries_say_touches_nothing() {
+        // The same function and the same call, with the module's answer for `g` in hand. This is
+        // what tamnd/rucc#1557 was built for, seen from the pass that asks: 463 of the 7828 loads
+        // this used to leave in a loop on the SQLite amalgamation come out this way.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new());
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), it.pointer, record(4), Flags::NONE);
+        build.call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        // The oracle reads what the module says about `g` before it reads the summary, so the
+        // module has to have a `g` in it for the question to get that far.
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(it.names.intern("t.c"), &target);
+        module.add_func(Func::new(called, Signature::new()));
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(Outside::of(&module)))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the call is not in the way");
+        // It stays anyway, and the remark says the other reason: the address came in as a
+        // parameter, so working the load out in front of a loop that might not run is a read that
+        // might fault where the program did not. That is section 27.1's question and not this one.
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_touches_nothing_comes_out_of_the_loop() {
+        // tamnd/rucc#1571. The call is in the header, which is the one block of an unrotated loop
+        // that runs on every entry, so the program was going to make it. Moving it to the
+        // preheader makes it once instead of once a time round.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the summary answered it");
+        assert_eq!(it.func.block_of(call), Some(it.entry), "it is in front of the loop now");
+    }
+
+    #[test]
+    fn the_same_call_stays_where_the_loop_might_not_reach_it() {
+        // The body of an unrotated loop is a block the loop may never run, and a callee that
+        // touches no memory can still exit or spin forever, so making the call in front of a loop
+        // that runs zero times is a program that stops where the original returned. The memory
+        // rule let it through and the speculation rule is what keeps it, which is what the two
+        // remarks say.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.body).call(called, signature, &[]);
+        tucked(&mut it.func, it.body);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::nothing(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(stats.count(Kind::Missed, SPECULATIVE), 1);
+        assert_eq!(it.func.block_of(call), Some(it.body));
+    }
+
+    #[test]
+    fn a_call_with_no_summary_stays_in_the_loop_on_the_memory_rule() {
+        // The same call in the same place as the one that moves, with nothing known about `g`.
+        // The remark is the memory one rather than the speculation one, because the memory rule
+        // is asked first and nothing here says which memory the callee writes.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[]);
+        tucked(&mut it.func, it.head);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_only_reads_comes_out_past_a_store_somewhere_else() {
+        // tamnd/rucc#1571's second third. The callee reads what it likes and writes nothing, and
+        // the loop stores into a local whose address never left this function and was not handed
+        // to the call, so there is no way for the store to be what the call reads. The oracle says
+        // that one without knowing anything about `g` at all.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let signature = it.func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(called, signature, &[]);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, slot, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::reading(0));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "the store cannot be what it reads");
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(it.func.block_of(call), Some(it.entry));
+    }
+
+    #[test]
+    fn the_same_call_stays_where_the_loop_writes_what_it_was_handed() {
+        // The same callee with the address the loop stores through passed to it. The parameter is
+        // an address this function knows nothing about, so the oracle cannot rule the store out,
+        // and a call that may read what the iteration before it wrote is one whose answer is not
+        // the same in front of the loop.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let params = [Type::PTR];
+        let signature = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(called, signature, &[it.pointer]);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::reading(1));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_that_writes_stays_even_where_nothing_in_the_loop_could_read_it() {
+        // Not an aliasing question. Moving this call takes its write out of the loop with it, so a
+        // loop that ran ten times leaves the memory of one, and no oracle answer makes that the
+        // same program. Section 27.3 is where it belongs.
+        let mut it = counted(0);
+        let called = it.names.intern("g");
+        let params = [Type::PTR];
+        let signature = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let call = Builder::new(&mut it.func, it.head).call(called, signature, &[it.pointer]);
+        tucked(&mut it.func, it.head);
+
+        let mut summaries = Summaries::nothing();
+        summaries.record(called, Summary::through_arguments(1));
+        let mut an = crate::machine::fixtures::analyses().touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_call_the_summaries_say_only_reads_comes_out_past_a_call_that_writes_elsewhere() {
+        // The write in the loop is another call, so neither end of the question has an access and
+        // the oracle has nothing to be handed. The writer's summary is what makes one: `h` writes
+        // only through what it was passed, so the address it was passed is what `g` gets asked
+        // about, and `g` reads only through what it was passed and was passed a different local.
+        // Neither summary alone answers this. It takes both.
+        let mut it = counted(0);
+        let reader = it.names.intern("g");
+        let writer = it.names.intern("h");
+        let mut build = Builder::new(&mut it.func, it.entry);
+        let mine = local(&mut build, 4);
+        let theirs = local(&mut build, 4);
+        tucked(&mut it.func, it.entry);
+        let params = [Type::PTR];
+        let reads = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let writes = it.func.add_signature(Signature::new().with_params(&params));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(reader, reads, &[mine]);
+        build.call(writer, writes, &[theirs]);
+        tucked(&mut it.func, it.head);
+
+        let looked = Touch { effect: Effect::Reads, escapes: false };
+        let mut summaries = Summaries::nothing();
+        summaries.record(reader, Summary::doing(Effect::Nothing, &[looked]));
+        summaries.record(writer, Summary::through_arguments(1));
+        let outside = declaring(&mut it.names, &[reader, writer]);
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(outside))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0, "not the one `g` reads");
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(it.func.block_of(call), Some(it.entry));
+    }
+
+    #[test]
+    fn the_same_two_calls_where_they_were_handed_the_same_local() {
+        // The same pair with one local between them, which is the case the walk has to get right:
+        // what `h` wrote is exactly what `g` reads, so the call stays where the loop wrote it.
+        let mut it = counted(0);
+        let reader = it.names.intern("g");
+        let writer = it.names.intern("h");
+        let mut build = Builder::new(&mut it.func, it.entry);
+        let shared = local(&mut build, 4);
+        tucked(&mut it.func, it.entry);
+        let params = [Type::PTR];
+        let reads = it
+            .func
+            .add_signature(Signature::new().with_params(&params).with_returns(&[Type::int(32)]));
+        let writes = it.func.add_signature(Signature::new().with_params(&params));
+        let mut build = Builder::new(&mut it.func, it.head);
+        let call = build.call(reader, reads, &[shared]);
+        build.call(writer, writes, &[shared]);
+        tucked(&mut it.func, it.head);
+
+        let looked = Touch { effect: Effect::Reads, escapes: false };
+        let mut summaries = Summaries::nothing();
+        summaries.record(reader, Summary::doing(Effect::Nothing, &[looked]));
+        summaries.record(writer, Summary::through_arguments(1));
+        let outside = declaring(&mut it.names, &[reader, writer]);
+        let mut an = crate::machine::fixtures::analyses()
+            .about(Arc::new(outside))
+            .touching(Arc::new(summaries));
+        let stats = LICM.run(&mut it.func, &mut an, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(it.func.block_of(call), Some(it.head));
+    }
+
+    #[test]
+    fn a_loop_with_more_writes_than_the_budget_leaves_the_load_where_it_is() {
+        // One question per write per load, which is quadratic in the loop, so there is a number.
+        // A loop over it is left exactly where the coarse answer would have left it, and the
+        // remark says it was the budget and not the memory.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let read = build.load(Type::int(32), slot, record(4), Flags::NONE);
+        for _ in 0..=ALIAS_STEPS {
+            build.store(read, it.pointer, record(4), Flags::NONE);
+        }
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, NO_STEPS), 1);
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// Builds a plane write of that kind over that pointer in `block`.
+    ///
+    /// `meta_begin` is the one of these that has to say which kind of storage has come into being,
+    /// and everything these tests start is a local.
+    fn plane(func: &mut Func, block: Block, kind: Opcode, pointer: Value) {
+        let extra = match kind {
+            Opcode::MetaBegin => Extra::Class(StorageClass::Automatic),
+            _ => Extra::None,
+        };
+        let mut build = Builder::new(func, block);
+        let width = build.iconst(Type::int(64), 4);
+        let args = build.func().push_values(&[pointer, width]);
+        build.inst(InstData { args, extra, ..InstData::new(kind) }, &[]);
+    }
+
+    #[test]
+    fn the_same_load_comes_out_of_a_loop_whose_only_write_is_a_plane() {
+        // The same loop as the test above with the store swapped for a `meta_init`, which is what
+        // the loop looks like once the program is built with `-fsafety=detect`. A plane is storage
+        // the runtime keeps for itself and no name in the program reaches one, so a loop whose
+        // only write is that is a loop that writes nothing this load could read.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        plane(&mut it.func, it.body, Opcode::MetaInit, it.pointer);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, read), it.entry, "the plane is not memory it could read");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_load_stays_in_a_loop_that_says_an_object_has_started_existing() {
+        // `meta_begin` says the object under that address exists from here, and a load of it must
+        // not be moved to before that. Nothing else would stop it now that a plane write is not a
+        // write the loop makes, which is why the lifetime boundaries are asked about separately.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        plane(&mut it.func, it.body, Opcode::MetaBegin, slot);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn the_same_load_stays_in_a_loop_that_ends_a_lifetime() {
+        // The other end of the same argument. After `meta_end` the object is gone, so a load that
+        // reads it once a round is not a load whose answer holds in front of the loop.
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        plane(&mut it.func, it.body, Opcode::MetaEnd, slot);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// Builds `cap_extent` of the function's pointer in `block`, with the `cap_of` it reads.
+    fn extent(func: &mut Func, block: Block, pointer: Value) -> Value {
+        let mut build = Builder::new(func, block);
+        let want = build.iconst(Type::int(64), i128::from(i64::MAX));
+        let args = build.func().push_values(&[pointer]);
+        let of = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[of, pointer, want]);
+        build.value(InstData { args, ..InstData::new(Opcode::CapExtent) }, Type::int(64))
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_moves_out_of_a_loop_that_writes_to_it() {
+        // The loop writes through the very pointer being asked about, and the answer is the same
+        // every time round all the same: how much room is left from a pointer is a fact about the
+        // allocation rather than about what is in it. A load here would stay, and the test above
+        // is that load.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let byte = build.iconst(Type::int(32), 0);
+        build.store(byte, it.pointer, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, asked), it.entry, "it is in front of the loop now");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_stays_in_a_loop_that_calls_something_that_could_free() {
+        // A call the module has nothing to say about could be `free`, and then the answer before
+        // the call and the answer after it are different numbers. `crate::split` refuses a loop
+        // for the same call and says so in the same words.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let signature = it.func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = it.names.intern("might_free");
+        Builder::new(&mut it.func, it.body).call(callee, signature, &[it.pointer]);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 1);
+        assert_eq!(lives_in(&it.func, asked), it.body);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn asking_how_big_an_object_is_moves_past_a_call_the_summary_says_cannot_free() {
+        // The same loop with the same call, marked `nofree` by `crate::nofree`. That flag is the
+        // whole difference between this test and the one above it, and a loop with a `memcpy` in
+        // it is the shape it is about.
+        let mut it = counted(0);
+        let asked = extent(&mut it.func, it.body, it.pointer);
+        let signature = it.func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = it.names.intern("cannot_free");
+        let call = Builder::new(&mut it.func, it.body).call(callee, signature, &[it.pointer]);
+        it.func[call].flags |= Flags::NOFREE;
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, MEMORY), 0);
+        assert_eq!(lives_in(&it.func, asked), it.entry, "it is in front of the loop now");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn a_load_of_a_local_the_loop_does_not_write_moves_out_of_the_body() {
+        let mut it = counted(0);
+        let mem = it.func.add_mem(record(4));
+        let slot = Builder::new(&mut it.func, it.entry)
+            .value(InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        tucked(&mut it.func, it.entry);
+        let read =
+            Builder::new(&mut it.func, it.body).load(Type::int(32), slot, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(lives_in(&it.func, read), it.entry, "four bytes of four are always there");
+        sound(&it.func, &mut it.names);
+    }
+
+    /// `current` in the kernel: a `const` global read through `%gs` on one arm of a loop that
+    /// stores and calls. `constant` is what the declaration says.
+    fn current(constant: &str) -> String {
+        format!(
+            "; ModuleID = 'task.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+global @task : bytes 8, align 8, linkage(external){constant}
+
+func @f(ptr, i32) -> i32, linkage(external) {{
+block0(%0: ptr, %1: i32):
+    %2 = global_addr @task
+    %3 = iconst.i32 0
+    jump block1(%3)
+
+block1(%4: i32):
+    %5 = icmp slt %4, %1
+    br_if %5, block2, block5
+
+block2:
+    %6 = icmp eq %4, %3
+    br_if %6, block3, block4
+
+block3:
+    %7 = load.seg_gs %2, align 8
+    store %7 -> %0, align 8
+    call @g() : ()
+    jump block4
+
+block4:
+    %8 = iconst.i32 1
+    %9 = add %4, %8
+    jump block1(%9)
+
+block5:
+    return %4
+}}
+
+func @g(), linkage(external);
+"
+        )
+    }
+
+    /// Runs the pass over the one function in the text and says which block the load ended in.
+    fn read_in(text: &str) -> (Stats, usize) {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the text parses");
+        let id = module.funcs().next().expect("one function");
+        let outside = Arc::new(Outside::of(&module));
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        let stats = LICM.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("{errors:?}");
+        }
+        let func = &module[id];
+        let load = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Load)
+            .expect("the load is still there");
+        (stats, func.block_of(load).expect("it is in a block").index())
+    }
+
+    #[test]
+    fn a_const_global_read_through_gs_comes_out_of_a_loop_that_stores_and_calls() {
+        let (stats, block) = read_in(&current(", constant"));
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(block, 0);
+    }
+
+    #[test]
+    fn the_same_read_of_a_global_that_is_not_const_stays_on_its_arm() {
+        let (stats, block) = read_in(&current(""));
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(block, 3);
+    }
+}

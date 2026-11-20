@@ -1,0 +1,1064 @@
+//! The described classifier against the cases the compiler's hand written ones are tested on.
+//!
+//! `spec/cross-compile/06-abis.md` section 6.7 proposes replacing four hand written classifiers with one
+//! classifier and four descriptions, and the only evidence that matters for that proposal is
+//! that the replacement answers the same thing. So these are the compiler's own cases, ported,
+//! including the ones that exist because somebody got them wrong once.
+//!
+//! Two of them are worth reading even if the rest are skipped. `an_aggregate_that_did_not_fit`
+//! and `sysv_lets_a_later_argument_have_the_register` are the same situation on two ABIs with
+//! opposite answers, and that opposition is the reason [`rucc_abi::Short`] is a field rather
+//! than a constant.
+
+use rucc_abi::abis::{
+    AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, I386_SYSV_REG_STRUCT, RISCV_LP64D,
+    SYSV_AMD64, WASM32_BASIC_C, WASM32_SIMD128, WIN64, WINDOWS_ARM64,
+};
+use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
+
+/// An integer of this size, aligned to itself.
+fn int(size: u64) -> Scalar {
+    Scalar::integer(size)
+}
+
+/// A floating point value in this format, of this size, aligned to itself.
+fn float(format: Format, size: u64) -> Scalar {
+    Scalar::float(format, size)
+}
+
+/// A general purpose register holding this many bytes from this offset.
+const fn gpr(offset: u64, size: u32) -> Slot {
+    Slot::Integer { offset, size }
+}
+
+/// A vector register holding this format from this offset.
+const fn fpr(offset: u64, format: Format) -> Slot {
+    Slot::Float { offset, format }
+}
+
+/// A call on x86-64 Linux with nothing spent yet.
+fn sysv() -> Call {
+    SYSV_AMD64.call()
+}
+
+/// A call on AArch64 Linux with nothing spent yet.
+fn aapcs() -> Call {
+    AAPCS64.call()
+}
+
+/// A call on Windows x64 with nothing spent yet.
+fn win64() -> Call {
+    WIN64.call()
+}
+
+/// A call on RISC-V Linux with nothing spent yet.
+fn riscv() -> Call {
+    RISCV_LP64D.call()
+}
+
+/// A call on i686 Linux, which starts with nothing to spend.
+fn i386() -> Call {
+    I386_SYSV.call()
+}
+
+#[test]
+fn sysv_puts_two_integers_in_two_registers() {
+    let members = pieces(&[int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 8);
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
+
+    let members = pieces(&[int(4), int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 12);
+    // The second register holds the four bytes that are left rather than eight that are not
+    // there, because the object stops at twelve and a wider load can fault.
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8), gpr(8, 4)]));
+}
+
+#[test]
+fn sysv_sends_a_float_beside_an_int_into_a_general_register() {
+    // The classic one. `struct { int a; float b; }` is one eightbyte holding both, the merge
+    // rule says INTEGER, and the float arrives in the low half of a general purpose register
+    // rather than in a vector one.
+    let members = pieces(&[int(4), float(Format::Single, 4)]);
+    assert_eq!(sysv().argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 8)]));
+
+    // Eight bytes apart they are in different eightbytes and each goes where it belongs.
+    let members = pieces(&[int(8), float(Format::Double, 8)]);
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), fpr(8, Format::Double)])
+    );
+}
+
+#[test]
+fn sysv_reads_two_floats_in_one_eightbyte_as_one_double() {
+    let members = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Double)])
+    );
+
+    // One `float` on its own is four bytes, and reading eight of them would read past the
+    // object, so the slot is as wide as the object is.
+    let members = pieces(&[float(Format::Single, 4)]);
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Single)])
+    );
+}
+
+#[test]
+fn sysv_puts_a_quad_in_one_vector_register_and_not_in_two() {
+    // `struct { _Float128 q; }`. Sixteen bytes is two eightbytes, and the psABI classifies the
+    // first SSE and the second SSEUP, which name one register between them. Two `double` slots
+    // here would be two registers, and every argument after this one would then be in a register
+    // the caller and the callee disagree about.
+    let members = pieces(&[float(Format::Quad, 16)]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 16);
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(sysv().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+
+    // And it costs one of the eight rather than two of them, which is the half of the answer a
+    // list of slots does not say on its own.
+    let mut call = sysv();
+    assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(call.float_left(), 7);
+}
+
+#[test]
+fn sysv_gives_an_upper_half_with_nothing_under_it_a_register_of_its_own() {
+    // `union { _Float128 q; long a; }`, where the `long` makes the first eightbyte INTEGER and
+    // leaves the top of the `_Float128` above it. Post merge rule (d) says an SSEUP that is not
+    // the continuation of anything becomes an ordinary SSE, so this is a general purpose
+    // register and a vector register rather than half of a sixteen byte value.
+    let members =
+        [Piece { offset: 0, scalar: float(Format::Quad, 16) }, Piece { offset: 0, scalar: int(8) }];
+    let shape = Shape {
+        size: 16,
+        align: 16,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(shape)),
+        Pass::Pieces(vec![gpr(0, 8), fpr(8, Format::Double)])
+    );
+
+    // With a `double` in the union instead, the first eightbyte is SSE again and the pair is one
+    // register holding the whole quad.
+    let members = [
+        Piece { offset: 0, scalar: float(Format::Quad, 16) },
+        Piece { offset: 0, scalar: float(Format::Double, 8) },
+    ];
+    let shape = Shape {
+        size: 16,
+        align: 16,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+}
+
+#[test]
+fn sysv_gives_a_sixteen_byte_integer_two_registers_where_a_quad_gets_one() {
+    // The two shapes are the same size and the same number of eightbytes, and the difference is
+    // the whole of what SSEUP is for: `__int128` is INTEGER and INTEGER, which is two registers,
+    // and a `_Float128` is SSE and SSEUP, which is one.
+    let members = pieces(&[Scalar { kind: Kind::Integer, size: 16, align: 16 }]);
+    assert_eq!(
+        sysv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn sysv_puts_anything_over_sixteen_bytes_in_memory() {
+    let members = pieces(&[int(8), int(8), int(8)]);
+    assert_eq!(sysv().argument(&Arg::Aggregate(record(&members))), Pass::Memory);
+    // And brings it back through a hidden pointer rather than through the argument area.
+    assert_eq!(sysv().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn sysv_sends_a_misaligned_member_to_memory_and_a_bitfield_not() {
+    // `struct __attribute__((packed)) { char c; int b; }`, where `b` sits at offset one.
+    let members = [
+        Piece { offset: 0, scalar: int(1) },
+        Piece { offset: 1, scalar: Scalar { kind: Kind::Integer, size: 4, align: 4 } },
+    ];
+    let shape = Shape {
+        size: 5,
+        align: 1,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Memory);
+
+    // A bit-field may sit anywhere, which is what an alignment of one says, and it sends
+    // nothing to memory.
+    let members = [
+        Piece { offset: 0, scalar: int(1) },
+        Piece { offset: 1, scalar: Scalar { kind: Kind::Integer, size: 4, align: 1 } },
+    ];
+    let shape = Shape {
+        size: 5,
+        align: 1,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 5)]));
+}
+
+#[test]
+fn sysv_takes_a_long_double_to_memory_going_in_and_the_x87_stack_coming_back() {
+    let members = pieces(&[float(Format::X87Extended, 16)]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 16);
+    assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Memory);
+    assert_eq!(
+        sysv().returns(&Arg::Aggregate(shape)),
+        Pass::Pieces(vec![fpr(0, Format::X87Extended)])
+    );
+}
+
+#[test]
+fn sysv_brings_back_a_complex_long_double_where_a_record_of_two_goes_to_memory() {
+    let members = pieces(&[float(Format::X87Extended, 16), float(Format::X87Extended, 16)]);
+    let complex = Shape { complex: true, ..record(&members) };
+    assert_eq!(
+        sysv().returns(&Arg::Aggregate(complex)),
+        // Two registers of the x87 stack holding the real part and then the imaginary one,
+        // sixteen bytes apart because that is where the members are.
+        Pass::Pieces(vec![fpr(0, Format::X87Extended), fpr(16, Format::X87Extended)])
+    );
+    // The same thirty two bytes with the same two members in the same places, and the only
+    // thing that tells them apart is the flag.
+    assert_eq!(sysv().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn sysv_lets_a_later_argument_have_the_register() {
+    let members = pieces(&[int(8), int(8)]);
+    let shape = Arg::Aggregate(record(&members));
+    let mut call = sysv();
+    // Five integer arguments leave one register, and this wants two.
+    for _ in 0..5 {
+        assert_eq!(call.argument(&Arg::Scalar(int(4))), Pass::Direct);
+    }
+    assert_eq!(call.argument(&shape), Pass::Memory);
+    // A scalar after it still travels as itself in the register that is left. This is the
+    // opposite of what AAPCS64 does with the same situation, and it is why running short is a
+    // field of the rule rather than one behaviour the classifier hard codes.
+    assert_eq!(call.integer_left(), 1);
+    assert_eq!(call.argument(&Arg::Scalar(int(4))), Pass::Direct);
+}
+
+#[test]
+fn sysv_spends_an_argument_register_on_the_returned_pointer() {
+    let big = pieces(&[int(8), int(8), int(8)]);
+    let pair = pieces(&[int(8), int(8)]);
+    let mut call = sysv();
+    assert_eq!(call.returns(&Arg::Aggregate(record(&big))), Pass::Reference);
+    // Five registers left rather than six, so a two register aggregate fits after three
+    // integers and would not have fitted after five.
+    assert_eq!(call.integer_left(), 5);
+    for _ in 0..3 {
+        assert_eq!(call.argument(&Arg::Scalar(int(4))), Pass::Direct);
+    }
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&pair))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn sysv_gives_an_int128_two_registers_and_a_long_double_none() {
+    let pair = pieces(&[int(8), int(8)]);
+    let mut call = sysv();
+    for _ in 0..2 {
+        assert_eq!(call.argument(&Arg::Scalar(int(16))), Pass::Direct);
+    }
+    // Four of the six are gone, so the aggregate fits, and the `long double` between them spent
+    // nothing on its way past.
+    assert_eq!(call.argument(&Arg::Scalar(float(Format::X87Extended, 16))), Pass::Direct);
+    assert_eq!(call.integer_left(), 2);
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&pair))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn sysv_gives_an_int128_no_register_rather_than_half_of_one() {
+    let pair = pieces(&[int(8), int(8)]);
+    let mut call = sysv();
+    // Five of the six, so an `__int128` cannot have the two it needs. Spending the sixth on
+    // half of it would spend it on nothing, and the structure after it would go to memory with
+    // a register still free.
+    for _ in 0..5 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    assert_eq!(call.argument(&Arg::Scalar(int(16))), Pass::Direct);
+    assert_eq!(call.integer_left(), 1);
+    assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    // Now it really is spent, so the pair of eight byte fields has nowhere to go.
+    assert_eq!(call.argument(&Arg::Aggregate(record(&pair))), Pass::Memory);
+}
+
+#[test]
+fn an_aggregate_of_no_size_travels_nowhere_on_every_abi_but_win64() {
+    // Windows x64 passes one as an address, see the test about it below.
+    let shape =
+        Shape { size: 0, align: 1, pieces: &[], complex: false, floating: false, vector: false };
+    for mut call in [sysv(), aapcs(), riscv(), DARWIN_ARM64.call()] {
+        assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Ignore);
+        assert_eq!(call.returns(&Arg::Aggregate(shape)), Pass::Ignore);
+        assert_eq!(call.returns(&Arg::Void), Pass::Ignore);
+    }
+}
+
+#[test]
+fn aapcs_puts_three_floats_in_three_vector_registers_and_one_int_ends_that() {
+    let members = pieces(&[float(Format::Single, 4); 3]);
+    assert_eq!(
+        aapcs().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Single), fpr(4, Format::Single), fpr(8, Format::Single)])
+    );
+
+    // `struct { float a, b, c; int d; }` is sixteen bytes of mixed members, which is two
+    // general purpose registers and no longer homogeneous.
+    let members = pieces(&[
+        float(Format::Single, 4),
+        float(Format::Single, 4),
+        float(Format::Single, 4),
+        int(4),
+    ]);
+    assert_eq!(
+        aapcs().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn aapcs_stops_being_homogeneous_at_five_members() {
+    let members = pieces(&[float(Format::Single, 4); 5]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 20);
+    // Twenty bytes, which is over the sixteen an aggregate can travel in registers in.
+    assert_eq!(aapcs().argument(&Arg::Aggregate(shape)), Pass::Reference);
+}
+
+#[test]
+fn aapcs_does_not_call_a_float_with_padding_after_it_homogeneous() {
+    // `struct { float a; char pad[12]; }` has one floating point member and is not an HFA,
+    // because the members do not fill it.
+    let mut members = vec![Piece { offset: 0, scalar: float(Format::Single, 4) }];
+    for at in 4..16 {
+        members.push(Piece { offset: at, scalar: int(1) });
+    }
+    let shape = Shape {
+        size: 16,
+        align: 4,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(aapcs().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)]));
+}
+
+#[test]
+fn aapcs_costs_the_arguments_nothing_for_a_large_return_value() {
+    let big = pieces(&[int(8), int(8), int(8)]);
+    let pair = pieces(&[int(8), int(8)]);
+    let mut call = aapcs();
+    assert_eq!(call.returns(&Arg::Aggregate(record(&big))), Pass::Reference);
+    // Its address is in x8, so all eight argument registers are still here: six integers and
+    // then a two register aggregate. This is the field that differs from SysV.
+    assert_eq!(call.integer_left(), 8);
+    for _ in 0..6 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&pair))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn aapcs_takes_the_rest_of_the_bank_with_an_aggregate_that_did_not_fit() {
+    let pair = pieces(&[int(8), int(8)]);
+    let one = pieces(&[int(8)]);
+    let mut call = aapcs();
+    for _ in 0..7 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    // One register is left and this wants two, so it goes in the argument area.
+    assert_eq!(call.argument(&Arg::Aggregate(record(&pair))), Pass::Memory);
+    // And the one that was left is not usable by anything after it either, which is the rule
+    // that separates this from SysV.
+    assert_eq!(call.integer_left(), 0);
+    assert_eq!(call.argument(&Arg::Aggregate(record(&one))), Pass::Memory);
+}
+
+#[test]
+fn aapcs_passes_over_sixteen_bytes_as_the_address_of_a_copy() {
+    // The size rule, which is the whole of AAPCS64 once the homogeneous case has declined. At
+    // most sixteen bytes is one or two general purpose registers and anything larger is a
+    // pointer to a copy the caller made, going in and coming back, with no partial case between
+    // them. Three `long`s is the smallest thing on the far side of that line.
+    let mut call = aapcs();
+    let pair = pieces(&[int(8); 2]);
+    let triple = pieces(&[int(8); 3]);
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&pair))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+    assert_eq!(call.argument(&Arg::Aggregate(record(&triple))), Pass::Reference);
+    assert_eq!(aapcs().returns(&Arg::Aggregate(record(&triple))), Pass::Reference);
+}
+
+#[test]
+fn aapcs_counts_the_two_banks_apart() {
+    let quad = pieces(&[float(Format::Double, 8); 4]);
+    let mut call = aapcs();
+    for _ in 0..8 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    // Every general purpose register is gone and all eight vector registers are still here,
+    // which is two of these.
+    for _ in 0..2 {
+        assert_eq!(
+            call.argument(&Arg::Aggregate(record(&quad))),
+            Pass::Pieces(vec![
+                fpr(0, Format::Double),
+                fpr(8, Format::Double),
+                fpr(16, Format::Double),
+                fpr(24, Format::Double),
+            ])
+        );
+    }
+    assert_eq!(call.argument(&Arg::Aggregate(record(&quad))), Pass::Memory);
+}
+
+#[test]
+fn darwin_classifies_a_fixed_argument_exactly_as_aapcs_does() {
+    // The first of the two fields Darwin changes is about variadic arguments, so everything
+    // else has to answer identically. If this ever stops being true, one of the two
+    // descriptions has drifted.
+    let cases = [
+        pieces(&[float(Format::Double, 8), float(Format::Double, 8)]),
+        pieces(&[int(8), int(8), int(8)]),
+        pieces(&[float(Format::Single, 4); 3]),
+        pieces(&[int(4), float(Format::Double, 8)]),
+    ];
+    for members in &cases {
+        let shape = Arg::Aggregate(record(members));
+        assert_eq!(aapcs().argument(&shape), DARWIN_ARM64.call().argument(&shape));
+        assert_eq!(aapcs().returns(&shape), DARWIN_ARM64.call().returns(&shape));
+    }
+}
+
+#[test]
+fn darwin_puts_every_variadic_argument_in_the_argument_area() {
+    let members = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    let shape = Arg::Aggregate(record(&members));
+
+    // Fixed, it is two vector registers on both.
+    assert_eq!(
+        DARWIN_ARM64.call().argument(&shape),
+        Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
+    );
+    // Variadic, it is on the stack on Darwin with every register still free, and unchanged
+    // everywhere else. This is the divergence that makes a variadic call ABI-incompatible with
+    // a non-variadic one, per spec/cross-compile/06-abis.md section 6.3.
+    assert_eq!(DARWIN_ARM64.call().variadic_argument(&shape), Pass::Memory);
+    assert_eq!(
+        AAPCS64.call().variadic_argument(&shape),
+        Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
+    );
+
+    // And it does not spend anything, because there is nothing to spend it on.
+    let mut call = DARWIN_ARM64.call();
+    assert_eq!(call.variadic_argument(&shape), Pass::Memory);
+    assert_eq!(call.float_left(), 8);
+    assert_eq!(call.integer_left(), 8);
+}
+
+#[test]
+fn windows_arm64_is_aapcs64_until_there_is_a_dots() {
+    let four = pieces(&[float(Format::Single, 4); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    let double = Arg::Scalar(float(Format::Double, 8));
+    // Without a `...` a structure of four floats is s0 to s3 and a `double` is d0, as on Linux.
+    let mut call = WINDOWS_ARM64.call();
+    assert_eq!(
+        call.argument(&hfa),
+        Pass::Pieces(vec![
+            fpr(0, Format::Single),
+            fpr(4, Format::Single),
+            fpr(8, Format::Single),
+            fpr(12, Format::Single)
+        ])
+    );
+    assert_eq!(call.argument(&double), Pass::Direct);
+    assert_eq!((call.integer_left(), call.float_left()), (8, 3));
+    // With one, the same structure is sixteen bytes in x0 and x1 and the `double` is its bits in
+    // x2, whether it is named or not. This is the output of clang for aarch64-w64-mingw32.
+    let mut call = WINDOWS_ARM64.call().variadic();
+    assert_eq!(call.argument(&hfa), Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)]));
+    assert_eq!(call.variadic_argument(&double), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!((call.integer_left(), call.float_left()), (5, 8));
+    // A `float` named before the `...` is four bytes of a w register.
+    let single = Arg::Scalar(float(Format::Single, 4));
+    assert_eq!(WINDOWS_ARM64.call().variadic().argument(&single), Pass::Pieces(vec![gpr(0, 4)]));
+    // Nothing else under `variadic` changes, since no other ABI reads only the one bank.
+    for abi in [&AAPCS64, &DARWIN_ARM64, &SYSV_AMD64, &WIN64] {
+        assert_eq!(abi.call().variadic().argument(&double), Pass::Direct, "{}", abi.name);
+    }
+}
+
+#[test]
+fn riscv_passes_what_is_past_a_dots_in_the_integer_registers() {
+    let two = pieces(&[float(Format::Single, 4); 2]);
+    let pair = Arg::Aggregate(record(&two));
+    let double = Arg::Scalar(float(Format::Double, 8));
+    // A named `double` is fa0 whether there is a `...` or not, which is what gcc does for
+    // `void f(double, ...)`.
+    let mut call = RISCV_LP64D.call().variadic();
+    assert_eq!(call.argument(&double), Pass::Direct);
+    assert_eq!((call.integer_left(), call.float_left()), (8, 7));
+    // Past the `...` a `double` is its bits in the next a register, and two `float`s are the
+    // eight bytes of one rather than fa1 and fa2.
+    assert_eq!(call.variadic_argument(&double), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!(call.variadic_argument(&pair), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!((call.integer_left(), call.float_left()), (6, 7));
+}
+
+#[test]
+fn riscv_starts_two_registers_past_a_dots_at_an_even_one() {
+    let wide = Arg::Scalar(int(16));
+    let quad = Arg::Scalar(float(Format::Quad, 16));
+    let one = Arg::Scalar(int(4));
+    // Named, an `__int128` after an `int` is a1 and a2.
+    let mut call = riscv();
+    assert_eq!(call.argument(&one), Pass::Direct);
+    assert_eq!(call.argument(&wide), Pass::Direct);
+    assert_eq!(call.integer_left(), 5);
+    // Past the `...` it is a2 and a3 and a1 is left empty, and a `long double` is the same and
+    // is the value itself, as a named one is, rather than its bits.
+    for arg in [&wide, &quad] {
+        let mut call = RISCV_LP64D.call().variadic();
+        assert_eq!(call.argument(&one), Pass::Direct);
+        assert_eq!(call.variadic_argument(arg), Pass::Direct);
+        assert_eq!(call.integer_left(), 4);
+    }
+}
+
+#[test]
+fn windows_arm64_passes_a_large_homogeneous_aggregate_by_reference_past_a_dots() {
+    let four = pieces(&[float(Format::Double, 8); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    assert!(matches!(WINDOWS_ARM64.call().argument(&hfa), Pass::Pieces(_)));
+    let mut call = WINDOWS_ARM64.call().variadic();
+    assert_eq!(call.variadic_argument(&hfa), Pass::Reference);
+    assert_eq!(call.integer_left(), 7);
+}
+
+#[test]
+fn windows_arm64_does_not_split_a_structure_between_x7_and_the_stack() {
+    // Seven words and then sixteen bytes, which clang puts wholly on the stack, leaving x7 empty
+    // and the argument after it on the stack too.
+    let two = pieces(&[int(8), int(8)]);
+    let pair = Arg::Aggregate(record(&two));
+    let mut call = WINDOWS_ARM64.call().variadic();
+    for _ in 0..7 {
+        assert_eq!(call.variadic_argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    assert_eq!(call.variadic_argument(&pair), Pass::Memory);
+    assert_eq!(call.integer_left(), 0);
+    // The value coming back is not an argument, and a structure of four floats still comes back
+    // in s0 to s3.
+    let four = pieces(&[float(Format::Single, 4); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    assert!(
+        matches!(WINDOWS_ARM64.call().variadic().returns(&hfa), Pass::Pieces(slots) if slots.iter().all(|slot| slot.is_float()))
+    );
+}
+
+#[test]
+fn darwin_aligns_a_homogeneous_aggregate_in_memory_to_its_members_and_anything_else_to_words() {
+    let floats = pieces(&[float(Format::Single, 4); 3]);
+    let bytes = pieces(&[int(1), int(1), int(1)]);
+    let mixed = pieces(&[int(4), float(Format::Single, 4), int(4)]);
+    // Three floats stay on a four byte boundary on Darwin, and a record of three chars or one of
+    // mixed members goes on a word boundary there.
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&floats)), 4);
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&bytes)), 8);
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&mixed)), 8);
+    // Everywhere else the alignment is the record's own, and the backend rounds it.
+    assert_eq!(AAPCS64.call().in_memory(&record(&floats)), 4);
+    assert_eq!(AAPCS64.call().in_memory(&record(&bytes)), 1);
+}
+
+#[test]
+fn win64_reads_a_size_a_register_holds_as_an_integer_whatever_is_in_it() {
+    for scalars in [vec![int(1)], vec![int(2)], vec![int(4)], vec![int(4), int(4)]] {
+        let members = pieces(&scalars);
+        let shape = record(&members);
+        let size = u32::try_from(shape.size).expect("a small record");
+        assert_eq!(win64().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, size)]));
+    }
+
+    // Two `float`s are eight bytes, and eight bytes go in a general purpose register here.
+    let members = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    assert_eq!(win64().argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 8)]));
+}
+
+#[test]
+fn win64_passes_any_other_size_as_an_address() {
+    // Three bytes and twenty four bytes get the same answer, which is the rule that makes this
+    // ABI short.
+    let members = pieces(&[int(1), int(1), int(1)]);
+    assert_eq!(win64().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+    let members = pieces(&[int(8), int(8), int(8)]);
+    assert_eq!(win64().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+    assert_eq!(win64().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn win64_passes_an_aggregate_of_no_size_as_an_address_and_returns_nothing() {
+    // Size zero is not one of the four either, so it goes the way three bytes goes and uses up a
+    // position, which is what mingw's gcc does. Coming back it is nothing.
+    let empty = record(&[]);
+    let mut call = win64();
+    assert_eq!(call.argument(&Arg::Aggregate(empty)), Pass::Reference);
+    assert_eq!(call.integer_left(), 3);
+    assert_eq!(win64().returns(&Arg::Aggregate(empty)), Pass::Ignore);
+}
+
+#[test]
+fn win64_passes_a_scalar_no_register_holds_as_an_address_too() {
+    // The three sixteen byte scalars: the x87 `long double`, the IEEE quad and `__int128`. The
+    // rule here is written over the size of the object and reads none of them differently, which
+    // is what mingw's gcc does with all three.
+    let wide = [float(Format::X87Extended, 16), float(Format::Quad, 16), Scalar::integer(16)];
+    for scalar in wide {
+        let mut call = win64();
+        assert_eq!(call.argument(&Arg::Scalar(scalar)), Pass::Reference);
+        // One position for the address, which is all it costs.
+        assert_eq!(call.integer_left(), 3);
+    }
+
+    // And back the same way, where the address the caller passes is the first argument and the
+    // call has one position fewer for what it was called with.
+    for format in [Format::X87Extended, Format::Quad] {
+        let mut call = win64();
+        assert_eq!(call.returns(&Arg::Scalar(float(format, 16))), Pass::Reference);
+        assert_eq!(call.integer_left(), 3);
+    }
+
+    // An `__int128` is the exception, and it is gcc's exception rather than Microsoft's: it goes
+    // out as an address like the other two and comes back in xmm0, so the call keeps all four
+    // positions for what it was called with.
+    let mut call = win64();
+    assert_eq!(call.returns(&Arg::Scalar(int(16))), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+    assert_eq!(call.integer_left(), 4);
+}
+
+#[test]
+fn no_other_abi_passes_a_wide_scalar_as_an_address() {
+    // A `long double` is in the argument area on SysV, in a vector register on AAPCS64 and in a
+    // pair of general purpose registers on RISC-V. None of the three is an address, and a
+    // classifier that read the size alone would have made all of them one.
+    let wide = float(Format::X87Extended, 16);
+    for mut call in [sysv(), aapcs(), riscv(), DARWIN_ARM64.call()] {
+        assert_eq!(call.argument(&Arg::Scalar(wide)), Pass::Direct);
+        assert_eq!(call.returns(&Arg::Scalar(wide)), Pass::Direct);
+    }
+}
+
+#[test]
+fn win64_classifies_the_ninth_argument_the_way_it_classifies_the_first() {
+    let members = pieces(&[int(4), int(4)]);
+    let mut call = win64();
+    for _ in 0..6 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    // On the stack by now, and still eight bytes of value rather than an address to them.
+    assert_eq!(call.argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 8)]));
+}
+
+#[test]
+fn win64_spends_one_position_whichever_bank_the_value_lands_in() {
+    let mut call = win64();
+    assert_eq!(call.argument(&Arg::Scalar(int(4))), Pass::Direct);
+    assert_eq!(call.integer_left(), 3);
+    // A `double` takes xmm1 rather than xmm0, because the position is what is spent.
+    assert_eq!(call.argument(&Arg::Scalar(float(Format::Double, 8))), Pass::Direct);
+    assert_eq!(call.integer_left(), 2);
+}
+
+#[test]
+fn riscv_puts_two_floating_point_members_in_two_floating_point_registers() {
+    let members = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    assert_eq!(
+        riscv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
+    );
+    // The same going out, which is fa0 and fa1.
+    assert_eq!(
+        riscv().returns(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)])
+    );
+}
+
+#[test]
+fn riscv_puts_one_of_each_in_one_of_each() {
+    let members = pieces(&[float(Format::Double, 8), int(4)]);
+    assert_eq!(
+        riscv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![fpr(0, Format::Double), gpr(8, 4)])
+    );
+    // And the other way round, because the rule is about what the members are rather than
+    // about which one is written first.
+    let members = pieces(&[int(4), float(Format::Double, 8)]);
+    assert_eq!(
+        riscv().argument(&Arg::Aggregate(record(&members))),
+        // The integer is four bytes at zero and the `double` is eight bytes at eight, which is
+        // the case a run of slots without offsets on it cannot describe.
+        Pass::Pieces(vec![gpr(0, 4), fpr(8, Format::Double)])
+    );
+}
+
+#[test]
+fn riscv_stops_the_rule_at_three_members() {
+    let members = pieces(&[float(Format::Single, 4); 3]);
+    let shape = record(&members);
+    assert_eq!(shape.size, 12);
+    assert_eq!(riscv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8), gpr(8, 4)]));
+}
+
+#[test]
+fn riscv_falls_back_to_the_size_rule_when_the_float_registers_are_gone() {
+    let members = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    let mut call = riscv();
+    for _ in 0..8 {
+        assert_eq!(call.argument(&Arg::Scalar(float(Format::Double, 8))), Pass::Direct);
+    }
+    // Every floating point register is gone, so the two members are sixteen bytes in two
+    // general purpose registers instead. This is the one rule in the five descriptions that
+    // declines rather than falling back to the argument area.
+    assert_eq!(
+        call.argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+}
+
+#[test]
+fn riscv_does_not_count_a_long_double_as_a_floating_point_member() {
+    // Sixteen bytes of binary128, which no floating point register on LP64D holds.
+    let members = pieces(&[float(Format::Quad, 16)]);
+    assert_eq!(
+        riscv().argument(&Arg::Aggregate(record(&members))),
+        Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)])
+    );
+    // And a scalar one travels in the two general purpose registers rather than in a vector
+    // register it does not fit in.
+    let mut call = riscv();
+    assert_eq!(call.argument(&Arg::Scalar(float(Format::Quad, 16))), Pass::Direct);
+    assert_eq!(call.integer_left(), 6);
+    assert_eq!(call.float_left(), 8);
+}
+
+#[test]
+fn riscv_passes_over_two_registers_as_an_address() {
+    let members = pieces(&[int(8), int(8), int(8)]);
+    assert_eq!(riscv().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+    assert_eq!(riscv().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn i386_puts_every_aggregate_in_the_argument_area_whatever_is_in_it() {
+    // The eight bytes of two floats that SysV sends in xmm0 and Windows x64 sends in rcx. Here
+    // the size and the contents both stop mattering, which is the whole of this ABI's
+    // classification.
+    let two_floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&two_floats))), Pass::Memory);
+
+    let one_byte = pieces(&[int(1)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&one_byte))), Pass::Memory);
+
+    let large = pieces(&[int(8), int(8), int(8), int(8)]);
+    assert_eq!(i386().argument(&Arg::Aggregate(record(&large))), Pass::Memory);
+}
+
+#[test]
+fn i386_returns_an_aggregate_of_any_size_in_memory() {
+    // Four bytes comes back in eax under `-freg-struct-return`, which Darwin and some BSDs
+    // default to and Linux does not. This description is the Linux one and says so for every
+    // size, so the four byte case and the thirty two byte case answer alike.
+    let four = pieces(&[int(4)]);
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&four))), Pass::Reference);
+
+    let large = pieces(&[int(8), int(8), int(8), int(8)]);
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&large))), Pass::Reference);
+}
+
+#[test]
+fn i386_under_reg_struct_return_brings_back_the_sizes_with_an_integer_mode_in_registers() {
+    let mut reg = I386_SYSV_REG_STRUCT.call();
+    let four = pieces(&[int(4)]);
+    assert_eq!(reg.returns(&Arg::Aggregate(record(&four))), Pass::Pieces(vec![gpr(0, 4)]));
+    let eight = pieces(&[int(4), int(4)]);
+    assert_eq!(
+        reg.returns(&Arg::Aggregate(record(&eight))),
+        Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+    );
+    let twelve = pieces(&[int(4), int(4), int(4)]);
+    assert_eq!(reg.returns(&Arg::Aggregate(record(&twelve))), Pass::Reference);
+    // The arguments are the psABI's still.
+    assert_eq!(reg.argument(&Arg::Aggregate(record(&four))), Pass::Memory);
+}
+
+#[test]
+fn i386_brings_back_a_complex_float_in_eax_and_edx_where_a_record_of_two_goes_to_memory() {
+    // gcc returns `_Complex float` in edx:eax, the real part in eax, and libgcc's `__mulsc3` and
+    // `__divsc3` answer the same way. The larger complex types come back through the hidden
+    // pointer like any record does.
+    let floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    let complex = Shape { complex: true, ..record(&floats) };
+    assert_eq!(i386().returns(&Arg::Aggregate(complex)), Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)]));
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&floats))), Pass::Reference);
+    // As an argument it is eight bytes in the argument area like the record.
+    assert_eq!(i386().argument(&Arg::Aggregate(complex)), Pass::Memory);
+
+    let doubles = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    let complex = Shape { complex: true, ..record(&doubles) };
+    assert_eq!(i386().returns(&Arg::Aggregate(complex)), Pass::Reference);
+}
+
+#[test]
+fn i386_never_has_a_register_to_spend() {
+    let mut call = i386();
+    assert_eq!(call.integer_left(), 0);
+    assert_eq!(call.float_left(), 0);
+
+    // Each of these travels as itself, in the argument area, because there is no bank for any of
+    // them to come out of. The twelve byte one is the x87 `long double`, which is the type this
+    // architecture is on the target matrix for.
+    for scalar in [int(4), int(8), float(Format::Double, 8), float(Format::X87Extended, 12)] {
+        assert_eq!(call.argument(&Arg::Scalar(scalar)), Pass::Direct);
+    }
+
+    // A count that started at zero cannot have gone negative, which is the one thing a saturating
+    // spend could have got wrong here.
+    assert_eq!(call.integer_left(), 0);
+    assert_eq!(call.float_left(), 0);
+}
+
+#[test]
+fn i386_ignores_an_aggregate_of_no_size() {
+    let empty = record(&[]);
+    assert_eq!(i386().argument(&Arg::Aggregate(empty)), Pass::Ignore);
+    assert_eq!(i386().returns(&Arg::Aggregate(empty)), Pass::Ignore);
+}
+
+#[test]
+fn i686_windows_returns_a_small_structure_in_eax_and_edx() {
+    // What clang writes for i686-w64-windows-gnu and i686-pc-windows-msvc at -O2: one, two, four
+    // and eight bytes come back in registers, and three and twelve through the hidden pointer.
+    for abi in [&I386_MINGW, &I386_MSVC] {
+        let byte = pieces(&[int(1)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&byte))),
+            Pass::Pieces(vec![gpr(0, 1)])
+        );
+        let three = pieces(&[int(1), int(1), int(1)]);
+        assert_eq!(abi.call().returns(&Arg::Aggregate(record(&three))), Pass::Reference);
+        let two = pieces(&[int(4), int(4)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&two))),
+            Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+        );
+        let floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&floats))),
+            Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+        );
+        let twelve = pieces(&[int(4), int(4), int(4)]);
+        assert_eq!(abi.call().returns(&Arg::Aggregate(record(&twelve))), Pass::Reference);
+        // Arguments are the argument area whatever their size, as on Linux.
+        assert_eq!(abi.call().argument(&Arg::Aggregate(record(&byte))), Pass::Memory);
+    }
+}
+
+#[test]
+fn mingw_returns_a_lone_float_in_st0_and_msvc_in_eax() {
+    let one_double = pieces(&[float(Format::Double, 8)]);
+    let one_float = pieces(&[float(Format::Single, 4)]);
+    assert_eq!(
+        I386_MINGW.call().returns(&Arg::Aggregate(record(&one_double))),
+        Pass::Pieces(vec![fpr(0, Format::Double)])
+    );
+    assert_eq!(
+        I386_MINGW.call().returns(&Arg::Aggregate(record(&one_float))),
+        Pass::Pieces(vec![fpr(0, Format::Single)])
+    );
+    assert_eq!(
+        I386_MSVC.call().returns(&Arg::Aggregate(record(&one_double))),
+        Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+    );
+    assert_eq!(
+        I386_MSVC.call().returns(&Arg::Aggregate(record(&one_float))),
+        Pass::Pieces(vec![gpr(0, 4)])
+    );
+}
+
+/// A call on wasm32 with nothing spent yet, which never runs short.
+fn wasm() -> Call {
+    WASM32_BASIC_C.call()
+}
+
+#[test]
+fn wasm_passes_a_structure_of_one_scalar_as_that_scalar() {
+    let members = pieces(&[int(8)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
+
+    let members = pieces(&[float(Format::Double, 8)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Double)]));
+
+    // A `long double` is IEEE quad on wasm and is one scalar like any other.
+    let members = pieces(&[float(Format::Quad, 16)]);
+    let shape = record(&members);
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+}
+
+#[test]
+fn wasm_passes_any_other_aggregate_as_the_address_of_a_copy() {
+    // Two `int`s are eight bytes, which travel in one register on SysV and as an address here.
+    let members = pieces(&[int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Reference);
+
+    // One scalar with room after it is not one scalar, which is a `short` in a structure that
+    // `aligned(4)` made four bytes.
+    let members = [Piece { offset: 0, scalar: int(2) }];
+    let shape = Shape {
+        size: 4,
+        align: 4,
+        pieces: &members,
+        complex: false,
+        floating: false,
+        vector: false,
+    };
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+
+    // A `_Complex float` is two scalars, and clang passes it as an aggregate.
+    let members = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    let shape = Shape { complex: true, ..record(&members) };
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+}
+
+#[test]
+fn wasm_never_runs_short_and_passes_the_variadic_part_the_same_way() {
+    let mut call = wasm();
+    for _ in 0..200 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    let members = pieces(&[int(4)]);
+    let shape = record(&members);
+    assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 4)]));
+
+    // Past the `...` the area holds the address of the copy and not its bytes, which is what
+    // clang's `va_arg` on wasm reads.
+    let members = pieces(&[int(4), int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(shape)), Pass::Reference);
+}
+
+#[test]
+fn wasm_passes_each_lane_of_a_vector_as_its_own_scalar() {
+    // A `vector_size(16)` of `int` is four `i32` parameters, which is what clang does without
+    // `-msimd128`. A structure of the same four `int`s is the address of a copy.
+    let members = pieces(&[int(4), int(4), int(4), int(4)]);
+    let lanes = Pass::Pieces(vec![gpr(0, 4), gpr(4, 4), gpr(8, 4), gpr(12, 4)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(wasm().argument(&Arg::Aggregate(vector)), lanes);
+    assert_eq!(wasm().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+
+    // A vector of more than one lane comes back through memory.
+    assert_eq!(wasm().returns(&Arg::Aggregate(vector)), Pass::Reference);
+
+    let members = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    let lanes = Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)]);
+    assert_eq!(wasm().argument(&Arg::Aggregate(vector)), lanes);
+
+    // Past the `...` clang reads the bytes of a vector and not its lanes, so the bytes are in the
+    // variadic area. Any other aggregate there is the address of a copy.
+    let members = pieces(&[int(4), int(4)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(vector)), Pass::Memory);
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn wasm_with_simd128_passes_a_vector_as_v128_values() {
+    let simd = || WASM32_SIMD128.call();
+    let v128 = |offset, size| Slot::Vector { offset, size };
+
+    // A `vector_size(16)` of `int` is one `v128` going in and coming back. A structure of the
+    // same four `int`s is still the address of a copy.
+    let members = pieces(&[int(4), int(4), int(4), int(4)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 16)]));
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 16)]));
+    assert_eq!(simd().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+
+    // A vector of fewer than sixteen bytes is one `v128` too, and a `v1di` is not an `i64`.
+    let members = pieces(&[int(2), int(2)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 4)]));
+    let members = pieces(&[int(8)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 8)]));
+    assert_eq!(wasm().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![gpr(0, 8)]));
+
+    // A `vector_size(32)` is two `v128` going in and comes back through the hidden pointer.
+    let members = pieces(&[int(4); 8]);
+    let vector = Shape { vector: true, ..record(&members) };
+    let two = Pass::Pieces(vec![v128(0, 16), v128(16, 16)]);
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), two);
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Reference);
+
+    // A scalar and a structure of one scalar are the same as without the feature, and so is a
+    // vector past the `...`, whose bytes are in the variadic area.
+    assert_eq!(simd().argument(&Arg::Scalar(int(4))), Pass::Direct);
+    let members = pieces(&[int(4)]);
+    assert_eq!(simd().argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 4)]));
+    let members = pieces(&[int(4); 4]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().variadic_argument(&Arg::Aggregate(vector)), Pass::Memory);
+}
+
+#[test]
+fn wasm_ignores_an_aggregate_of_no_size() {
+    let shape = record(&[]);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Ignore);
+}

@@ -1,0 +1,28 @@
+[package]
+name = "rucc-legalize"
+description = "IR to IR rewrites into the operations that a back end has."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# The rest of the crates section 18.3 expects this one to reach for are added when they are used,
+# not in advance, so that the graph `cargo xtask layers` reads is the real one.
+[dependencies]
+rucc-cost.workspace = true
+rucc-diag.workspace = true
+rucc-ir.workspace = true
+
+# The tests build a module, which needs a target and an interner.
+[dev-dependencies]
+rucc-base.workspace = true
+rucc-target.workspace = true

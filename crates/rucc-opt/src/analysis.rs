@@ -1,0 +1,1132 @@
+//! The analysis cache, and what a pass has to say about what it left standing.
+//!
+//! Design: section 4.3 of `spec/optimizer/04-pass-manager.md`, which calls this the analysis
+//! manager and gives it four jobs and no more than four. Compute an analysis when somebody asks
+//! and keep the answer. Throw an answer away when a pass says it broke the thing the answer was
+//! about. Throw away everything built on top of that answer at the same time. Catch a pass that
+//! says it preserved something it did not.
+//!
+//! The type is called [`Analyses`] rather than `Manager` because this crate already has a pass
+//! manager in [`crate::pipeline`], and a bare `Manager` re-exported at the top of the crate would
+//! not say which of the two it was.
+//!
+//! # What is cached and what is not
+//!
+//! The nine here are the nine that own their data: [`Cfg`], [`Dominators`], [`PostDominators`],
+//! [`Loops`], [`Frontiers`], [`ControlDependence`], [`Frequencies`], [`Liveness`] and
+//! [`Pressure`]. Each is built from the function once and then answers questions without looking
+//! at it again, so each is a thing a cache can hold.
+//!
+//! The rest of the analyses in this crate are not here and do not belong here. [`crate::Alias`],
+//! [`crate::memssa`], [`crate::Scev`] and [`crate::range::query::Ranges`] all borrow the function
+//! they answer about, which means holding one across an edit is not something the cache would have
+//! to be careful about, it is something the compiler refuses. They are query engines built on top
+//! of the ones here, and the ones here are what they cost.
+//!
+//! # Why the cache is keyed by function elsewhere
+//!
+//! There is one of these per function, and [`crate::pipeline`] keeps a map from function to cache
+//! because it runs a pass over the whole module before the next pass starts. Under that order a
+//! cache that lived only as long as one function would be thrown away between every pass and every
+//! analysis would be recomputed for every pass that wanted it. Section 4.2 of the design says to
+//! turn the loop inside out in M4 and run every pass over one function before moving to the next,
+//! and the day that lands the map goes away and one of these lives on the stack of the loop.
+
+use std::cell::{Cell, OnceCell};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use rucc_ir::{Block, Func};
+
+use crate::image::Images;
+use crate::machine::Machine;
+use crate::modref::Summaries;
+use crate::outside::Outside;
+use crate::predict::{Callees, Early, Predictions};
+use crate::profile::Probability;
+use crate::purity::Facts;
+use crate::{
+    Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Liveness, Loops, PostDominators,
+    Pressure,
+};
+
+/// One analysis this cache holds.
+///
+/// The order matters and is checked by a test: an analysis is built out of analyses that come
+/// before it in this list and never out of one that comes after. That is what lets the
+/// invalidation walk settle in one pass over the list rather than in a loop to a fixed point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Analysis {
+    /// [`Cfg`], which everything else here is built on.
+    Cfg,
+    /// [`Dominators`].
+    Dominators,
+    /// [`PostDominators`].
+    PostDominators,
+    /// [`Loops`].
+    Loops,
+    /// [`Frontiers`].
+    Frontiers,
+    /// [`ControlDependence`].
+    ControlDependence,
+    /// [`Frequencies`], which carries the branch predictions it was worked out from.
+    Frequencies,
+    /// [`Liveness`].
+    Liveness,
+    /// [`Pressure`], which is the live counts split by register class.
+    Pressure,
+}
+
+impl Analysis {
+    /// Every analysis this cache holds, in dependency order.
+    pub const EVERY: &'static [Analysis] = &[
+        Analysis::Cfg,
+        Analysis::Dominators,
+        Analysis::PostDominators,
+        Analysis::Loops,
+        Analysis::Frontiers,
+        Analysis::ControlDependence,
+        Analysis::Frequencies,
+        Analysis::Liveness,
+        Analysis::Pressure,
+    ];
+
+    /// What it is called in a message to somebody debugging a pass.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cfg => "the control flow graph",
+            Self::Dominators => "the dominator tree",
+            Self::PostDominators => "the post-dominator tree",
+            Self::Loops => "the loop forest",
+            Self::Frontiers => "the dominance frontiers",
+            Self::ControlDependence => "the control dependence relation",
+            Self::Frequencies => "the block frequencies",
+            Self::Liveness => "the liveness",
+            Self::Pressure => "the register pressure",
+        }
+    }
+
+    /// The analyses this one is built out of, which cannot outlive it.
+    ///
+    /// Section 4.4 of the design has a table of these and the entry for almost every row is
+    /// "any CFG change", which is why [`Analysis::Cfg`] is what the other three name.
+    #[must_use]
+    pub const fn needs(self) -> &'static [Analysis] {
+        match self {
+            Self::Cfg => &[],
+            Self::Dominators | Self::PostDominators => &[Analysis::Cfg],
+            Self::Loops | Self::Frontiers => &[Analysis::Cfg, Analysis::Dominators],
+            Self::ControlDependence => &[Analysis::Cfg, Analysis::PostDominators],
+            Self::Frequencies => &[Analysis::Cfg, Analysis::Dominators, Analysis::Loops],
+            Self::Liveness => &[Analysis::Cfg],
+            Self::Pressure => &[Analysis::Cfg, Analysis::Liveness],
+        }
+    }
+
+    /// Which bit of a [`Preserved`] set this one is.
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+}
+
+/// The analyses read off the graph and nothing else, which a pass that left the graph as it was
+/// cannot have broken whatever it did to the instructions. See [`Analyses::unmoved`].
+const SHAPE: &[Analysis] = &[
+    Analysis::Cfg,
+    Analysis::Dominators,
+    Analysis::PostDominators,
+    Analysis::Loops,
+    Analysis::Frontiers,
+    Analysis::ControlDependence,
+];
+
+/// What a pass leaves standing.
+///
+/// A set rather than the three cases the design writes, because [`Preserved::ALL`] and
+/// [`Preserved::NONE`] are the full set and the empty one and a named set is what is between
+/// them. A pass that adds an analysis to this list is saying the code it produced answers the
+/// same questions the code it was given did, which is a claim about a pass and not about a run,
+/// so it is stated once on the pass rather than returned from each call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preserved(u16);
+
+impl Preserved {
+    /// Everything, which is what a pass that does not change the shape of a function says.
+    pub const ALL: Preserved = Preserved(u16::MAX);
+
+    /// Nothing, which is what a pass that moves an edge says, however small the move was.
+    pub const NONE: Preserved = Preserved(0);
+
+    /// This set and that analysis.
+    #[must_use]
+    pub const fn and(self, analysis: Analysis) -> Self {
+        Self(self.0 | analysis.bit())
+    }
+
+    /// This set without that analysis.
+    ///
+    /// The way a pass says "everything except one thing", which is what a pass that rewrites
+    /// operands and moves no edge has to say: the shape of the function is what it was and the
+    /// liveness is not, because a value read in one more place is live in one more place.
+    #[must_use]
+    pub const fn without(self, analysis: Analysis) -> Self {
+        Self(self.0 & !analysis.bit())
+    }
+
+    /// Whether the pass said this one survived.
+    #[must_use]
+    pub const fn keeps(self, analysis: Analysis) -> bool {
+        self.0 & analysis.bit() != 0
+    }
+}
+
+/// The analyses of one function, computed when asked for and kept until something breaks them.
+///
+/// Empty to start with. Nothing here is computed by existing, which matters because most
+/// functions are walked by a pass that wants none of it.
+///
+/// Each answer is behind a [`OnceCell`] rather than an [`Option`] so that asking for one takes a
+/// shared borrow of the cache instead of an exclusive one. With an exclusive borrow a pass that
+/// wanted two answers at the same time could not have them, because the second call would end the
+/// borrow the first handed out, and the way every pass here got round that was to copy what it
+/// asked for. A copy of the graph or the loop forest is the size of the function, and a pass that
+/// makes one edit at a time was making one per edit. tamnd/rucc#1045.
+#[derive(Clone, Debug)]
+pub struct Analyses {
+    machine: Machine,
+    images: Arc<Images>,
+    outside: Arc<Outside>,
+    purity: Arc<Facts>,
+    modref: Arc<Summaries>,
+    cfg: OnceCell<Cfg>,
+    doms: OnceCell<Dominators>,
+    post: OnceCell<PostDominators>,
+    // The marked `return` each block is bound to, for the early return predictor when a pass asks
+    // about one branch. Not one of the nine: it is the post-dominator tree boiled down to what
+    // the predictor reads, and goes when that tree or the frequencies go.
+    early: OnceCell<Early>,
+    loops: OnceCell<Loops>,
+    frontiers: OnceCell<Frontiers>,
+    control: OnceCell<ControlDependence>,
+    frequencies: OnceCell<Frequencies>,
+    live: OnceCell<Liveness>,
+    pressure: OnceCell<Pressure>,
+    // How long building what is in here has taken since the cache was made, and whether a build is
+    // under way, so that the graph a dominator tree asks for is not counted twice. See
+    // [`Analyses::spent`].
+    spent: Cell<Duration>,
+    building: Cell<bool>,
+}
+
+impl Analyses {
+    /// An empty cache for a function being compiled for that machine.
+    ///
+    /// There is no `Default`, and the machine is why. A cache that could be made without one
+    /// would be made without one, and the pass that read it would be optimizing for a target
+    /// nobody chose. `Machine::unknown` is how a caller says it has no target, and saying it is
+    /// the point.
+    #[must_use]
+    pub fn new(machine: Machine) -> Self {
+        Self {
+            machine,
+            images: Arc::default(),
+            outside: Arc::default(),
+            purity: Arc::default(),
+            modref: Arc::default(),
+            cfg: OnceCell::new(),
+            doms: OnceCell::new(),
+            post: OnceCell::new(),
+            early: OnceCell::new(),
+            loops: OnceCell::new(),
+            frontiers: OnceCell::new(),
+            control: OnceCell::new(),
+            frequencies: OnceCell::new(),
+            live: OnceCell::new(),
+            pressure: OnceCell::new(),
+            spent: Cell::new(Duration::ZERO),
+            building: Cell::new(false),
+        }
+    }
+
+    /// The same cache, reading loads out of those images.
+    ///
+    /// Separate from [`Analyses::new`] rather than a second argument to it, because a cache
+    /// without images is a cache that folds one load fewer and a cache without a machine is a
+    /// cache that optimizes for the wrong target. The empty table is the right default and the
+    /// unknown machine is not, so one of the two is worth making every caller say and the other
+    /// is worth letting most of them leave out.
+    ///
+    /// Counted rather than copied. There is one cache per function and one table per module, and
+    /// the table is the size of the module's read only data.
+    #[must_use]
+    pub fn reading(mut self, images: Arc<Images>) -> Self {
+        self.images = images;
+        self
+    }
+
+    /// The same cache, with those module facts in it for a pass that asks the alias oracle.
+    ///
+    /// Separate from [`Analyses::reading`] for the same reason that one is separate from
+    /// [`Analyses::new`]: the empty one is the right default, it answers `May` to everything it
+    /// would have used the module for, and a caller that has no module gets a slower compile
+    /// rather than a wrong one.
+    ///
+    /// Counted rather than copied, and there is one of these per module.
+    #[must_use]
+    pub fn about(mut self, outside: Arc<Outside>) -> Self {
+        self.outside = outside;
+        self
+    }
+
+    /// The same cache, knowing what the functions this one calls are allowed to do.
+    ///
+    /// Separate from the two above it for the third time and for the third version of the same
+    /// reason. `Facts::nothing` answers [`crate::Purity::Opaque`] to every call, which is what a
+    /// call is until something says otherwise, so a pass that is correct against the empty one is
+    /// correct against every one.
+    ///
+    /// Counted rather than copied, and there is one of these per module.
+    #[must_use]
+    pub fn calling(mut self, purity: Arc<Facts>) -> Self {
+        self.purity = purity;
+        self
+    }
+
+    /// The same cache, knowing what each of those functions does to memory it was handed.
+    ///
+    /// The per parameter half of the answer above, which is the half a loop wants: purity says
+    /// whether a call wrote memory and this says whether it wrote *this*. Separate for the same
+    /// reason again, since [`Summaries::nothing`] knows nothing about anything and a pass that is
+    /// correct against that one is correct against every one.
+    ///
+    /// Counted rather than copied, and there is one of these per module.
+    #[must_use]
+    pub fn touching(mut self, modref: Arc<Summaries>) -> Self {
+        self.modref = modref;
+        self
+    }
+
+    /// The machine this function is being compiled for.
+    ///
+    /// Not an analysis, and here because this is the one thing a pass is handed besides the
+    /// function and its fuel. See [`crate::Machine`] for why that is where it went.
+    #[must_use]
+    pub const fn machine(&self) -> Machine {
+        self.machine
+    }
+
+    /// What the module's read only globals were initialized to.
+    ///
+    /// Here for the same reason the machine is, which [`crate::image`] sets out: it is a fact
+    /// about the module that a pass handed one function cannot reach any other way.
+    #[must_use]
+    pub fn images(&self) -> &Images {
+        &self.images
+    }
+
+    /// The module facts an alias oracle asks for.
+    ///
+    /// Here for the reason the images are, and [`crate::outside`] sets out the rest of it: a pass
+    /// is handed `&mut module[id]`, so the module is the one thing it cannot borrow, and the
+    /// oracle wants four small things out of it.
+    #[must_use]
+    pub fn outside(&self) -> &Outside {
+        &self.outside
+    }
+
+    /// What each function this module calls is allowed to do.
+    ///
+    /// Here for the reason the two above are, and for one more of its own: what a call can do is a
+    /// fact about the callee, there is one callee and many call sites, and a pass holding the
+    /// caller is holding the one function in the module that does not have the answer in it.
+    #[must_use]
+    pub fn purity(&self) -> &Facts {
+        &self.purity
+    }
+
+    /// What each of those functions does to the memory behind each of its pointer parameters.
+    ///
+    /// Here for the reason the one above is. See [`crate::modref`] for what is in one and for
+    /// what an alias oracle does with it.
+    #[must_use]
+    pub fn modref(&self) -> &Summaries {
+        &self.modref
+    }
+
+    /// How long building the answers in this cache has taken, all of them since it was made.
+    ///
+    /// The pipeline reads it before and after each pass and counts the difference under
+    /// [`crate::Phase::Analyses`] rather than under the pass, which is how section 42.7 can give
+    /// the analyses a share of their own when every one of them is built on a pass's behalf.
+    #[must_use]
+    pub fn spent(&self) -> Duration {
+        self.spent.get()
+    }
+
+    /// Builds one answer and counts the time under [`Analyses::spent`], unless it is part of
+    /// building another one, which is already being counted.
+    pub(crate) fn timed<T>(&self, build: impl FnOnce() -> T) -> T {
+        if self.building.get() {
+            return build();
+        }
+        self.building.set(true);
+        let started = Instant::now();
+        let built = build();
+        self.spent.set(self.spent.get() + started.elapsed());
+        self.building.set(false);
+        built
+    }
+
+    /// The control flow graph, computed if it is not already here.
+    pub fn cfg(&self, func: &Func) -> &Cfg {
+        self.cfg.get_or_init(|| self.timed(|| Cfg::new(func)))
+    }
+
+    /// The dominator tree, computed if it is not already here.
+    ///
+    /// The graph comes out of the cache as well, so a caller that wants both pays for it once.
+    /// Asking for it through the method above rather than reaching into the field is allowed here
+    /// because the two are different cells, and a cell being filled in only refuses a second ask
+    /// for itself.
+    pub fn dominators(&self, func: &Func) -> &Dominators {
+        self.doms.get_or_init(|| self.timed(|| Dominators::new(self.cfg(func))))
+    }
+
+    /// The post-dominator tree, computed if it is not already here.
+    ///
+    /// # Panics
+    ///
+    /// Panics through [`PostDominators::new`], on a function with a block that control reaches
+    /// and that has no path to any exit even after the fake edges have been added.
+    pub fn post_dominators(&self, func: &Func) -> &PostDominators {
+        self.post.get_or_init(|| self.timed(|| PostDominators::new(self.cfg(func))))
+    }
+
+    /// The loop forest, computed if it is not already here.
+    pub fn loops(&self, func: &Func) -> &Loops {
+        self.loops.get_or_init(|| self.timed(|| Loops::new(self.cfg(func), self.dominators(func))))
+    }
+
+    /// The loop forest taken out of the cache, so that a pass can change it along with the
+    /// function and put it back with [`Analyses::keep_loops`].
+    pub(crate) fn take_loops(&mut self, func: &Func) -> Loops {
+        self.loops(func);
+        self.loops.take().expect("the forest was just built")
+    }
+
+    /// Puts back a forest [`Analyses::take_loops`] took out, which has to be about the function as
+    /// it is now.
+    pub(crate) fn keep_loops(&mut self, loops: Loops) {
+        self.loops = OnceCell::from(loops);
+    }
+
+    /// The dominance frontier of every block, computed if it is not already here.
+    pub fn frontiers(&self, func: &Func) -> &Frontiers {
+        self.frontiers
+            .get_or_init(|| self.timed(|| Frontiers::new(self.cfg(func), self.dominators(func))))
+    }
+
+    /// Which branches decide whether each block runs, computed if it is not already here.
+    ///
+    /// # Panics
+    ///
+    /// Panics through [`PostDominators::new`], for the reason above it.
+    pub fn control_dependence(&self, func: &Func) -> &ControlDependence {
+        self.control.get_or_init(|| {
+            self.timed(|| ControlDependence::new(self.cfg(func), self.post_dominators(func)))
+        })
+    }
+
+    /// How often each block runs and which way each branch goes, computed if it is not here.
+    ///
+    /// Predicted rather than measured, and every number out of it says so. A function pass is
+    /// given one function and not the module around it, so nothing is known here about what any
+    /// callee does. Section 11.2's two predictors that would like to know, which are the ones
+    /// about a call that never returns and a call to something cold, still fire on what the IR
+    /// says: the front end puts an unreachable after a call that does not come back. A module
+    /// pass that wants the rest of the answer builds its own with [`Callees::of_module`].
+    pub fn frequencies(&self, func: &Func) -> &Frequencies {
+        self.frequencies.get_or_init(|| {
+            self.timed(|| {
+                Frequencies::of(func, self.cfg(func), self.loops(func), &Callees::nothing())
+            })
+        })
+    }
+
+    /// The predicted probability of the edge at that position out of one block, the same number
+    /// [`Frequencies::taken`] gives.
+    ///
+    /// When the frequencies are not here this predicts the one branch and leaves them unbuilt, so a
+    /// pass that asks about a branch after each change it makes does not pay for a whole function's
+    /// worth of predictions and block counts each time.
+    pub fn taken(&self, func: &Func, block: Block, index: usize) -> Probability {
+        if let Some(frequencies) = self.frequencies.get() {
+            return frequencies.taken(block, index);
+        }
+        let early = || self.early.get_or_init(|| self.timed(|| Early::of(func, self.cfg(func))));
+        self.timed(|| {
+            Predictions::one(
+                func,
+                self.cfg(func),
+                self.loops(func),
+                &early,
+                &Callees::nothing(),
+                block,
+                index,
+            )
+        })
+    }
+
+    /// What is live at the edges of every block, computed if it is not here.
+    pub fn live(&self, func: &Func) -> &Liveness {
+        self.live.get_or_init(|| self.timed(|| Liveness::of(func, self.cfg(func))))
+    }
+
+    /// How many registers of each class the function needs where, computed if it is not here.
+    ///
+    /// Section 40.6's one function with four consumers. It is in the cache rather than at each of
+    /// them because four passes computing their own liveness is four chances for the numbers to
+    /// disagree, and two passes making opposite decisions off different counts of the same thing
+    /// is the failure that is hardest to see afterwards.
+    pub fn pressure(&self, func: &Func) -> &Pressure {
+        self.pressure
+            .get_or_init(|| self.timed(|| Pressure::of(func, self.cfg(func), self.live(func))))
+    }
+
+    /// Whether this one is here without computing it.
+    ///
+    /// For the debug check below and for tests. A pass has no business asking, because a pass
+    /// that behaves differently depending on what somebody else happened to leave in the cache
+    /// is a pass whose output depends on the pipeline around it.
+    #[must_use]
+    pub fn holds(&self, analysis: Analysis) -> bool {
+        match analysis {
+            Analysis::Cfg => self.cfg.get().is_some(),
+            Analysis::Dominators => self.doms.get().is_some(),
+            Analysis::PostDominators => self.post.get().is_some(),
+            Analysis::Loops => self.loops.get().is_some(),
+            Analysis::Frontiers => self.frontiers.get().is_some(),
+            Analysis::ControlDependence => self.control.get().is_some(),
+            Analysis::Frequencies => self.frequencies.get().is_some(),
+            Analysis::Liveness => self.live.get().is_some(),
+            Analysis::Pressure => self.pressure.get().is_some(),
+        }
+    }
+
+    /// Takes the pass at its word, and in a checked build sees whether it was telling the truth.
+    ///
+    /// Call it after every pass over the function, with what the pass said it preserved. What
+    /// comes back is the analyses the pass claimed to preserve and did not, which is empty when
+    /// `check` is off and is empty on an honest pass. Everything the pass did not preserve is
+    /// gone from the cache afterwards, and so is everything that was built on top of it.
+    ///
+    /// The check recomputes, which is why it is behind a flag and why the flag is the one that
+    /// already turns the IR verifier on. Both are the same kind of thing: a cost paid in a
+    /// build somebody is developing in, to catch the kind of mistake that produces a wrong
+    /// program rather than a slow one.
+    pub fn settle(&mut self, func: &Func, keeps: Preserved, check: bool) -> Vec<Analysis> {
+        let lied = if check { self.lies(func, keeps) } else { Vec::new() };
+        // What the pass said, minus what it was just caught being wrong about. A cache that
+        // keeps an answer it has proved stale is worse than one that never looked, because the
+        // complaint goes into a report somebody reads later and the stale answer goes into the
+        // next pass now.
+        let mut keeps = keeps;
+        for &analysis in &lied {
+            keeps = keeps.without(analysis);
+        }
+        let alive = Self::survivors(keeps);
+        for &analysis in Analysis::EVERY {
+            if !alive[analysis as usize] {
+                self.drop(analysis);
+            }
+        }
+        lied
+    }
+
+    /// What a pass that changed the function left standing, once the graph has been read again.
+    ///
+    /// A pass that can move an edge says it preserved nothing, and most of the times one of those
+    /// changes something it moved no edge: a jump threading that only renamed a value, a pruning
+    /// that only narrowed a compare. The graph, both trees, the forest, the frontiers and the
+    /// control dependence are read off the graph and nothing else, and each one in the cache was
+    /// built on the graph in the cache, since none of them outlives it. So when the graph read off
+    /// the function now is the one in the cache, all six are what building them again would give,
+    /// and they are kept. When it is not, the graph just read is the right one and is kept in
+    /// place of the old, and what was built on the old goes the way the claim says. On duktape.c
+    /// at `-O2` the forest built again after a pass like that was a tenth of the build.
+    /// tamnd/rucc#3052.
+    ///
+    /// For the manager, between a pass and [`Analyses::settle`]. A pass that changes the function
+    /// itself has [`Analyses::clear`] or its own claim, and a test of what a claim means wants the
+    /// claim read literally.
+    pub fn unmoved(&mut self, func: &Func, keeps: Preserved) -> Preserved {
+        if keeps.keeps(Analysis::Cfg) {
+            return keeps;
+        }
+        let Some(old) = self.cfg.get() else { return keeps };
+        let now = Cfg::new(func);
+        if now == *old {
+            return SHAPE.iter().fold(keeps, |keeps, &analysis| keeps.and(analysis));
+        }
+        self.cfg = OnceCell::from(now);
+        keeps.and(Analysis::Cfg)
+    }
+
+    /// What a claim leaves standing, once what each analysis is built out of is taken into
+    /// account.
+    ///
+    /// One pass over the list in dependency order. An analysis survives if the pass said so and
+    /// everything it is built out of also survived, and because `needs` only ever names an
+    /// earlier analysis, the answer for what it needs is already final by the time this gets
+    /// there.
+    ///
+    /// Both callers want the claim read this way rather than literally. A pass that says it broke
+    /// the liveness has broken the register pressure with it whether or not it mentions it, so
+    /// the cache has to throw the counts away, and the check below has no business complaining
+    /// about an answer that is on its way out either.
+    fn survivors(keeps: Preserved) -> [bool; Analysis::EVERY.len()] {
+        let mut alive = [false; Analysis::EVERY.len()];
+        for &analysis in Analysis::EVERY {
+            alive[analysis as usize] =
+                keeps.keeps(analysis) && analysis.needs().iter().all(|&need| alive[need as usize]);
+        }
+        alive
+    }
+
+    /// Throws every analysis away, whatever any pass said.
+    ///
+    /// For the caller that changed the function itself rather than through a pass, and for a
+    /// test that wants a cold cache. The machine is not thrown away, because it is not an
+    /// analysis and nothing a pass did to the function changed which target it is for. Neither are
+    /// the images, for the same reason: no pass writes to a `const` global. Neither are the module
+    /// facts, since a function pass cannot add a symbol or a type node. Neither is what the
+    /// functions are allowed to do, which was worked out for the whole module before the run: a
+    /// pass that makes one function do less can only leave that answer stale in the safe
+    /// direction, and a pass cannot make one do more. Neither is what they do to the memory they
+    /// are handed, which is the same argument once more.
+    pub fn clear(&mut self) {
+        let spent = self.spent.get();
+        *self = Self::new(self.machine)
+            .reading(Arc::clone(&self.images))
+            .about(Arc::clone(&self.outside))
+            .calling(Arc::clone(&self.purity))
+            .touching(Arc::clone(&self.modref));
+        // Not an answer about the function, and the pipeline reads it on either side of a pass that
+        // may have cleared the cache in between.
+        self.spent.set(spent);
+    }
+
+    /// Forgets everything as [`Analyses::clear`] does, except the graph, the loop forest and the
+    /// early return table when they are here, which are told about each block that went away and the
+    /// block that took over its edges.
+    ///
+    /// For a pass that has just folded blocks into the one block that reached each of them, under
+    /// the terms [`Loops::merged`] gives, and will ask about a branch again before it returns.
+    pub(crate) fn clear_merging(&mut self, func: &Func, merges: &[(Block, Block)]) {
+        let cfg = self.cfg.take();
+        let loops = self.loops.take();
+        let early = self.early.take();
+        self.clear();
+        if let (Some(mut cfg), Some(&(_, into))) = (cfg, merges.first()) {
+            let gone: Vec<Block> = merges.iter().map(|&(gone, _)| gone).collect();
+            if merges.iter().all(|&(_, it)| it == into) && cfg.merged(func, into, &gone) {
+                #[cfg(debug_assertions)]
+                assert_eq!(cfg, Cfg::new(func), "the graph kept is the one built");
+                self.cfg = OnceCell::from(cfg);
+            }
+        }
+        if let Some(mut early) = early {
+            for &(gone, into) in merges {
+                early.merged(gone, into);
+            }
+            #[cfg(debug_assertions)]
+            assert_eq!(early, Early::of(func, &Cfg::new(func)), "the table kept is the one built");
+            self.early = OnceCell::from(early);
+        }
+        let Some(mut loops) = loops else { return };
+        for &(gone, into) in merges {
+            if !loops.merged(gone, into) {
+                return;
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cfg = Cfg::new(func);
+            let fresh = Loops::new(&cfg, &Dominators::new(&cfg));
+            assert_eq!(
+                loops.summary(&cfg),
+                fresh.summary(&cfg),
+                "the forest kept is the one built"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = func;
+        self.loops = OnceCell::from(loops);
+    }
+
+    /// Forgets one analysis and nothing else.
+    fn drop(&mut self, analysis: Analysis) {
+        match analysis {
+            Analysis::Cfg => {
+                self.cfg.take();
+            }
+            Analysis::Dominators => {
+                self.doms.take();
+            }
+            Analysis::PostDominators => {
+                self.post.take();
+                self.early.take();
+            }
+            Analysis::Loops => {
+                self.loops.take();
+            }
+            Analysis::Frontiers => {
+                self.frontiers.take();
+            }
+            Analysis::ControlDependence => {
+                self.control.take();
+            }
+            Analysis::Frequencies => {
+                self.frequencies.take();
+                self.early.take();
+            }
+            Analysis::Liveness => {
+                self.live.take();
+            }
+            Analysis::Pressure => {
+                self.pressure.take();
+            }
+        }
+    }
+
+    /// The analyses that are here, were claimed to be preserved, and do not match what the
+    /// function says now.
+    ///
+    /// Only the ones that are here, because an analysis nobody asked for is one nobody can have
+    /// been misled by, and recomputing it to check a claim about it would be the cache doing
+    /// work the compilation never wanted. Only the ones the claim leaves standing, too, for the
+    /// same reason: what is about to be thrown away cannot mislead anybody either.
+    fn lies(&self, func: &Func, keeps: Preserved) -> Vec<Analysis> {
+        let alive = Self::survivors(keeps);
+        let wanted: Vec<Analysis> = Analysis::EVERY
+            .iter()
+            .copied()
+            .filter(|&it| self.holds(it) && alive[it as usize])
+            .collect();
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        // From the function rather than from anything cached, since what is cached is exactly
+        // what is under suspicion.
+        let cfg = Cfg::new(func);
+        let mut lied = Vec::new();
+        for analysis in wanted {
+            let same = match analysis {
+                Analysis::Cfg => self.cfg.get() == Some(&cfg),
+                Analysis::Dominators => self.doms.get() == Some(&Dominators::new(&cfg)),
+                Analysis::PostDominators => self.post.get() == Some(&PostDominators::new(&cfg)),
+                Analysis::Loops => {
+                    let fresh = Loops::new(&cfg, &Dominators::new(&cfg));
+                    self.loops.get().map(|loops| loops.summary(&cfg)) == Some(fresh.summary(&cfg))
+                }
+                Analysis::Frontiers => {
+                    self.frontiers.get() == Some(&Frontiers::new(&cfg, &Dominators::new(&cfg)))
+                }
+                Analysis::ControlDependence => {
+                    self.control.get()
+                        == Some(&ControlDependence::new(&cfg, &PostDominators::new(&cfg)))
+                }
+                Analysis::Frequencies => {
+                    let doms = Dominators::new(&cfg);
+                    let loops = Loops::new(&cfg, &doms);
+                    let now = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
+                    self.frequencies.get() == Some(&now)
+                }
+                Analysis::Liveness => self.live.get() == Some(&Liveness::of(func, &cfg)),
+                Analysis::Pressure => {
+                    let live = Liveness::of(func, &cfg);
+                    self.pressure.get() == Some(&Pressure::of(func, &cfg, &live))
+                }
+            };
+            if !same {
+                lied.push(analysis);
+            }
+        }
+        lied
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rucc_base::Interner;
+    use rucc_ir::{Block, Func, Signature};
+
+    use super::{Analysis, Preserved};
+    use crate::modref::{Summaries, Summary};
+    use crate::purity::{Facts, Purity};
+    use crate::testing::graph;
+
+    /// A diamond with a loop around the join, which is a shape every analysis here has something
+    /// to say about.
+    fn func() -> Func {
+        graph(&[&[1, 2], &[3], &[3], &[4, 1], &[]])
+    }
+
+    #[test]
+    fn an_analysis_is_built_out_of_ones_that_come_before_it() {
+        // The invalidation walk depends on this and would silently keep a stale analysis if it
+        // stopped being true, which is the one bug this file exists to stop.
+        for &analysis in Analysis::EVERY {
+            for &need in analysis.needs() {
+                assert!(need < analysis, "{} is built out of a later analysis", analysis.name());
+            }
+        }
+    }
+
+    #[test]
+    fn every_analysis_is_in_the_list_once() {
+        for &analysis in Analysis::EVERY {
+            let found = Analysis::EVERY.iter().filter(|&&it| it == analysis).count();
+            assert_eq!(found, 1, "{} appears twice", analysis.name());
+        }
+        assert_eq!(Analysis::EVERY.len(), 9);
+    }
+
+    #[test]
+    fn all_keeps_everything_and_none_keeps_nothing() {
+        for &analysis in Analysis::EVERY {
+            assert!(Preserved::ALL.keeps(analysis));
+            assert!(!Preserved::NONE.keeps(analysis));
+        }
+    }
+
+    #[test]
+    fn a_named_set_holds_what_was_named_and_nothing_else() {
+        let keeps = Preserved::NONE.and(Analysis::Cfg).and(Analysis::Loops);
+        assert!(keeps.keeps(Analysis::Cfg));
+        assert!(keeps.keeps(Analysis::Loops));
+        assert!(!keeps.keeps(Analysis::Dominators));
+        assert!(!keeps.keeps(Analysis::PostDominators));
+    }
+
+    #[test]
+    fn nothing_is_computed_until_it_is_asked_for() {
+        let an = crate::machine::fixtures::analyses();
+        for &analysis in Analysis::EVERY {
+            assert!(!an.holds(analysis));
+        }
+        let func = func();
+        an.dominators(&func);
+        // The graph as well, because the tree is built out of it and building it twice is what
+        // the cache is here to stop.
+        assert!(an.holds(Analysis::Cfg));
+        assert!(an.holds(Analysis::Dominators));
+        assert!(!an.holds(Analysis::Loops));
+        assert!(!an.holds(Analysis::PostDominators));
+    }
+
+    #[test]
+    fn asking_twice_gives_the_same_answer_and_the_second_one_is_free() {
+        let func = func();
+        let an = crate::machine::fixtures::analyses();
+        let first = an.cfg(&func).clone();
+        let second = an.cfg(&func);
+        assert_eq!(&first, second);
+    }
+
+    #[test]
+    fn the_loop_forest_pulls_in_what_it_is_built_out_of() {
+        let func = func();
+        let an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        assert!(an.holds(Analysis::Cfg));
+        assert!(an.holds(Analysis::Dominators));
+        assert!(an.holds(Analysis::Loops));
+    }
+
+    #[test]
+    fn preserving_everything_keeps_everything() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        an.frequencies(&func);
+        an.pressure(&func);
+        assert!(an.settle(&func, Preserved::ALL, true).is_empty());
+        for &analysis in Analysis::EVERY {
+            assert!(an.holds(analysis), "{} was thrown away", analysis.name());
+        }
+    }
+
+    #[test]
+    fn the_pressure_falls_with_the_liveness_it_was_counted_from() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.pressure(&func);
+        assert!(an.holds(Analysis::Liveness), "it had to be computed to count anything");
+        let keeps = Preserved::NONE.and(Analysis::Cfg).and(Analysis::Pressure);
+        an.settle(&func, keeps, false);
+        assert!(an.holds(Analysis::Cfg));
+        assert!(!an.holds(Analysis::Liveness));
+        assert!(!an.holds(Analysis::Pressure), "a count outlived what it counted");
+    }
+
+    #[test]
+    fn a_claim_is_read_with_what_each_analysis_is_built_out_of() {
+        // So `.without(Analysis::Liveness)` is the whole claim a pass that moved a use has to
+        // make. The counts come off the liveness, so they went with it, and a pass that had to
+        // remember to say so twice would be a pass that eventually forgot.
+        let alive = super::Analyses::survivors(Preserved::ALL.without(Analysis::Liveness));
+        assert!(!alive[Analysis::Liveness as usize]);
+        assert!(!alive[Analysis::Pressure as usize], "a count survived what it was counted from");
+        assert!(alive[Analysis::Loops as usize], "the shape of the function did not change");
+    }
+
+    #[test]
+    fn preserving_nothing_empties_the_cache() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        an.settle(&func, Preserved::NONE, false);
+        for &analysis in Analysis::EVERY {
+            assert!(!an.holds(analysis), "{} outlived the pass", analysis.name());
+        }
+    }
+
+    #[test]
+    fn losing_the_graph_loses_what_was_built_on_it() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.post_dominators(&func);
+        // A pass that says it kept the trees and the forest and not the graph they came out of.
+        // What it says about them is not wrong so much as meaningless, and taking it at its word
+        // is how a stale dominator tree reaches the pass after next.
+        let keeps = Preserved::NONE
+            .and(Analysis::Dominators)
+            .and(Analysis::PostDominators)
+            .and(Analysis::Loops);
+        an.settle(&func, keeps, false);
+        for &analysis in Analysis::EVERY {
+            assert!(!an.holds(analysis), "{} outlived the graph", analysis.name());
+        }
+    }
+
+    #[test]
+    fn losing_the_dominator_tree_loses_the_forest_and_leaves_the_graph() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.post_dominators(&func);
+        let keeps =
+            Preserved::NONE.and(Analysis::Cfg).and(Analysis::PostDominators).and(Analysis::Loops);
+        an.settle(&func, keeps, false);
+        assert!(an.holds(Analysis::Cfg));
+        assert!(an.holds(Analysis::PostDominators));
+        assert!(!an.holds(Analysis::Dominators), "the tree was not preserved");
+        assert!(!an.holds(Analysis::Loops), "the forest outlived the tree it needs");
+    }
+
+    #[test]
+    fn each_frontier_falls_with_the_tree_it_was_walked_on_and_not_the_other_one() {
+        // The two frontiers are the same algorithm, but they are not the same analysis. A pass
+        // that claims both and only keeps one of the two trees gets to keep one of them, and the
+        // other goes with the tree it was walked on whatever the pass said about it.
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        let keeps = Preserved::NONE
+            .and(Analysis::Cfg)
+            .and(Analysis::Dominators)
+            .and(Analysis::Frontiers)
+            .and(Analysis::ControlDependence);
+        an.settle(&func, keeps, false);
+        assert!(an.holds(Analysis::Frontiers), "the frontier stands on a tree that stood");
+        assert!(!an.holds(Analysis::ControlDependence), "the post-dominator tree went with it");
+    }
+
+    #[test]
+    fn the_frequencies_fall_with_the_loop_forest_they_were_worked_out_from() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.frequencies(&func);
+        // Asking for them brings in the graph, the tree and the forest, because the series in
+        // section 11.3 is per loop and there is no loop without all three.
+        for analysis in [Analysis::Cfg, Analysis::Dominators, Analysis::Loops] {
+            assert!(an.holds(analysis), "{} was not pulled in", analysis.name());
+        }
+        let keeps =
+            Preserved::NONE.and(Analysis::Cfg).and(Analysis::Dominators).and(Analysis::Frequencies);
+        an.settle(&func, keeps, false);
+        assert!(!an.holds(Analysis::Loops), "the forest was not preserved");
+        assert!(!an.holds(Analysis::Frequencies), "a frequency outlived the loop it counted");
+    }
+
+    #[test]
+    fn a_pass_that_says_it_kept_the_graph_and_moved_an_edge_is_caught() {
+        let mut func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        // The edit a lying pass makes: block4 falls off the end of the diamond, and now it
+        // returns to nobody instead. The blocks are the same blocks and the graph is not the
+        // same graph.
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        let lied = an.settle(&func, Preserved::ALL, true);
+        assert_eq!(lied, vec![Analysis::Cfg, Analysis::Dominators, Analysis::Loops]);
+        // And it is thrown away anyway, because a cache that keeps what it just proved wrong is
+        // worse than one that never checked.
+        for &analysis in Analysis::EVERY {
+            assert!(!an.holds(analysis));
+        }
+    }
+
+    #[test]
+    fn a_lie_about_the_frontiers_is_caught_the_same_way() {
+        let mut func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        // The back edge goes away, so block1 stops being a join and block3 stops being a branch.
+        // Both frontiers move, and a pass that swears they did not is wrong about both.
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        let lied = an.settle(&func, Preserved::ALL, true);
+        assert!(lied.contains(&Analysis::Frontiers));
+        assert!(lied.contains(&Analysis::ControlDependence));
+    }
+
+    #[test]
+    fn the_check_costs_nothing_when_it_is_off() {
+        let mut func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.cfg(&func);
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        assert!(an.settle(&func, Preserved::ALL, false).is_empty());
+        // Which is the trade the flag is: the lie is not caught, and the stale graph is still
+        // there, exactly as the pass claimed.
+        assert!(an.holds(Analysis::Cfg));
+    }
+
+    #[test]
+    fn a_pass_that_moved_no_edge_keeps_what_was_read_off_the_graph() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        an.frequencies(&func);
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(an.settle(&func, keeps, true).is_empty(), "what was kept was right");
+        for &analysis in super::SHAPE {
+            assert!(an.holds(analysis), "{} was thrown away", analysis.name());
+        }
+        // The predictions read the branches and not only the graph, so they go as claimed.
+        assert!(!an.holds(Analysis::Frequencies));
+    }
+
+    #[test]
+    fn a_pass_that_moved_an_edge_gets_the_graph_read_again_and_loses_the_rest() {
+        let mut func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(an.settle(&func, keeps, true).is_empty(), "the graph kept is the one read now");
+        assert!(an.holds(Analysis::Cfg));
+        assert_eq!(an.cfg(&func), &crate::Cfg::new(&func));
+        assert!(!an.holds(Analysis::Dominators), "the tree was built on the old graph");
+        assert!(!an.holds(Analysis::Loops), "the forest was built on the old graph");
+    }
+
+    #[test]
+    fn a_forest_kept_through_a_merge_is_not_called_stale_for_listing_its_blocks_differently() {
+        // A loop of three blocks whose latch is folded into the block above it. The forest kept
+        // through the merge still lists the loop's blocks in the order it found them, and a build
+        // now finds the new latch earlier. The same forest either way, and the check under
+        // -Zverify-each called it a lie, which is how gzread.c in zlib failed at -O2.
+        let mut func = graph(&[&[1], &[2], &[3], &[1, 4], &[]]);
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        let (head, into) = (Block::from_usize(2), Block::from_usize(3));
+        assert!(crate::simplify_cfg::merge_below(&mut func, &mut an, head, into));
+        assert!(an.holds(Analysis::Loops), "the forest was kept through the merge");
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(
+            an.settle(&func, keeps, true).is_empty(),
+            "the forest kept is the one a build gives"
+        );
+        assert!(an.holds(Analysis::Loops));
+    }
+
+    #[test]
+    fn an_analysis_nobody_asked_for_is_not_checked() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(an.settle(&func, Preserved::ALL, true).is_empty());
+    }
+
+    #[test]
+    fn a_declaration_has_analyses_like_anything_else() {
+        // Because the pipeline hands the cache whatever the module holds, and a cache that
+        // panicked on a function with no body would put the check in every caller.
+        let mut names = Interner::new();
+        let func = Func::new(names.intern("declared"), Signature::new());
+        let mut an = crate::machine::fixtures::analyses();
+        assert!(an.cfg(&func).entry().is_none());
+        an.loops(&func);
+        an.post_dominators(&func);
+        assert!(an.settle(&func, Preserved::ALL, true).is_empty());
+    }
+
+    #[test]
+    fn clearing_keeps_what_the_whole_module_said() {
+        // Only the per function answers go. What the module said was worked out once before any
+        // pass ran and no function pass can have made it wrong, so a cache that dropped it would
+        // quietly hand the next pass an empty set of facts and the pass would find nothing.
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut facts = Facts::default();
+        facts.record_inferred(name, Purity::Const);
+        let mut modref = Summaries::nothing();
+        modref.record(name, Summary::nothing(1));
+        let mut an = crate::machine::fixtures::analyses()
+            .calling(Arc::new(facts))
+            .touching(Arc::new(modref));
+        an.clear();
+        assert_eq!(an.purity().inferred(name), Purity::Const);
+        assert!(an.modref().of(name).is_some_and(Summary::touches_nothing));
+    }
+
+    #[test]
+    fn clearing_takes_everything() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.clear();
+        for &analysis in Analysis::EVERY {
+            assert!(!an.holds(analysis));
+        }
+    }
+}

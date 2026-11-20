@@ -1,0 +1,21 @@
+[package]
+name = "rucc-wasm-link"
+description = "A static linker for wasm inside the rucc C compiler, for a host that cannot start wasm-ld."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0, and it depends on nothing. A linker reads bytes and writes bytes, and the object
+# format it reads is the one the tool conventions define, not one of rucc's types, so it needs no
+# crate of this workspace. Rank 0 also keeps it out of the way of the crates that will call it.
+[dependencies]

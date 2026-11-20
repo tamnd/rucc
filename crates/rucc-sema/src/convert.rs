@@ -1,0 +1,1038 @@
+//! The conversions the language performs without being asked, as nodes in the tree.
+//!
+//! Design: `spec/07-types-and-semantics.md` section 7.2.
+//!
+//! Every one of these writes a [`Conversion`] node. Nothing downstream is allowed to work out
+//! for itself that an `int` met a `long` somewhere, because a second place that knows the
+//! conversion rules is a second place that is slightly wrong about them, and that is where the
+//! sign extension bugs live.
+//!
+//! # The order the standard puts them in
+//!
+//! An expression used for its value goes through at most three steps, in this order, and the
+//! order is not a convenience:
+//!
+//! First the lvalue conversion of 6.3.2.1, which reads the object and drops the qualifiers and
+//! the atomicity, since neither is part of a value. An array and a function do not take part in
+//! it at all: they decay instead, which is why `sizeof a` on an array is the array's size and
+//! not a pointer's, and why the decay has to be a separate step rather than a special case of
+//! reading.
+//!
+//! Then the integer promotions of 6.3.1.1, which are about one operand.
+//!
+//! Then the usual arithmetic conversions of 6.3.1.8, which are about two.
+//!
+//! [`Conv::value`] is the first step and is what almost every caller wants, because an operand
+//! that is still an lvalue is an operand somebody forgot to read.
+//!
+//! # Bit-fields
+//!
+//! A bit-field's lvalue conversion gives the type it was declared with and its promotion is
+//! decided by its width rather than by that type, which is why [`Conv::promote_bits`] exists
+//! next to [`Conv::promote`]. `unsigned b:3` promotes to `int` because every three bit value
+//! fits in one, and `unsigned b:32` promotes to `unsigned int` because they no longer do.
+//!
+//! No caller has to know that, because [`Conv::promote`] and [`Conv::usual_arithmetic`] look for
+//! the width themselves. A caller that had to remember would be a caller that forgot, and the
+//! symptom is a whole expression coming out unsigned on the strength of one member's declared
+//! type.
+
+use rucc_ast::{BinaryOp, UnaryOp};
+use rucc_base::Interner;
+use rucc_base::float::Status;
+use rucc_target::TargetInfo;
+use rucc_types::{
+    FloatKind, Qualifiers, TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer,
+    is_void, pointee,
+};
+
+use crate::eval::{Eval, bare, int_shape};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
+use crate::stmt::{Stmt, StmtId};
+use crate::tast::{Const, Tast};
+
+/// Everything a conversion needs: the tree to write the node into and the table to ask.
+///
+/// Three references rather than a pass-wide context, because the conversions are the part of
+/// semantic analysis with no state of its own and nothing else here should be able to reach
+/// the scopes or the diagnostics through them. The flag beside them is the one exception, and
+/// it is a copied `bool` rather than a fourth reference for the same reason.
+#[derive(Debug)]
+pub struct Conv<'a> {
+    /// The tree the nodes are written into.
+    pub tast: &'a mut Tast,
+    /// The types, which conversions extend.
+    pub types: &'a mut Types,
+    /// What the target's integers are, which is what the promotions are decided by.
+    pub target: &'a TargetInfo,
+    /// The spellings, which are here only because the constant folder asks for one.
+    pub names: &'a Interner,
+    /// Whether an operation may raise an exception the program then looks at, which is
+    /// `-ftrapping-math` and is on by default. The saturating fold below is what reads it.
+    pub trapping_math: bool,
+    /// Whether a floating constant has the precision of `long double` where the target evaluates
+    /// `float` and `double` in it, which is `-fexcess-precision=standard`. See
+    /// [`Conv::evaluated`] for what reads it.
+    pub excess_constants: bool,
+    /// Whether an operation on `_Float16` or `__bf16` is evaluated in a wider type, which is off
+    /// only under `-fexcess-precision=16`. See [`Conv::excess_type`].
+    pub excess_halves: bool,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. The promotions then keep
+    /// the sign, and the usual arithmetic conversions are the table of kencc.
+    pub kencc: bool,
+}
+
+impl Conv<'_> {
+    /// The value of an expression: 6.3.2.1, with the decays that replace it.
+    ///
+    /// An array becomes a pointer to its first element, a function becomes a pointer to itself,
+    /// and everything else that is an lvalue is read. An expression that is already a value is
+    /// its own answer, so this can be called on any operand without asking what it is first.
+    ///
+    /// A value of a type `__attribute__((hardbool))` made is the one value that goes further,
+    /// to the `bool` it stands for. gcc decays one wherever it decays an lvalue, whether it was
+    /// read out of an object or came out of a cast, a call or an assignment, so it is a `bool`
+    /// to every operator and only the object holds the representation.
+    pub fn value(&mut self, expr: ExprId) -> ExprId {
+        let ty = self.tast[expr].ty;
+        let value = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Array { elem, .. } => {
+                let ty = self.types.pointer(elem);
+                self.write(Conversion::ArrayDecay, expr, ty)
+            }
+            TypeKind::Function(_) => {
+                let ty = self.types.pointer(ty);
+                self.write(Conversion::FunctionDecay, expr, ty)
+            }
+            _ if self.tast[expr].category == Category::Rvalue => expr,
+            _ => {
+                let ty = self.read_as(ty);
+                self.write(Conversion::Lvalue, expr, ty)
+            }
+        };
+        if self.types.hardbool_of(self.tast[value].ty).is_none() {
+            return value;
+        }
+        let boolean = self.types.boolean();
+        self.write(Conversion::Hardbool, value, boolean)
+    }
+
+    /// The value of an expression with the integer promotions applied, 6.3.1.1.
+    ///
+    /// Anything narrower than `int` becomes `int`, or `unsigned int` where `int` cannot hold
+    /// every value it had. A floating type, a pointer and a `_BitInt` are each their own
+    /// answer, the last because C23 6.3.1.1p2 says so and because that is the point of the
+    /// type: it is the one integer type in C that does what it says.
+    pub fn promote(&mut self, expr: ExprId) -> ExprId {
+        if self.kencc {
+            let expr = self.value(expr);
+            if let Some(promoted) =
+                rucc_types::kencc_promote(self.types, self.tast[expr].ty, self.target)
+            {
+                return self.arithmetic(expr, promoted);
+            }
+        }
+        let expr = self.value_promoting_bits(expr);
+        let ty = self.tast[expr].ty;
+        let promoted = rucc_types::promote(self.types, ty, self.target);
+        self.arithmetic(expr, promoted)
+    }
+
+    /// The value of a bit-field with the integer promotions applied to its width.
+    ///
+    /// A bit-field is narrower than the type it was declared with, and it is the width that
+    /// decides. The caller passes the width because the tree holds the field index and the
+    /// width is a fact about the record, not about the expression.
+    pub fn promote_bits(&mut self, expr: ExprId, width: u32) -> ExprId {
+        let expr = self.value(expr);
+        let ty = self.tast[expr].ty;
+        let promoted = rucc_types::promote_bit_field(self.types, ty, width, self.target);
+        self.arithmetic(expr, promoted)
+    }
+
+    /// The value of an expression, promoted by its width first where it names a bit-field.
+    ///
+    /// This is what every operand that is about to be promoted goes through, because the type a
+    /// bit-field was declared with is not the type it brings to an operator: `unsigned b:1` is
+    /// an `int` in `b + 1` and not an `unsigned int`, and a whole expression comes out signed or
+    /// unsigned on the strength of that one width.
+    fn value_promoting_bits(&mut self, expr: ExprId) -> ExprId {
+        match self.bit_field_width(expr) {
+            Some(width) => self.promote_bits(expr, width),
+            None => self.value(expr),
+        }
+    }
+
+    /// The width of the bit-field an expression names, or [`None`] where it names none.
+    ///
+    /// The width lives on the record rather than on the expression, so this asks the type table
+    /// rather than reading it off the node. Only a member access can be one at the bottom: a
+    /// bit-field has no address, so there is no other expression that can arrive still being one.
+    ///
+    /// The lvalue conversion is looked through, because most callers read the object before they
+    /// know they are about to promote it and the value they are left holding is still as wide as
+    /// the field was.
+    ///
+    /// So are the expressions whose value is the bit-field's value with its type unchanged, which
+    /// gcc keeps as narrow as the field: the right side of a comma, an assignment or a compound
+    /// assignment to one, `++` and `--` on one either side, and a statement expression that ends
+    /// with one. With `unsigned a : 23` and `signed b : 19`, gcc and clang both answer `(x, s.a) <
+    /// s.b` and `(s.a = 5) < s.b` in `int`, so a negative `b` is less than `a`. Reading only the
+    /// member there made the comparison unsigned, and a Csmith program that compared `(... ,
+    /// p.f0) < p.f5` that way left a global one lower than gcc did.
+    pub fn bit_field_width(&self, expr: ExprId) -> Option<u32> {
+        let expr = match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            ExprKind::Comma { rhs, .. } => return self.bit_field_width(rhs),
+            ExprKind::Assign { lhs, .. } => return self.bit_field_width(lhs),
+            ExprKind::Unary {
+                op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+                operand,
+            } => return self.bit_field_width(operand),
+            ExprKind::StmtExpr(body) => return self.last_bit_field_width(body),
+            _ => expr,
+        };
+        let ExprKind::Member { base, field } = self.tast[expr].kind else { return None };
+        let base = self.types.canonical(self.tast[base].ty);
+        let TypeKind::Record(record) = self.types.kind(base) else { return None };
+        self.types.record_info(record).fields.get(field as usize)?.bits
+    }
+
+    /// The width of the bit-field the last statement of a statement expression names, which is
+    /// the statement expression's value, looking through labels the way its type does.
+    fn last_bit_field_width(&self, stmt: StmtId) -> Option<u32> {
+        match self.tast[stmt] {
+            Stmt::Block(body) => self.last_bit_field_width(*self.tast[body].last()?),
+            Stmt::Label { body, .. } => self.last_bit_field_width(body),
+            Stmt::Expr(value) => self.bit_field_width(value),
+            _ => None,
+        }
+    }
+
+    /// The usual arithmetic conversions, 6.3.1.8: both operands converted to one type.
+    ///
+    /// [`None`] where either operand is not arithmetic, which is not a failure of this rule but
+    /// a question it does not answer, since `p + 1` is pointer arithmetic and never reaches it.
+    ///
+    /// An operand computed in `long double` for `__FLT_EVAL_METHOD__` 2 keeps its wide value
+    /// here, and then the other operand is brought to `long double` as well, so `a * b < c`
+    /// compares the product that was not rounded. Both operands come back in that wider type
+    /// then. [`Self::evaluated`] is the form that also says what type the result stands as.
+    pub fn usual_arithmetic(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId)> {
+        let (lhs, rhs, _) = self.evaluated(lhs, rhs, false)?;
+        Some((lhs, rhs))
+    }
+
+    /// The usual arithmetic conversions for an operator that computes a value, with the type
+    /// that value has in the program.
+    ///
+    /// The two operands come back in the type the operation is done in, and the type beside
+    /// them is the common type of 6.3.1.8. The two are the same except under
+    /// `__FLT_EVAL_METHOD__` 2, where an operation on `float` or `double` is done in `long
+    /// double`. `operation` says that the caller computes something new from the two, as `*` and
+    /// `+` do, which is always done in the wider type. A comparison and a conditional only move
+    /// a value, and they widen only where an operand already has the wider value.
+    /// [`Self::excess`] gives the result its own type back.
+    pub fn evaluated(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        operation: bool,
+    ) -> Option<(ExprId, ExprId, TypeId)> {
+        if let Some((lhs, rhs)) = self.kencc_arithmetic(lhs, rhs, true) {
+            let ty = self.tast[lhs].ty;
+            return Some((lhs, rhs, ty));
+        }
+        let (lhs, rhs) = (self.value_promoting_bits(lhs), self.value_promoting_bits(rhs));
+        let common = rucc_types::usual_arithmetic(
+            self.types,
+            self.tast[lhs].ty,
+            self.tast[rhs].ty,
+            self.target,
+        )?;
+        // Under `-fexcess-precision=fast` gcc folds an operation on two constants in their own
+        // type before anything is evaluated wider, so `0.1 * 3` is the `double` product there.
+        // A half is the exception, since gcc evaluates it in `float` under `fast` as well.
+        let operation = operation
+            && (self.excess_constants
+                || self.is_half(common)
+                || !(self.folded(lhs) && self.folded(rhs)));
+        let met = self.halves_meet(self.tast[lhs].ty, self.tast[rhs].ty);
+        let wide = match (met, self.excess_type(common)) {
+            (Some(wide), _) => wide,
+            (None, Some(wide)) if operation || self.is_excess(lhs) || self.is_excess(rhs) => wide,
+            _ => common,
+        };
+        let (lhs, rhs) = (self.unexcess(lhs), self.unexcess(rhs));
+        Some((self.arithmetic(lhs, wide), self.arithmetic(rhs, wide), common))
+    }
+
+    /// The type a `_Float16` and a `__bf16` meet in, and [`None`] for every other pair.
+    ///
+    /// Their common type is `_Float16`, but neither format holds the other, so gcc does not
+    /// convert the `__bf16` to a half first. It computes at [`Self::half_type`], which holds
+    /// both, and the result stands as a `_Float16`. It is true of an arithmetic operator, a compound assignment and a conditional, and of a
+    /// comparison where an operand has the excess precision. [`Self::compared`] gives the other
+    /// comparisons. gcc 16.2.0 for x86-64 and i386 and gcc 13 for AArch64 give
+    /// `(_Float16)0 * (__bf16)65536` as zero, and `(__bf16)1 + (_Float16)0x1.1p-8` stored back
+    /// to a `__bf16` as the `__bf16` above one (tamnd/rucc#4369).
+    pub fn halves_meet(&mut self, a: TypeId, b: TypeId) -> Option<TypeId> {
+        let kind = |types: &Types, id: TypeId| match types.kind(types.canonical(id)) {
+            TypeKind::Float(kind) => Some(kind),
+            _ => None,
+        };
+        match (kind(self.types, a)?, kind(self.types, b)?) {
+            (FloatKind::Float16, FloatKind::BFloat16)
+            | (FloatKind::BFloat16, FloatKind::Float16) => Some(self.half_type()),
+            _ => None,
+        }
+    }
+
+    /// The type gcc evaluates an operation on `_Float16` or `__bf16` in.
+    ///
+    /// That is `float`, which holds every value of both, on every target rucc has: gcc for
+    /// x86-64, i386 and AArch64 writes `x * y + z` on three halves as `(_Float16) ((float) x *
+    /// (float) y + (float) z)`. The exception is `__FLT_EVAL_METHOD__` 2 under
+    /// `-fexcess-precision=standard`, where it is `long double`, as for `float` (gcc 16.2.0 with
+    /// `-m32 -std=c11`).
+    pub fn half_type(&mut self) -> TypeId {
+        let long = self.excess_constants && self.target.excess_precision();
+        self.types.float(if long { FloatKind::LongDouble } else { FloatKind::Float })
+    }
+
+    /// Whether `ty` is `_Float16` or `__bf16`.
+    fn is_half(&self, ty: TypeId) -> bool {
+        matches!(
+            self.types.kind(self.types.canonical(ty)),
+            TypeKind::Float(FloatKind::Float16 | FloatKind::BFloat16)
+        )
+    }
+
+    /// Whether `expr` is made of constants and the arithmetic on them only, which is what gcc
+    /// folds in the type it was written in under `-fexcess-precision=fast`.
+    fn folded(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Const(_) => true,
+            ExprKind::Cast(operand)
+            | ExprKind::Unary { op: UnaryOp::Plus | UnaryOp::Minus, operand }
+            | ExprKind::Convert { kind: Conversion::Arithmetic | Conversion::Excess, operand } => {
+                self.folded(operand)
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div,
+                lhs,
+                rhs,
+            } => self.folded(lhs) && self.folded(rhs),
+            _ => false,
+        }
+    }
+
+    /// The type an operation on a value of `ty` is done in, where that is wider than `ty`.
+    ///
+    /// Under `__FLT_EVAL_METHOD__` 2 that is `long double` for `float` and `double` and for
+    /// `_Float32`, `_Float64` and `_Float32x`, which TS 18661-3 puts under the same rule. For
+    /// `_Float16` and `__bf16` it is [`Self::half_type`] on every target, unless
+    /// `-fexcess-precision=16` asked for each operation in its own type. It is [`None`] for every
+    /// other type. A complex type is computed in its own type. See
+    /// [`TargetInfo::excess_precision`].
+    pub fn excess_type(&mut self, ty: TypeId) -> Option<TypeId> {
+        if self.is_half(ty) {
+            return self.excess_halves.then(|| self.half_type());
+        }
+        if !self.target.excess_precision() {
+            return None;
+        }
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Float(
+                FloatKind::Float
+                | FloatKind::Double
+                | FloatKind::Float32
+                | FloatKind::Float64
+                | FloatKind::Float32x,
+            ) => Some(self.types.float(FloatKind::LongDouble)),
+            _ => None,
+        }
+    }
+
+    /// Whether an expression is a value computed in a wider type that stands as a narrower
+    /// type, as [`Self::excess_type`] gives. See [`Conversion::Excess`].
+    pub fn is_excess(&self, expr: ExprId) -> bool {
+        matches!(self.tast[expr].kind, ExprKind::Convert { kind: Conversion::Excess, .. })
+    }
+
+    /// The wide value under a value computed in a wider type, and any other expression as it is.
+    ///
+    /// This is what an operator, a cast, an assignment, an argument and a `return` take, so
+    /// that the excess precision lasts until a conversion to a type removes it.
+    pub fn unexcess(&self, expr: ExprId) -> ExprId {
+        match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Excess, operand } => operand,
+            _ => expr,
+        }
+    }
+
+    /// An operation's result standing as the type the program gives it, where the operation was
+    /// done in a wider type, as [`Self::excess_type`] gives, and the result as it is where not.
+    pub fn excess(&mut self, node: ExprId, ty: TypeId) -> ExprId {
+        let from = self.tast[node].ty;
+        if from == ty || self.types.canonical(from) == self.types.canonical(ty) {
+            return node;
+        }
+        self.write(Conversion::Excess, node, ty)
+    }
+
+    /// The conversions of a comparison and of a conditional. In C these are the usual arithmetic
+    /// conversions. In kencc the operands go to the type in the table and are not promoted, so
+    /// `char` with `unsigned char` is `unsigned char`, and `-1` and `255` are then equal.
+    /// The type beside the two operands is the type that the result stands as, as in
+    /// [`Self::evaluated`].
+    pub fn balanced(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId, TypeId)> {
+        match self.kencc_arithmetic(lhs, rhs, false) {
+            Some((lhs, rhs)) => {
+                let ty = self.tast[lhs].ty;
+                Some((lhs, rhs, ty))
+            }
+            None => self.evaluated(lhs, rhs, false),
+        }
+    }
+
+    /// The conversions of a comparison, which are those of [`Self::balanced`] except for a
+    /// `_Float16` and a `__bf16`.
+    ///
+    /// gcc converts the right operand of that pair to the type of the left one and compares
+    /// there, so `(_Float16)0 < (__bf16)0x1p-30` is false, since the `__bf16` is zero as a half,
+    /// and `(__bf16)1 == (_Float16)0x1.004p0` is true, since the half is one as a `__bf16`. An
+    /// operand with the excess precision makes the comparison one at `float`, as in
+    /// [`Self::halves_meet`]. gcc 16.2.0 for x86-64 and i386 and gcc 13 for AArch64 agree.
+    pub fn compared(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId, TypeId)> {
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        if self.halves_meet(left, right).is_some() && !self.is_excess(lhs) && !self.is_excess(rhs) {
+            let rhs = self.arithmetic(rhs, left);
+            return Some((lhs, rhs, left));
+        }
+        self.balanced(lhs, rhs)
+    }
+
+    /// Both operands converted to the type that the table of kencc gives, or [`None`] where the
+    /// unit is not in kencc or an operand is not a kencc integer.
+    fn kencc_arithmetic(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        promote: bool,
+    ) -> Option<(ExprId, ExprId)> {
+        if !self.kencc {
+            return None;
+        }
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        let common = rucc_types::kencc_arithmetic(self.types, left, right, promote, self.target)?;
+        let (lhs, rhs) = (self.value(lhs), self.value(rhs));
+        Some((self.arithmetic(lhs, common), self.arithmetic(rhs, common)))
+    }
+
+    /// A scalar as a condition, which is a comparison against zero and not a truncation.
+    ///
+    /// That is why it is [`Conversion::Bool`] rather than [`Conversion::Arithmetic`]: `(bool)
+    /// 256` is true and `(char) 256` is zero, and a compiler that treats the two the same is
+    /// wrong about one of them.
+    pub fn to_bool(&mut self, expr: ExprId) -> ExprId {
+        let expr = self.value(expr);
+        let expr = self.unexcess(expr);
+        let boolean = self.types.boolean();
+        if self.tast[expr].ty == boolean {
+            return expr;
+        }
+        self.write(Conversion::Bool, expr, boolean)
+    }
+
+    /// A value discarded, which is what a cast to `void` does.
+    ///
+    /// An expression statement does not write one of these, even though it discards a value too.
+    /// The statement is what does the discarding, and a statement expression's value is the last
+    /// statement's, so an expression statement that had thrown its type away would have nothing
+    /// left to give.
+    pub fn to_void(&mut self, expr: ExprId) -> ExprId {
+        if is_void(self.types, self.tast[expr].ty) {
+            return expr;
+        }
+        let void = self.types.void();
+        self.write(Conversion::Void, expr, void)
+    }
+
+    /// A value converted to a given type, with the kind of conversion worked out from the two.
+    ///
+    /// This is what an assignment, an argument, a `return` and an initializer all do. It writes
+    /// the conversion the pair calls for and does not judge whether the pair is allowed: the
+    /// caller has the span and the wording, and a conversion that should have been diagnosed is
+    /// a diagnostic the caller owes rather than a node this refuses to write.
+    pub fn to_type(&mut self, expr: ExprId, ty: TypeId) -> ExprId {
+        let expr = self.value(expr);
+        let target = self.read_as(ty);
+        // A value computed in `long double` is converted from that, so `double d = f * g;` with
+        // two `float` operands keeps the product that was not rounded to a `float`. The excess
+        // is what such a conversion removes, and it is removed once. A vector is the exception,
+        // since a scalar in every lane is written as that scalar converted to the lane first.
+        let expr = if is_arithmetic(self.types, target) { self.unexcess(expr) } else { expr };
+        let from = self.tast[expr].ty;
+        // Asked of the canonical form as well as of the identifier, because a typedef is a name
+        // for a type rather than a type of its own and there is nothing to convert between a
+        // name and what it names. The two do not share an identifier, since a typedef keeps its
+        // own so a diagnostic can spell it and so an `aligned` on it can be read, and a vector is
+        // where it matters: `*(const __m128i_u *)p` is a vector and so is the `__m128i` a
+        // function returns one as, and a conversion between them is not a shape anything lowers.
+        if from == target || self.types.canonical(from) == self.types.canonical(target) {
+            return expr;
+        }
+        if is_void(self.types, target) {
+            return self.to_void(expr);
+        }
+        let boolean = self.types.boolean();
+        if target == boolean {
+            return self.to_bool(expr);
+        }
+        // To a type `__attribute__((hardbool))` made, which is a conversion to `bool` and then to
+        // the representation of what that gave, in gcc's words and in this order.
+        if self.types.hardbool_of(target).is_some() {
+            let expr = self.to_bool(expr);
+            return self.write(Conversion::Hardbool, expr, target);
+        }
+        let kind = if is_pointer(self.types, target) {
+            // A null pointer constant is not the integer zero converted. The constant may have
+            // any integer type and `(void *)0` is one of them, so what makes it a null pointer
+            // is what it says rather than what it weighs.
+            if self.is_null_pointer_constant(expr) {
+                Conversion::NullPointer
+            } else {
+                Conversion::Pointer
+            }
+        } else if is_arithmetic(self.types, target) && is_arithmetic(self.types, from) {
+            Conversion::Arithmetic
+        } else if rucc_types::is_vector(self.types, target) && is_arithmetic(self.types, from) {
+            Conversion::Broadcast
+        } else {
+            // A record to a record of the same type, or anything else the caller has already
+            // decided about. There is nothing to compute, so the node records that a value of
+            // one type is being used as another and the verifier can see it happened.
+            Conversion::Pointer
+        };
+        self.write(kind, expr, target)
+    }
+
+    /// Whether an expression is a null pointer constant, 6.3.2.3p3.
+    ///
+    /// An integer constant expression with the value zero, or such an expression cast to `void
+    /// *`. Only a cast of an integer to plain `void *` counts, so `(char *)0`, `(const void *)0`
+    /// and `(void *)(void *)0` are not null pointer constants, which is what gcc says too. The
+    /// kernel's `__is_const_zero` depends on it: `0 ? (void *)(long)(x) : (char *)0` has type
+    /// `char *` only when the left arm is a null pointer constant. Below the cast, whatever has
+    /// an integer type is folded, because the expression is any integer constant expression and
+    /// not only a literal: `(void *)((long)(x) * 0l)` is one exactly when `x` is an integer
+    /// constant expression, which is the whole of how the kernel's `__is_constexpr` tells a
+    /// constant from a variable. The folding is the strict one, so a `const` object is not a
+    /// constant here in any dialect, and `0 && x` is not one when `x` is not, which is gcc's
+    /// answer for both.
+    #[must_use]
+    pub fn is_null_pointer_constant(&self, expr: ExprId) -> bool {
+        let ty = self.tast[expr].ty;
+        match self.tast[expr].kind {
+            ExprKind::Const(value) => self.tast[value] == Const::Int(0),
+            // The conversion of a null pointer constant to a pointer type, which only a null
+            // pointer constant is given.
+            ExprKind::Convert { kind: Conversion::NullPointer, operand } => {
+                self.is_null_pointer_constant(operand)
+            }
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
+                if is_pointer(self.types, ty) =>
+            {
+                self.is_plain_void_pointer(ty)
+                    && int_shape(self.types, self.tast[inner].ty, self.target).is_some()
+                    && self.is_null_pointer_constant(inner)
+            }
+            _ if int_shape(self.types, ty, self.target).is_some() => {
+                let mut eval =
+                    Eval::new(self.tast, self.types, self.target, self.names).strict(true);
+                // A `__builtin_constant_p` the optimizer has still to answer is not one, since
+                // its no is only the answer where a constant is required.
+                eval.integer(expr) == Ok(0) && !eval.deferred()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a pointer is a zero cast to any pointer type, which is what gcc takes as the
+    /// sentinel of a call. `(char *)0` is one, and it is not a null pointer constant.
+    pub fn is_zero_pointer(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
+                if is_pointer(self.types, self.tast[expr].ty) =>
+            {
+                if is_pointer(self.types, self.tast[inner].ty) {
+                    self.is_zero_pointer(inner)
+                } else {
+                    self.is_null_pointer_constant(inner)
+                }
+            }
+            _ => self.is_null_pointer_constant(expr),
+        }
+    }
+
+    /// Whether a type is `void *` with no qualifier on the `void`.
+    fn is_plain_void_pointer(&self, ty: TypeId) -> bool {
+        pointee(self.types, ty).is_some_and(|inner| {
+            is_void(self.types, inner) && self.types.object_quals(inner) == Qualifiers::NONE
+        })
+    }
+
+    /// Writes an arithmetic conversion, or nothing where the type is already the one wanted.
+    ///
+    /// The canonical forms are compared as well, for the reason [`Self::to_type`] gives. A vector
+    /// typedef with `aligned` on it promotes to the vector it names, and `<wasm_simd128.h>` writes
+    /// every one of its types that way, so `-(__u8x16)a` and `(__u8x16)a << n` were a conversion
+    /// between a name and what it names, which is not a shape anything lowers.
+    fn arithmetic(&mut self, expr: ExprId, ty: TypeId) -> ExprId {
+        let from = self.tast[expr].ty;
+        if from == ty || self.types.canonical(from) == self.types.canonical(ty) {
+            return expr;
+        }
+        self.write(Conversion::Arithmetic, expr, ty)
+    }
+
+    /// The type a value has once it has been read out of an object.
+    ///
+    /// The qualifiers and the atomicity come off, because neither is part of a value: `const
+    /// int x; x + 1` has an `int` on the left of the `+` and not a `const int`.
+    pub(crate) fn read_as(&mut self, ty: TypeId) -> TypeId {
+        let stripped = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Atomic(inner) => inner,
+            _ => ty,
+        };
+        self.types.unqualified(stripped)
+    }
+
+    /// The value an out of range conversion of a floating constant to an integer type leaves,
+    /// where `-fno-trapping-math` licenses working it out here, and [`None`] everywhere else.
+    ///
+    /// A conversion of a value the integer type cannot hold is undefined behaviour in C rather
+    /// than an answer, and what a program gets is whatever the instruction does: on x86-64 the
+    /// integer indefinite value, on aarch64 the nearest end of the range. gcc leaves it there
+    /// while `-ftrapping-math` is on, because the same instruction is what raises the invalid
+    /// operation the program said it was going to look at, and folds it to the nearest end of
+    /// the range once the program says it is not. This is that fold.
+    ///
+    /// A conversion that does fit is not touched, so a program that never leaves the range
+    /// compiles to the same tree whichever way the flag is set. The cast and the assignment both
+    /// come through here, since `(int)2147483648.0f` and `int x = 2147483648.0f;` are the same
+    /// conversion written two ways, and the operand is folded rather than looked at, since
+    /// `(int)(float)2147483647` is out of range for an `int` without a float being written
+    /// anywhere in it.
+    pub(crate) fn saturated(&mut self, operand: ExprId, ty: TypeId) -> Option<ExprId> {
+        if self.trapping_math || !is_floating(self.types, self.tast[operand].ty) {
+            return None;
+        }
+        // `bool` is left out because its conversion is a comparison against zero and not a
+        // truncation, and saturating a negative one would answer false for a value that is true.
+        if !matches!(
+            bare(self.types, ty),
+            TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_)
+        ) {
+            return None;
+        }
+        let info = int_shape(self.types, ty, self.target)?;
+        let value = {
+            let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
+            match eval.constant(operand) {
+                Ok(Const::Float(value)) => value,
+                _ => return None,
+            }
+        };
+        // Past a hundred and twenty eight bits the flag says no `i128` holds the value, which is
+        // not the overflow this folds, so the conversion is the program's.
+        let (folded, status) = value.to_integer(info.width.min(128), info.signed);
+        if info.width > 128 || !status.has(Status::INVALID) {
+            return None;
+        }
+        let span = self.tast.expr_span(operand);
+        let folded = self.tast.add_const(Const::Int(folded));
+        Some(self.tast.expr(Expr::new(ExprKind::Const(folded), ty, Category::Rvalue), span))
+    }
+
+    /// Writes one conversion node over an operand.
+    fn write(&mut self, kind: Conversion, operand: ExprId, ty: TypeId) -> ExprId {
+        // Nested rather than one `&&` chain, because a `let` in the middle of a condition is
+        // Rust 1.88 and the workspace's floor is 1.85. It reads better as a chain and that is not
+        // a reason to ask people on an older toolchain to go away.
+        if kind == Conversion::Arithmetic {
+            if let Some(folded) = self.saturated(operand, ty) {
+                return folded;
+            }
+        }
+        let span = self.tast.expr_span(operand);
+        let node = Expr::new(ExprKind::Convert { kind, operand }, ty, Category::Rvalue);
+        self.tast.expr(node, span)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_diag::Span;
+    use rucc_target::{TargetInfo, Triple};
+    use rucc_types::{ArrayLen, FunctionType, IntKind, Qualifiers};
+
+    use super::*;
+    use crate::decl::{
+        Decl, DeclFlags, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+        StorageDuration,
+    };
+    use crate::print::Printer;
+
+    struct Fixture {
+        tast: Tast,
+        types: Types,
+        names: Interner,
+        target: TargetInfo,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let target =
+                TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
+            Fixture { tast: Tast::new(), types: Types::new(), names: Interner::new(), target }
+        }
+
+        fn conv(&mut self) -> Conv<'_> {
+            Conv {
+                tast: &mut self.tast,
+                types: &mut self.types,
+                target: &self.target,
+                names: &self.names,
+                trapping_math: true,
+                excess_constants: false,
+                excess_halves: true,
+                kencc: false,
+            }
+        }
+
+        /// An lvalue of the given type, which is what a use of an object is.
+        fn object(&mut self, ty: TypeId) -> ExprId {
+            let decl = self.tast.decl(
+                Decl {
+                    name: None,
+                    ty,
+                    kind: DeclKind::Object,
+                    linkage: Linkage::None,
+                    duration: StorageDuration::Automatic,
+                    state: Definition::Defined,
+                    alignment: None,
+                    flags: DeclFlags::NONE,
+                    asm_label: None,
+                    register: None,
+                    alias: None,
+                    inline: Emission::Silent,
+                    effects: Effects::Any,
+                    visibility: None,
+                    startup: Startup::default(),
+                    init: None,
+                    cleanup: None,
+                    params: DeclList::EMPTY,
+                    body: None,
+                },
+                Span::DUMMY,
+            );
+            self.tast.expr(Expr::new(ExprKind::Decl(decl), ty, Category::Lvalue), Span::DUMMY)
+        }
+
+        /// A use of the one member of a `struct` that has one, which is a bit-field of `bits`.
+        fn bit_field(&mut self, ty: TypeId, bits: u32) -> ExprId {
+            let fields = [rucc_types::FieldDecl::bit_field(None, ty, bits)];
+            let id = self.types.declare_record(rucc_types::RecordKind::Struct, None);
+            let laid_out = rucc_types::layout_record(
+                &self.types,
+                rucc_types::RecordKind::Struct,
+                &fields,
+                &rucc_types::RecordOptions::default(),
+                &self.target,
+            )
+            .expect("a layout");
+            self.types.complete_record(id, laid_out);
+            let record = self.types.record(id);
+            let base = self.object(record);
+            self.tast.expr(
+                Expr::new(ExprKind::Member { base, field: 0 }, ty, Category::Bitfield),
+                Span::DUMMY,
+            )
+        }
+
+        fn zero(&mut self, ty: TypeId) -> ExprId {
+            let value = self.tast.add_const(Const::Int(0));
+            self.tast.expr(Expr::new(ExprKind::Const(value), ty, Category::Rvalue), Span::DUMMY)
+        }
+
+        fn text(&self, expr: ExprId) -> String {
+            let mut printer = Printer::new(&self.tast, &self.types, &self.names);
+            printer.expr(expr);
+            printer.finish()
+        }
+    }
+
+    #[test]
+    fn reading_an_object_drops_the_qualifiers_because_they_are_not_part_of_a_value() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let constant = f.types.qualified(int, Qualifiers::CONST);
+        let object = f.object(constant);
+        let read = f.conv().value(object);
+
+        assert_eq!(f.tast[read].ty, int);
+        assert_eq!(f.tast[read].category, Category::Rvalue);
+        assert_eq!(f.text(read), "convert lvalue : int\n  decl #0 : const int lvalue\n");
+    }
+
+    #[test]
+    fn an_atomic_object_reads_as_the_type_it_wraps() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let atomic = f.types.atomic(int);
+        let object = f.object(atomic);
+        let read = f.conv().value(object);
+
+        assert_eq!(f.tast[read].ty, int);
+    }
+
+    #[test]
+    fn an_array_decays_and_is_not_read() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let array = f.types.array(int, ArrayLen::Fixed(3));
+        let object = f.object(array);
+        let decayed = f.conv().value(object);
+
+        // Not an lvalue conversion, which is why `sizeof a` is the array's size: the decay is a
+        // step of its own and `sizeof` is the operator that does not take it.
+        assert_eq!(f.text(decayed), "convert array-decay : int *\n  decl #0 : int[3] lvalue\n");
+    }
+
+    #[test]
+    fn a_function_decays_to_a_pointer_to_itself() {
+        let mut f = Fixture::new();
+        let void = f.types.void();
+        let signature = FunctionType {
+            ret: void,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
+        };
+        let function = f.types.function(signature);
+        let designator =
+            f.tast.expr(Expr::new(ExprKind::Error, function, Category::Function), Span::DUMMY);
+        let decayed = f.conv().value(designator);
+
+        assert_eq!(
+            f.text(decayed),
+            "convert function-decay : void (*)(void)\n  error : void(void) function\n"
+        );
+    }
+
+    #[test]
+    fn a_narrow_integer_promotes_and_an_int_does_not_move() {
+        let mut f = Fixture::new();
+        let char_type = f.types.int(IntKind::Char);
+        let int = f.types.int(IntKind::Int);
+        let narrow = f.object(char_type);
+        let wide = f.object(int);
+
+        let promoted = f.conv().promote(narrow);
+        assert_eq!(f.tast[promoted].ty, int);
+        assert_eq!(
+            f.text(promoted),
+            "convert arithmetic : int\n  convert lvalue : char\n    decl #0 : char lvalue\n"
+        );
+
+        // Nothing is written where nothing happens, so a dump has no noise in it.
+        let already = f.conv().promote(wide);
+        assert_eq!(f.text(already), "convert lvalue : int\n  decl #1 : int lvalue\n");
+    }
+
+    #[test]
+    fn a_bit_field_promotes_by_its_width_and_not_by_its_type() {
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let three = f.object(unsigned);
+        let full = f.object(unsigned);
+
+        // Every three bit value fits in an `int`, so the promotion changes the signedness.
+        let narrow = f.conv().promote_bits(three, 3);
+        assert_eq!(f.tast[narrow].ty, int);
+        // Thirty two bit values no longer do.
+        let wide = f.conv().promote_bits(full, 32);
+        assert_eq!(f.tast[wide].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_still_promotes_by_its_width_through_a_comma_an_assignment_and_an_increment() {
+        // gcc keeps the field's width on each of these, so `(x, s.a) < s.b` with `unsigned a :
+        // 23` and a negative `signed b : 19` is a comparison in `int` and comes out false. With
+        // the declared type it was a comparison in `unsigned int` and came out true.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let rvalue = |f: &mut Fixture, kind| {
+            f.tast.expr(Expr::new(kind, unsigned, Category::Rvalue), Span::DUMMY)
+        };
+
+        let first = f.zero(int);
+        let rhs = f.bit_field(unsigned, 23);
+        let comma = rvalue(&mut f, ExprKind::Comma { lhs: first, rhs });
+        let zero = f.zero(unsigned);
+        let lhs = f.bit_field(unsigned, 23);
+        let assign =
+            rvalue(&mut f, ExprKind::Assign { op: None, computation: unsigned, lhs, rhs: zero });
+        let operand = f.bit_field(unsigned, 23);
+        let increment = rvalue(&mut f, ExprKind::Unary { op: UnaryOp::PostInc, operand });
+        // The comma's own left side is not its value, so a field there decides nothing.
+        let ignored = f.bit_field(unsigned, 23);
+        let rhs = f.zero(unsigned);
+        let not_a_field = rvalue(&mut f, ExprKind::Comma { lhs: ignored, rhs });
+
+        for expr in [comma, assign, increment] {
+            assert_eq!(f.conv().bit_field_width(expr), Some(23));
+            let promoted = f.conv().promote(expr);
+            assert_eq!(f.tast[promoted].ty, int, "{}", f.text(expr));
+        }
+        assert_eq!(f.conv().bit_field_width(not_a_field), None);
+        let promoted = f.conv().promote(not_a_field);
+        assert_eq!(f.tast[promoted].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_operand_promotes_by_its_width_without_being_asked() {
+        // The width is not on the operand, so this is the one promotion that has to be found
+        // rather than read off the node, and forgetting it makes `b.flag + 1` come out unsigned
+        // for a one bit field. gcc says `int`, and so does 6.3.1.1p2.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let one = f.zero(int);
+        let again = f.zero(int);
+
+        let narrow = f.bit_field(unsigned, 1);
+        let (lhs, rhs) = f.conv().usual_arithmetic(narrow, one).expect("both are arithmetic");
+        assert_eq!(f.tast[lhs].ty, int);
+        assert_eq!(f.tast[rhs].ty, int);
+
+        // A field as wide as the type it was declared with keeps that type, which is the case
+        // that says the width is what decides and not the fact of being a bit-field.
+        let full = f.bit_field(unsigned, 32);
+        let (lhs, rhs) = f.conv().usual_arithmetic(full, again).expect("both are arithmetic");
+        assert_eq!(f.tast[lhs].ty, unsigned);
+        assert_eq!(f.tast[rhs].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_that_has_already_been_read_still_promotes_by_its_width() {
+        // Almost every caller reads the object before it knows it is about to promote, so the
+        // member is under an lvalue conversion by the time the promotion looks for it.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let narrow = f.bit_field(unsigned, 1);
+        let read = f.conv().value(narrow);
+
+        let promoted = f.conv().promote(read);
+        assert_eq!(f.tast[promoted].ty, int);
+    }
+
+    #[test]
+    fn the_usual_arithmetic_conversions_move_both_sides_to_one_type() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let long = f.types.int(IntKind::Long);
+        let narrow = f.object(int);
+        let wide = f.object(long);
+
+        let (lhs, rhs) = f.conv().usual_arithmetic(narrow, wide).expect("both are arithmetic");
+        assert_eq!(f.tast[lhs].ty, long);
+        assert_eq!(f.tast[rhs].ty, long);
+    }
+
+    #[test]
+    fn a_pointer_pair_has_no_usual_arithmetic_conversion() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let pointer = f.types.pointer(int);
+        let left = f.object(pointer);
+        let right = f.object(int);
+
+        assert!(f.conv().usual_arithmetic(left, right).is_none());
+    }
+
+    #[test]
+    fn a_condition_is_a_comparison_against_zero_and_not_a_truncation() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let object = f.object(int);
+        let condition = f.conv().to_bool(object);
+
+        // `(bool) 256` is true and `(char) 256` is zero, which is why this is its own kind.
+        assert_eq!(
+            f.text(condition),
+            "convert bool : _Bool\n  convert lvalue : int\n    decl #0 : int lvalue\n"
+        );
+    }
+
+    #[test]
+    fn a_zero_of_any_integer_type_is_a_null_pointer_constant() {
+        let mut f = Fixture::new();
+        let long = f.types.int(IntKind::Long);
+        let int = f.types.int(IntKind::Int);
+        let pointer = f.types.pointer(int);
+        let zero = f.zero(long);
+        let null = f.conv().to_type(zero, pointer);
+
+        assert_eq!(f.text(null), "convert null-pointer : int *\n  const 0 : long\n");
+    }
+
+    #[test]
+    fn a_pointer_that_is_not_a_constant_zero_is_an_ordinary_pointer_conversion() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let void = f.types.void();
+        let from = f.types.pointer(void);
+        let to = f.types.pointer(int);
+        let object = f.object(from);
+        let converted = f.conv().to_type(object, to);
+
+        assert_eq!(
+            f.text(converted),
+            "convert pointer : int *\n  convert lvalue : void *\n    decl #0 : void * lvalue\n"
+        );
+    }
+
+    #[test]
+    fn converting_to_the_type_it_already_has_writes_nothing() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let object = f.object(int);
+        let read = f.conv().value(object);
+        let again = f.conv().to_type(read, int);
+
+        assert_eq!(read, again);
+    }
+
+    #[test]
+    fn a_value_is_discarded_by_a_node_rather_than_by_being_ignored() {
+        let mut f = Fixture::new();
+        let int = f.types.int(IntKind::Int);
+        let object = f.object(int);
+        let dropped = f.conv().to_void(object);
+
+        assert_eq!(f.text(dropped), "convert void : void\n  decl #0 : int lvalue\n");
+    }
+}

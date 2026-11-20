@@ -1,0 +1,2164 @@
+//! What a `switch` becomes on the way to the machine, and how that shape is chosen.
+//!
+//! Design: `spec/optimizer/24-switch-lowering.md`. Section 24.4 puts the choice here, at the
+//! boundary into the machine level and nowhere earlier, and section 24.2 says what the choice
+//! looks like.
+//!
+//! # Why the shape is decided here and not in the front end
+//!
+//! What a `switch` should become is a target decision and not a language one. A chain of compares
+//! is right for three cases and wrong for two hundred, where the answer is a jump table, and wrong
+//! again for twenty spread over a million, where it is a binary search on the value. A front end
+//! that picked one would be picking for every target at once, and the IR would no longer hold what
+//! the program said. So the `switch` survives as far as here, and here is where it is given up.
+//!
+//! Keeping it whole that long buys something on the way as well. A `switch` is one node from which
+//! the range on each outgoing edge is exact: on the edge to case five the operand is five, and on
+//! the default edge it is outside the case set. A `switch` lowered early is a pile of branches that
+//! every pass afterwards has to work those facts back out of.
+//!
+//! # A switch is a partition and not a shape
+//!
+//! The reason to sort the cases and cut them into runs, rather than pick one shape for the whole
+//! statement, is that a real `switch` is more than one thing at once. A `switch` in a parser has a
+//! dense stretch of ASCII values best served by a jump table, a few scattered large constants best
+//! served by comparisons, and a set of aliased cases best served by a bit test, all in the same
+//! statement. A design that picks one shape for the whole of it cannot say that. So the case list
+//! is sorted, partitioned into clusters, and a decision tree is built over the clusters.
+//!
+//! All four shapes are written. A `Cluster::One` is one case value and one equality test,
+//! which is what every case was before this module existed. A `Cluster::Run` is a stretch of
+//! consecutive values that all go to the same place, and it is one subtraction and one unsigned
+//! comparison however long the stretch is, which is what makes `case 'a' ... 'z'` twenty six cases
+//! in the IR and two instructions in the machine code. A `Cluster::Bits` is a set of values
+//! scattered through a span narrower than a word, each destination holding the bits of a mask, and
+//! it is one shift and one test per destination however many values are in it, which is what makes
+//! `case 'a': case 'e': case 'i': case 'o': case 'u':` five compares before this and one after.
+//!
+//! A `Cluster::Table` is a stretch of clusters dense enough that a table with one cell per value
+//! is cheaper than testing them, and it is one range check and one jump through the table however
+//! many cases are in it, which is what the dispatch loop of an interpreter wants and what
+//! tamnd/rucc#1548 found missing: pcre2's matcher is a `switch` of about a hundred opcodes, and
+//! walking a tree down to one of them on every step cost more than four times what gcc's table
+//! did. The table is not written here. What is written is the range check and then a `switch`
+//! again, on the value less the lowest case and widened to a word, which `rucc_codegen::lower`
+//! turns into the load and the jump, and `rucc_asm` writes the table itself, in `.rodata` on x86-64
+//! ELF the way gcc does and after the function's last instruction everywhere else. See
+//! `JUMP_TABLE_GROWTH` for what dense means.
+//!
+//! # Why the tree compares signed
+//!
+//! The IR gives a `switch` a width and not a signedness, because signedness in this IR is a
+//! property of an operation rather than of a type, so there is nothing here to ask whether the
+//! program switched on an `int` or an `unsigned`. What makes that harmless is that the sort and the
+//! tree use the same order: the cases are sorted by their signed reading and the tree splits with a
+//! signed comparison, so the tree is consistent with itself and every value comes down it to the
+//! one cluster that can hold it. Sorting one way and comparing the other is the bug this is
+//! written to not have.
+//!
+//! A run is not affected either way. Testing `x - low` against `high - low` unsigned is modular
+//! arithmetic and gives the same answer whichever way the operand is read.
+//!
+//! # What it refuses to get wrong
+//!
+//! Section 24.6 lists the ways this goes wrong and two of them are arithmetic. The width of a run
+//! is worked out in `i128`, which holds the difference of any two values of any type C can switch
+//! on, so nothing here overflows the way the same computation in the switch's own type would. A run
+//! that covers a whole type comes out as a width of every bit set, which read as an unsigned
+//! comparison is a test that is true of everything, and that is exactly right for a `switch` no
+//! value falls out of.
+//!
+//! The third is the default edge, and the rule is that it is never dropped. Every leaf of the tree
+//! ends by branching to the default, so a value that matches nothing arrives there whichever way it
+//! came down, and there is no path through any of this that leaves a block without saying where
+//! control goes next.
+//!
+//! The fourth is the bit test's shift. Shifting by more than the width of the word being shifted is
+//! undefined, and the amount is the operand, so it is the operand that has to be shown to be in
+//! range first. Section 24.6 is firm that the bound before the shift is not an optimization
+//! decision and cannot be dropped when the value looks like it has to be in range, and here it is
+//! written by the same code that writes the shift rather than added afterwards.
+//!
+//! # A hot case
+//!
+//! Section 24.5 asks for the tree to lean towards the hot cases rather than be balanced. What says a
+//! case is hot is the hint on its arm, which `__builtin_expect` on the operand writes and a profile
+//! would write in the same place. A case whose hint is at least `SWITCH_PEEL_PERCENT` is taken out
+//! and tested on its own before anything else, which is what LLVM calls peeling, and the rest is
+//! lowered behind it as if the case had never been there. The branch in front carries the hint, so
+//! the layout puts the hot case next.
+//!
+//! One case and not an ordering of all of them. A hint says which value is likely and nothing about
+//! the others, and the others share what is left evenly, so there is nothing to order them by.
+//!
+//! # What it says it did
+//!
+//! Section 24.7 asks for every `switch` in the corpus to be compared with what gcc made of it, so
+//! each one lowered here comes back as a [`Lowered`], and `-fopt-info` prints it as one line: how
+//! many cases, which shape, and what the partition was. The same section asks what each shape
+//! would have cost on a hot `switch`, and [`Force`] is how that is measured. `-Zswitch=` forces one
+//! shape on every `switch` in the file, and nothing else reaches for it.
+
+use std::fmt::Write as _;
+
+use rucc_cost::Goal;
+use rucc_cost::heuristics::{
+    JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE, SWITCH_PEEL_PERCENT,
+};
+use rucc_diag::Span;
+use rucc_ir::{
+    Block, BlockCall, Builder, Extra, Flags, Func, Hint, Imm, Inst, IntPred, Opcode, Type, Value,
+};
+
+/// The most clusters a leaf of the decision tree tests one at a time, which is also the count below
+/// which nothing new is built at all. A `switch` of this many clusters or fewer stays the chain of
+/// compares it has always been, in the block it has always been in.
+///
+/// Thirty two, and the number is measured rather than picked. What it trades is not a comparison
+/// against a comparison, which is what it looks like on paper and is the reason a small number looks
+/// right. A walk of `n` clusters is `n` compares and a search is about `log2(n)`, so on paper the
+/// search wins from about five cases upward and the threshold should be about five.
+///
+/// The machine does not agree, because the two kinds of comparison do not cost the same. Every
+/// compare in a walk is a branch that is almost never taken, one case out of `n`, so the predictor
+/// gets all of them right and the front end runs through them several per cycle. Every branch in a
+/// search is a branch that goes each way about half the time, so the predictor gets a fair share of
+/// them wrong and each of those costs the whole pipeline. Twenty compares nobody mispredicts are
+/// cheaper than six branches that mispredict a third of the time, and that stays true further up
+/// than it seems it should.
+///
+/// Measured on an interpreter loop dispatching on a sparse `switch`, four million iterations picking
+/// a case at random, the walk is ahead up to about thirty two cases and the search is ahead above
+/// about thirty six. At seventeen cases a search costs sixteen percent, at twenty four it costs
+/// twenty two, at thirty six it saves nine, at fifty it saves twenty three and at a hundred it saves
+/// half. Thirty two is where those two lines cross.
+///
+/// Two things would move it. The first is the jump table, which is what a dense `switch` this large
+/// becomes now, so the cases that reach the tree are the sparse ones. It was measured before the
+/// table was written, on a sparse `switch`, and a sparser search may be worth starting sooner now
+/// that nothing dense is left in it.
+/// The second is knowing which case is hot, because a walk that tests the common case first is
+/// cheaper than any search. A hint on one case is used, by testing that case first, and see
+/// `hottest` for when.
+///
+/// gcc has the same knob under the name `case-values-threshold` and a small number in it, which is
+/// the right number for gcc because gcc reaches for a jump table first and the tree is what it falls
+/// back to on cases a table cannot hold.
+pub const LINEAR: usize = 32;
+
+/// How many clusters or fewer are tested one after another when no table may be written.
+///
+/// [`LINEAR`] was measured on a `switch` that picks a case at random, where every node of a search
+/// is a branch the machine guesses wrong half the time and a walk is one wrong guess at the end.
+/// Under `-fno-jump-tables` the `switch` that matters is the kernel's system call dispatch, which
+/// a program calls with the same few numbers over and over, so every branch is guessed right and
+/// what is left is how many instructions it takes. gcc searches down to one or two cases there.
+/// With thirty two the dispatch went down five nodes and then along up to thirty two cases, which
+/// was 56 instructions for `getppid` and 62 for `futex` against 19 and 25 with gcc. With three
+/// every system call takes 18 to 22.
+pub const BALANCED: usize = 3;
+
+/// Rewrites every `switch` in the function into branches, and leaves everything else alone.
+///
+/// The function is changed in place, which is what makes this the last thing that reads the IR as
+/// the front end built it. `--emit=ir` prints before this runs, and nothing after this asks what
+/// the program said, only what the machine has to do.
+///
+/// `goal` is whether the level asked for small code, which decides how dense a stretch has to be
+/// and how many clusters it needs before it is a table. See `JUMP_TABLE_GROWTH_FOR_SIZE`.
+pub fn switches(func: &mut Func, goal: Goal) {
+    let _ = lowered(func, goal, None, true, u64::BITS);
+}
+
+/// The same, with a shape forced on every `switch` when `force` names one, answering what each
+/// `switch` became in the order they were found.
+///
+/// `tables` is false under `-fno-jump-tables`, and then no `switch` becomes a table, not even one
+/// `-Zswitch=table` forced: the kernel asks for that because a jump through a table is an indirect
+/// branch, and one of those has no thunk to go through. A bit test is still allowed, since it
+/// branches to a block it names, and gcc writes them under the same flag.
+///
+/// `word` is how many bits the machine's registers hold, which is what a table's index and a bit
+/// test's mask are computed in. It is 32 on i386, where a mask in an `i64` is a pair of registers
+/// and a shift of one by a register is not something the halves are split into.
+#[must_use]
+pub fn lowered(
+    func: &mut Func,
+    goal: Goal,
+    force: Option<Force>,
+    tables: bool,
+    word: u32,
+) -> Vec<Lowered> {
+    lowered_by(func, Rules::native(goal), force, tables, word)
+}
+
+/// The same as [`lowered`], with the bounds in `rules` in place of the ones the native back ends
+/// use. This is for the wasm back end, where a table costs a byte a cell and a comparison costs
+/// more than it does on a machine with a branch predictor in front of it.
+pub fn lowered_by(
+    func: &mut Func,
+    rules: Rules,
+    force: Option<Force>,
+    tables: bool,
+    word: u32,
+) -> Vec<Lowered> {
+    let found: Vec<Inst> = func
+        .blocks()
+        .filter_map(|block| func.terminator(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Switch)
+        .collect();
+    found.into_iter().filter_map(|inst| lower(func, inst, rules, force, tables, word)).collect()
+}
+
+/// The bounds that decide what a `switch` becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// How many cells a table may have for each comparison it replaces, counted with a single
+    /// value as one comparison and a run as two. See `JUMP_TABLE_GROWTH`.
+    pub growth: i128,
+    /// How many clusters a stretch needs before it is a table.
+    pub least: u32,
+    /// How many clusters or fewer are tested one after another, where more are split by a binary
+    /// search. See [`LINEAR`].
+    pub leaf: usize,
+    /// Whether the `switch` that a table is left as sends a value outside its cells to its
+    /// default, as `br_table` does. A table that is the last test of a chain then gets no range
+    /// check of its own, since a value outside the range goes to the default either way.
+    pub checked: bool,
+}
+
+impl Rules {
+    /// The bounds of the native back ends for `goal`, which are gcc's.
+    #[must_use]
+    pub fn native(goal: Goal) -> Self {
+        let (growth, least) = match goal {
+            Goal::Speed => (JUMP_TABLE_GROWTH, rucc_cost::param!(JUMP_TABLE_MIN_TARGETS)),
+            Goal::Size => {
+                (JUMP_TABLE_GROWTH_FOR_SIZE, rucc_cost::param!(JUMP_TABLE_MIN_TARGETS_FOR_SIZE))
+            }
+        };
+        Rules { growth, least, leaf: LINEAR, checked: false }
+    }
+}
+
+/// A shape forced on every `switch`, which is what `-Zswitch=` asks for.
+///
+/// For measuring and for nothing else. Section 24.7 asks what each shape costs on a hot `switch`,
+/// and the only way to know what a table would have cost where a tree was chosen is to build the
+/// table. A bit test is not one of these, since it holds three destinations inside one word and a
+/// `switch` hot enough to be worth measuring is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Force {
+    /// One jump table over every case, when their span is at most [`FORCED_CELLS`].
+    Table,
+    /// A binary search all the way down to single clusters, with no table and no bit test.
+    Tree,
+    /// Every cluster tested one after another, with no table and no bit test.
+    Walk,
+}
+
+impl Force {
+    /// The shape a `-Zswitch=` argument names, which is `table`, `tree` or `walk`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "table" => Some(Self::Table),
+            "tree" => Some(Self::Tree),
+            "walk" => Some(Self::Walk),
+            _ => None,
+        }
+    }
+}
+
+/// The most cells a forced table may have. A `switch` spread wider than this keeps the shape it
+/// would have had, since a table of a million cells measures the cache and not the dispatch.
+pub const FORCED_CELLS: i128 = 4096;
+
+/// What one `switch` became, which is what `-fopt-info` says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lowered {
+    /// How many case labels it had, not counting the default.
+    pub cases: usize,
+    /// How many clusters those fell into, with a table or a bit test counting as one.
+    pub clusters: usize,
+    /// How many of the clusters are jump tables.
+    pub tables: usize,
+    /// How many are bit tests.
+    pub bits: usize,
+    /// Whether the clusters are searched rather than tested one after another.
+    pub searched: bool,
+    /// Whether a hot case was tested on its own ahead of the rest.
+    pub peeled: bool,
+}
+
+impl Lowered {
+    /// One word for the shape, in gcc's terms: a table when any part of it is one, then a bit
+    /// test, then a tree or a walk.
+    ///
+    /// A `switch` is a partition and can be several of these at once. The word names the part that
+    /// decides what it costs, which is what a comparison with gcc's choice wants, and the counts
+    /// in [`Lowered::describe`] say the rest.
+    #[must_use]
+    pub fn shape(&self) -> &'static str {
+        if self.tables > 0 {
+            "table"
+        } else if self.bits > 0 {
+            "bit-test"
+        } else if self.searched {
+            "tree"
+        } else {
+            "walk"
+        }
+    }
+
+    /// The remark, as `-fopt-info` prints it after the function's name.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut out = format!(
+            "switch of {} cases lowered as a {}; clusters {}, tables {}, bit tests {}",
+            self.cases,
+            self.shape(),
+            self.clusters,
+            self.tables,
+            self.bits
+        );
+        if self.peeled {
+            let _ = write!(out, ", hot case first");
+        }
+        out
+    }
+}
+
+/// One `switch`, as the clusters its cases fall into and a decision tree over them.
+fn lower(
+    func: &mut Func,
+    inst: Inst,
+    rules: Rules,
+    force: Option<Force>,
+    allowed: bool,
+    word: u32,
+) -> Option<Lowered> {
+    let block = func.block_of(inst).expect("a terminator is in a block");
+    let span = func.span(inst);
+    let Extra::Switch(info) = func[inst].extra else { return None };
+    let info = func[info];
+    let &value = func[func[inst].args].first()?;
+    // The lane, because a `switch` on a vector is not a thing C can write and the immediates are
+    // an integer's either way.
+    let ty = func[value].ty.lane();
+    let calls: Vec<BlockCall> = func[info.targets].to_vec();
+    let mut cases: Vec<Imm> = func[info.cases].to_vec();
+    let count = cases.len();
+    let (&default, arms) = calls.split_first()?;
+    let mut arms = arms.to_vec();
+    let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
+    let found = clusters(func, &cases, &arms, ty);
+    let clusters = match force {
+        None if allowed => group(func, tables(func, found, ty, rules, word), word),
+        None => group(func, found, word),
+        Some(Force::Table) if allowed => forced(found, ty, word),
+        Some(Force::Table | Force::Tree | Force::Walk) => found,
+    };
+    let leaf = match force {
+        Some(Force::Tree) => 1,
+        Some(Force::Walk) => usize::MAX,
+        Some(Force::Table) | None if allowed => rules.leaf,
+        Some(Force::Table) | None => rules.leaf.min(BALANCED),
+    };
+    let lowered = Lowered {
+        cases: count,
+        clusters: clusters.len(),
+        tables: clusters.iter().filter(|one| matches!(one, Cluster::Table { .. })).count(),
+        bits: clusters.iter().filter(|one| matches!(one, Cluster::Bits { .. })).count(),
+        searched: clusters.len() > leaf,
+        peeled: hot.is_some(),
+    };
+
+    // Before anything is written, because the builder appends and the `switch` is where the
+    // appending has to happen.
+    func.remove_inst(inst);
+    let of = Lowering { value, ty, default, span, word: Type::int(word), checked: rules.checked };
+    let rest = match hot {
+        Some((case, call)) => peel(func, &of, block, case, call),
+        None => block,
+    };
+    tree(func, &of, rest, &clusters, leaf);
+    Some(lowered)
+}
+
+/// Every cluster as one table, which is what `-Zswitch=table` asks for, or the clusters as they
+/// were when their span is wider than [`FORCED_CELLS`] or the operand wider than a word.
+fn forced(clusters: Vec<Cluster>, ty: Type, word: u32) -> Vec<Cluster> {
+    let (Some(first), Some(last)) = (clusters.first(), clusters.last()) else { return clusters };
+    if ty.bits() == 0 || ty.bits() > word || last.high() - first.low() >= FORCED_CELLS {
+        return clusters;
+    }
+    vec![table(&clusters)]
+}
+
+/// The case a hint says is taken often enough to be tested on its own ahead of the rest, if one is.
+///
+/// The default is never one. It is what is left when every case has been tested, so testing it
+/// first would be testing every case anyway.
+fn hottest(arms: &[BlockCall]) -> Option<usize> {
+    let (at, parts) = arms
+        .iter()
+        .enumerate()
+        .filter_map(|(at, call)| Some((at, call.hint.taken()?)))
+        .max_by_key(|&(_, parts)| parts)?;
+    (parts >= rucc_cost::param!(SWITCH_PEEL_PERCENT) * Hint::SCALE / 100).then_some(at)
+}
+
+/// One case tested on its own, with the hint on its arm, and the block the rest of the `switch` is
+/// lowered into when the test fails.
+fn peel(func: &mut Func, of: &Lowering, at: Block, case: i128, call: BlockCall) -> Block {
+    let rest = func.create_block();
+    let taken: Vec<Value> = func[call.args].to_vec();
+    let mut build = Builder::new(func, at).at(of.span);
+    let want = build.iconst(of.ty, case);
+    let matched = build.icmp(IntPred::Eq, of.value, want);
+    build.br_if(matched, call.block, &taken, rest, &[]);
+    let term = func.terminator(at).expect("the branch just written");
+    for (slot, hint) in func.target_list(term).iter().zip([call.hint, call.hint.complement()]) {
+        let written = func[slot];
+        func.set_block_call(slot, BlockCall { hint, ..written });
+    }
+    rest
+}
+
+/// What every test written for one `switch` shares.
+///
+/// The tree hands the same four things down to every leaf and every leaf hands them to every test,
+/// so they travel together rather than as four more parameters at each step.
+struct Lowering {
+    /// The operand being switched on.
+    value: Value,
+    /// Its width, which every constant written here takes.
+    ty: Type,
+    /// Where a value that matches no case goes, which is every leaf's last edge.
+    default: BlockCall,
+    /// The source location of the `switch`, which everything written for it takes.
+    span: Span,
+    /// The machine's word, which a table's index and a bit test's masks are computed in.
+    word: Type,
+    /// Whether a table sends a value outside its cells to its default. See [`Rules::checked`].
+    checked: bool,
+}
+
+/// A stretch of case values that one test separates from the rest of them.
+///
+/// This is the structure `spec/optimizer/24-switch-lowering.md` section 24.2 describes, with all
+/// four of its variants. It is an enum rather than a struct with a low and a high in it because the
+/// last one carries something the others do not: a jump table carries a table, and adding it was a
+/// variant here and an arm in [`test`] rather than a change to how a `switch` is taken apart.
+#[derive(Clone, Debug)]
+enum Cluster {
+    /// One case value, which is one equality test.
+    One {
+        /// The value the operand has to equal.
+        value: i128,
+        /// Where it goes when it does.
+        call: BlockCall,
+    },
+    /// Every value from `low` to `high`, all of which go to the same place.
+    Run {
+        /// The lowest value in the run.
+        low: i128,
+        /// The highest, which is at least one above the lowest.
+        high: i128,
+        /// Where any of them goes.
+        call: BlockCall,
+    },
+    /// Every value from `low` to `high` looked up in a table, with the ones no case names going to
+    /// the default.
+    Table {
+        /// The lowest value in the table, which is the first cell.
+        low: i128,
+        /// The highest, which is the last cell.
+        high: i128,
+        /// Every case value in the table and where it goes, lowest first. A run is one entry per
+        /// value, because a run is one cell per value in a table.
+        arms: Vec<(i128, BlockCall)>,
+    },
+    /// Values scattered through `low` to `high` going to several places, each place being the bits
+    /// of one mask.
+    Bits {
+        /// The lowest value any of the masks names, which every bit is counted from.
+        low: i128,
+        /// The highest, which is less than a word above the lowest.
+        high: i128,
+        /// One mask per destination, in the order the destinations were first seen. Bit `n` of a
+        /// mask is set when the value `low + n` goes to that destination.
+        arms: Vec<(u64, BlockCall)>,
+    },
+}
+
+impl Cluster {
+    /// The lowest value this cluster holds.
+    fn low(&self) -> i128 {
+        match *self {
+            Self::One { value, .. } => value,
+            Self::Run { low, .. } | Self::Bits { low, .. } | Self::Table { low, .. } => low,
+        }
+    }
+
+    /// The highest value this cluster holds.
+    fn high(&self) -> i128 {
+        match *self {
+            Self::One { value, .. } => value,
+            Self::Run { high, .. } | Self::Bits { high, .. } | Self::Table { high, .. } => high,
+        }
+    }
+
+    /// Whether every value in this cluster goes where that edge goes.
+    ///
+    /// A bit test never does, because it has more than one destination and this is only asked in
+    /// order to merge two clusters into one run. Grouping happens after that merging and never
+    /// before it, so the question does not come up, and answering no is right either way.
+    fn goes_to(&self, func: &Func, call: BlockCall) -> bool {
+        match *self {
+            Self::One { call: mine, .. } | Self::Run { call: mine, .. } => same(func, mine, call),
+            Self::Bits { .. } | Self::Table { .. } => false,
+        }
+    }
+
+    /// Grows the cluster upwards to a value, which the caller has already checked is the one
+    /// immediately above it and goes to the same place.
+    fn grow(&mut self, value: i128) {
+        let call = match *self {
+            Self::One { call, .. } | Self::Run { call, .. } => call,
+            Self::Bits { .. } | Self::Table { .. } => {
+                unreachable!("a bit test or a table is never grown into a run")
+            }
+        };
+        *self = Self::Run { low: self.low(), high: value, call };
+    }
+}
+
+/// How many cells a table may have for each comparison it replaces, which is what dense means.
+///
+/// Eight, and it is gcc's number rather than one measured here: `jump-table-max-growth-ratio-for-
+/// speed` is 800 percent, counted the way this counts, with a single value as one comparison and a
+/// run as two. It is a size bound rather than a speed one. A table is faster than a tree over the
+/// same cases at any density a `switch` is written at, since it is one load and one jump however
+/// many cases there are, so what stops a table from covering a sparse `switch` is the four bytes a
+/// cell costs against the few bytes a comparison does. Eight cells for each comparison is where
+/// gcc stops paying that, and agreeing with it means a table here is a table there, which is what
+/// the corpus reports compare.
+const JUMP_TABLE_GROWTH: i128 = 8;
+
+/// What [`JUMP_TABLE_GROWTH`] becomes when the level asked for small code.
+///
+/// Three, which is gcc's `jump-table-max-growth-ratio-for-size`, so a `switch` that is a table at
+/// `-O2` can be a search at `-Os`. The bound is on bytes, and at `-Os` bytes are what the level is
+/// asking about, so a table has to replace more of them before it is worth its cells.
+const JUMP_TABLE_GROWTH_FOR_SIZE: i128 = 3;
+
+/// The clusters again, with each stretch dense enough for a table turned into one.
+///
+/// Greedy, the way [`group`] is: each position takes the longest stretch from there that is dense
+/// enough and has enough clusters in it, and either takes the whole stretch or takes one cluster
+/// and moves on. gcc finds the best partition with a quadratic search, and the difference shows
+/// only on a `switch` with two dense stretches overlapping in a way a greedy scan cuts in the
+/// wrong place, which is rare enough that the simpler one is what is here.
+///
+/// Before [`group`] rather than after it, because a table is cheaper than a bit test over the same
+/// values once there are enough of them, and after it the single values a table wants would
+/// already be gone into masks. Only on an operand a word wide or narrower, since the index a
+/// table is read with is a word and a wider operand does not fit in one.
+fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, rules: Rules, word: u32) -> Vec<Cluster> {
+    if ty.bits() == 0 || ty.bits() > word {
+        return clusters;
+    }
+    let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
+    let mut at = 0;
+    while at < clusters.len() {
+        match dense(func, &clusters[at..], rules, word) {
+            Some(end) => {
+                out.push(table(&clusters[at..at + end]));
+                at += end;
+            }
+            None => {
+                out.push(clusters[at].clone());
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// How many clusters from the front of these make the longest stretch a table is worth writing
+/// for, or nothing when no stretch is.
+///
+/// Dense is what gcc's `jump_table_cluster::can_be_handled` says it is: the values the table
+/// covers are at most [`JUMP_TABLE_GROWTH`] times the comparisons it replaces. Worth writing is at
+/// least [`JUMP_TABLE_MIN_TARGETS`] clusters, below which the range check, the load and the
+/// indirect jump are more than the compares they replace. For size both are the other constant,
+/// [`JUMP_TABLE_GROWTH_FOR_SIZE`] and [`JUMP_TABLE_MIN_TARGETS_FOR_SIZE`].
+///
+/// A stretch inside one word going to [`BIT_TEST_TARGETS`] places or fewer is left for [`group`],
+/// because a bit test over it is that many tests and no load, which is the choice gcc makes too.
+///
+/// The scan stops once the span is wider than every cluster left could pay for even if each were
+/// a run, since the span only grows and the count cannot catch it after that.
+fn dense(func: &Func, clusters: &[Cluster], rules: Rules, word: u32) -> Option<usize> {
+    let Rules { growth, least, .. } = rules;
+    let low = clusters.first()?.low();
+    let most = 2 * i128::try_from(clusters.len()).ok()?;
+    let least = usize::try_from(least).ok()?;
+    let mut compares: i128 = 0;
+    let mut places: Vec<BlockCall> = Vec::new();
+    let mut best = None;
+    for (index, cluster) in clusters.iter().enumerate() {
+        let call = match *cluster {
+            Cluster::One { call, .. } => {
+                compares += 1;
+                call
+            }
+            Cluster::Run { call, .. } => {
+                compares += 2;
+                call
+            }
+            Cluster::Bits { .. } | Cluster::Table { .. } => return best,
+        };
+        if places.len() <= BIT_TEST_TARGETS && !places.iter().any(|&seen| same(func, seen, call)) {
+            places.push(call);
+        }
+        let span = cluster.high() - low + 1;
+        if span > growth * most {
+            break;
+        }
+        let masks = span <= i128::from(word) && places.len() <= BIT_TEST_TARGETS;
+        if index + 1 >= least && span <= growth * compares && !masks {
+            best = Some(index + 1);
+        }
+    }
+    best
+}
+
+/// The most destinations a stretch can have and still be left for a bit test rather than made a
+/// table. Three, which is gcc's `m_max_case_bit_tests`: past that the tests one after another cost
+/// more than the load and the jump.
+const BIT_TEST_TARGETS: usize = 3;
+
+/// One table over a stretch of clusters that [`dense`] said makes one.
+fn table(stretch: &[Cluster]) -> Cluster {
+    let mut arms = Vec::new();
+    for cluster in stretch {
+        match *cluster {
+            Cluster::One { value, call } => arms.push((value, call)),
+            Cluster::Run { low, high, call } => {
+                arms.extend((low..=high).map(|value| (value, call)))
+            }
+            Cluster::Bits { .. } | Cluster::Table { .. } => {
+                unreachable!("tables are found before anything is grouped")
+            }
+        }
+    }
+    let low = stretch.first().map_or(0, Cluster::low);
+    let high = stretch.last().map_or(0, Cluster::high);
+    Cluster::Table { low, high, arms }
+}
+
+// The widest span of values one bit test covers is the width of the word its mask lives in.
+//
+// This is a correctness bound and not a tuning one, which is what section 24.6 asks it to be.
+// `1 << (x - low)` is undefined once `x - low` reaches the width of the word being shifted, so a
+// group is only ever formed inside this span and the range check in front of the shift is what
+// makes the shift amount stay there. The word is the machine's, which `lowered` is told: the mask
+// is held in a register and shifted by one, and an `i64` on i386 is two of them.
+
+/// How many more case values a group needs than it has destinations before a bit test is worth
+/// writing.
+///
+/// Three, and it comes from counting instructions rather than from anywhere else. A bit test is a
+/// subtraction, a comparison and a branch for the range check, then a shift, then a mask and a
+/// branch for each destination: five instructions and two more per destination. What it replaces is
+/// two instructions per case value. So `n` values going to `t` destinations cost `2n` as compares
+/// and `5 + 2t` as a bit test, the two are level when `n` is two and a half clear of `t`, and three
+/// is the first whole number above that.
+///
+/// Unlike [`LINEAR`] this one is not fighting the branch predictor, which is why counting is enough
+/// here and was not enough there. A walk over `n` values and a bit test over the same `n` both end
+/// in a branch that is taken about as often, so what is left between them is the instruction count.
+const MARGIN: usize = 3;
+
+/// The case list sorted and cut into clusters.
+///
+/// Sorting is what makes the rest of this possible: a decision tree needs an order to split on, and
+/// a run of consecutive values is only visible once the values are next to each other. It is
+/// `n log n` and it is the most expensive thing in the module, which section 24.7 says is fine
+/// because everything here is cheap next to the size of the construct.
+///
+/// # Panics
+///
+/// Panics on two cases of the same value. C forbids them and the front end rejects them, so
+/// everything below is written believing the clusters are disjoint, and section 24.6 asks for that
+/// belief to be recorded here rather than left implicit. Dropping the later of the pair instead
+/// would leave its arm with nothing branching to it, which is a function the IR verifier refuses,
+/// and quietly keeping both would put two clusters of the same value into a search that assumes it
+/// can tell them apart. A `switch` that arrives with a duplicate is a bug above this, and stopping
+/// on it is how it gets found.
+fn clusters(func: &Func, cases: &[Imm], arms: &[BlockCall], ty: Type) -> Vec<Cluster> {
+    let mut sorted: Vec<(i128, BlockCall)> =
+        cases.iter().zip(arms).map(|(&imm, &call)| (imm.signed(ty), call)).collect();
+    sorted.sort_by_key(|&(value, _)| value);
+    assert!(
+        sorted.windows(2).all(|pair| pair[0].0 != pair[1].0),
+        "a switch with two cases of the same value reached the back end"
+    );
+
+    let mut clusters: Vec<Cluster> = Vec::with_capacity(sorted.len());
+    for (value, call) in sorted {
+        match clusters.last_mut() {
+            // In `i128`, so that a run reaching the top of its own type is the addition it looks
+            // like rather than an overflow.
+            Some(last) if last.high() + 1 == value && last.goes_to(func, call) => {
+                last.grow(value);
+            }
+            _ => clusters.push(Cluster::One { value, call }),
+        }
+    }
+    clusters
+}
+
+/// Whether two edges go to the same block carrying the same values.
+///
+/// Both halves matter. Two cases whose arms are the same block but which pass it different
+/// arguments are two different destinations, and merging them into a run would hand the block one
+/// of the two whichever value arrived.
+fn same(func: &Func, a: BlockCall, b: BlockCall) -> bool {
+    a.block == b.block && func[a.args] == func[b.args]
+}
+
+/// The clusters again, with stretches of single values turned into bit tests where that is fewer
+/// instructions.
+///
+/// This is section 24.3's grouping phase and it is the greedy one. Each position takes the longest
+/// stretch of single values that fits inside a word, asks whether a bit test over it is worth
+/// writing, and either takes the whole stretch or takes one cluster and moves on. The document says
+/// the optimal partition is quadratic and is only justified on large switches, which are exactly the
+/// switches where compile time is already the thing being spent, so the greedy one is what is here
+/// and the other one is recorded rather than written.
+///
+/// Only single values are grouped. A run is already one subtraction and one comparison however many
+/// values it holds, so folding it into a mask replaces two instructions with two instructions and
+/// spends a word of the span doing it. That is a loss on the run and a loss on whatever the span
+/// would otherwise have reached.
+fn group(func: &Func, clusters: Vec<Cluster>, word: u32) -> Vec<Cluster> {
+    let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
+    let mut at = 0;
+    while at < clusters.len() {
+        let reach = reach(&clusters, at, word);
+        match bits(func, &clusters[at..at + reach]) {
+            Some(cluster) => {
+                out.push(cluster);
+                at += reach;
+            }
+            None => {
+                out.push(clusters[at].clone());
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// How many single values starting here sit inside one word of the first of them.
+fn reach(clusters: &[Cluster], at: usize, word: u32) -> usize {
+    let Cluster::One { value: first, .. } = clusters[at] else { return 0 };
+    let mut reach = 0;
+    while let Some(Cluster::One { value, .. }) = clusters.get(at + reach) {
+        if value - first >= i128::from(word) {
+            break;
+        }
+        reach += 1;
+    }
+    reach
+}
+
+/// The masks for a stretch of single values, or nothing when the compares are the cheaper answer.
+///
+/// One mask per destination rather than one per value, which is the whole point: `case 'a': case
+/// 'e': case 'i': case 'o': case 'u':` is five values and one destination, so it is one mask and one
+/// test rather than five compares.
+fn bits(func: &Func, group: &[Cluster]) -> Option<Cluster> {
+    let low = group.first()?.low();
+    let mut arms: Vec<(u64, BlockCall)> = Vec::new();
+    for cluster in group {
+        let Cluster::One { value, call } = *cluster else { return None };
+        // Shifting is safe because `reach` only gathered values inside one word of `low`.
+        let bit = 1u64 << (value - low);
+        match arms.iter_mut().find(|&&mut (_, mine)| same(func, mine, call)) {
+            Some((mask, _)) => *mask |= bit,
+            None => arms.push((bit, call)),
+        }
+    }
+    if group.len() < arms.len() + MARGIN {
+        return None;
+    }
+    Some(Cluster::Bits { low, high: group.last()?.high(), arms })
+}
+
+/// A binary search over the clusters, ending in a chain of tests at each leaf of `leaf` clusters or
+/// fewer, which is [`LINEAR`] unless a shape was forced.
+///
+/// The split is at the middle of the list and the test is whether the operand is below the lowest
+/// value of the upper half. Everything the lower half holds is below that value because the list is
+/// sorted and the clusters are disjoint, so an operand that is below it and matches anything at all
+/// matches something in the lower half, and one that is not is either in the upper half or in
+/// neither. Either way it reaches a leaf that tests what is left, and the leaf sends it to the
+/// default when none of that matches.
+fn tree(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster], leaf: usize) {
+    if clusters.len() <= leaf {
+        chain(func, of, at, clusters);
+        return;
+    }
+    let (below, above) = clusters.split_at(clusters.len() / 2);
+    let pivot = above[0].low();
+    let left = func.create_block();
+    let right = func.create_block();
+
+    let mut build = Builder::new(func, at).at(of.span);
+    let want = build.iconst(of.ty, pivot);
+    let under = build.icmp(IntPred::Slt, of.value, want);
+    build.br_if(under, left, &[], right, &[]);
+
+    tree(func, of, left, below, leaf);
+    tree(func, of, right, above, leaf);
+}
+
+/// The clusters tested one after another, each falling to the next and the last to the default.
+///
+/// The block this starts in gets the first test, and each test after the first gets a block of its
+/// own that the one before it falls to when its test failed. The last falls to the default, so the
+/// default is not a block anything is created for and a chain of `n` clusters costs `n` less one.
+fn chain(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster]) {
+    // A leaf with nothing in it is a jump. It is what a `switch` whose only label is `default` is,
+    // and it is also what one whose cases a later pass folded away would be.
+    let Some((last, rest)) = clusters.split_last() else {
+        let args: Vec<Value> = func[of.default.args].to_vec();
+        Builder::new(func, at).at(of.span).jump(of.default.block, &args);
+        return;
+    };
+
+    let mut at = at;
+    for cluster in rest {
+        let next = func.create_block();
+        test(func, of, at, cluster, next, &[]);
+        at = next;
+    }
+    let onward: Vec<Value> = func[of.default.args].to_vec();
+    test(func, of, at, last, of.default.block, &onward);
+}
+
+/// One cluster, as the comparison that decides it and the branch that acts on it.
+fn test(
+    func: &mut Func,
+    of: &Lowering,
+    at: Block,
+    cluster: &Cluster,
+    next: Block,
+    onward: &[Value],
+) {
+    if matches!(cluster, Cluster::Bits { .. }) {
+        scattered(func, of, at, cluster, next, onward);
+        return;
+    }
+    if matches!(cluster, Cluster::Table { .. }) {
+        looked_up(func, of, at, cluster, next, onward);
+        return;
+    }
+    let call = match *cluster {
+        Cluster::One { call, .. } | Cluster::Run { call, .. } => call,
+        Cluster::Bits { .. } | Cluster::Table { .. } => unreachable!("dealt with above"),
+    };
+    let taken: Vec<Value> = func[call.args].to_vec();
+    let mut build = Builder::new(func, at).at(of.span);
+    let matched = match *cluster {
+        Cluster::One { value, .. } => {
+            let want = build.iconst(of.ty, value);
+            build.icmp(IntPred::Eq, of.value, want)
+        }
+        Cluster::Run { low, high, .. } => {
+            let base = shifted_down(&mut build, of, low);
+            let width = build.iconst(of.ty, high - low);
+            build.icmp(IntPred::Ule, base, width)
+        }
+        Cluster::Bits { .. } | Cluster::Table { .. } => unreachable!("dealt with above"),
+    };
+    build.br_if(matched, call.block, &taken, next, onward);
+}
+
+/// A dense stretch, as one range check and then a `switch` on the value less the lowest case,
+/// which `rucc_codegen::lower` turns into a jump through a table.
+///
+/// The range check is the same one a run is, and it is what lets the `switch` behind it be a table
+/// with no check of its own: every value that gets past it has a cell. A value in the range that
+/// no case names goes to the default, for the reason [`scattered`] gives, and the `switch` says so
+/// by having the default as its own and no case for that value.
+///
+/// An arm that carries values into the block it goes to gets a block of its own in front of it
+/// that passes them, and the `switch` goes there with nothing on the edge. A jump through a
+/// register has nowhere to put the moves an edge with values on it needs, which is what
+/// `rucc_codegen::split::indirect` works round for a computed `goto` and what one `switch` sending
+/// two cases to the same block with different values would get wrong, since a block reached from
+/// one jump gets one set of moves. A block per distinct edge is the same thing done before
+/// anything can go wrong, and it is where the moves would have been anyway.
+fn looked_up(
+    func: &mut Func,
+    of: &Lowering,
+    at: Block,
+    cluster: &Cluster,
+    next: Block,
+    onward: &[Value],
+) {
+    let Cluster::Table { low, high, arms } = cluster else {
+        unreachable!("only a table is written as one");
+    };
+    let (low, high) = (*low, *high);
+    let inside = func.create_block();
+    let mut hops: Vec<(BlockCall, Block)> = Vec::new();
+    let mut hop = |func: &mut Func, call: BlockCall| -> Block {
+        if func[call.args].is_empty() {
+            return call.block;
+        }
+        if let Some(&(_, block)) = hops.iter().find(|&&(mine, _)| same(func, mine, call)) {
+            return block;
+        }
+        let block = func.create_block();
+        hops.push((call, block));
+        block
+    };
+    let cases: Vec<(i128, Block)> =
+        arms.iter().map(|&(value, call)| (value - low, hop(func, call))).collect();
+    // A table with a case for every value in its range never reaches its default, since the range
+    // check above is what sends everything else on. The default is then one of the cases, so that
+    // no block is made for it: a block made for the arguments of an edge nothing takes is written
+    // out all the same, and objtool calls the jump in it an unreachable instruction.
+    let full = usize::try_from(high - low + 1).is_ok_and(|size| size == cases.len());
+    let default = match cases.first() {
+        Some(&(_, block)) if full => block,
+        _ => hop(func, of.default),
+    };
+
+    // A table whose range check would fail to the default has no need of the check when the
+    // `switch` sends a value outside its cells to the default itself. The value less the lowest case
+    // is then read unsigned, so a value below the range is above it, and the operand must not be
+    // wider than a word, since cutting it down to the index could make a value outside the range
+    // look like one inside it.
+    let last = next == of.default.block && func[of.default.args] == *onward;
+    let mut build = Builder::new(func, at).at(of.span);
+    let base = shifted_down(&mut build, of, low);
+    if of.checked && last && of.ty.bits() <= of.word.bits() {
+        func.remove_block(inside);
+        let default = if full { hop(func, of.default) } else { default };
+        let mut build = Builder::new(func, at).at(of.span);
+        let index = in_word(&mut build, of, base);
+        build.switch(index, default, &cases);
+    } else {
+        let width = build.iconst(of.ty, high - low);
+        let ok = build.icmp(IntPred::Ule, base, width);
+        build.br_if(ok, inside, &[], next, onward);
+
+        // In a word, because that is what an address is added up in. The range check above is
+        // what makes widening without the sign the right widening: what gets here is between zero
+        // and the width, read unsigned.
+        let mut build = Builder::new(func, inside).at(of.span);
+        let index = in_word(&mut build, of, base);
+        build.switch(index, default, &cases);
+    }
+
+    for (call, block) in hops {
+        let args: Vec<Value> = func[call.args].to_vec();
+        Builder::new(func, block).at(of.span).jump(call.block, &args);
+    }
+}
+
+/// `x - low`, or `x` itself when the stretch starts at zero and there is nothing to take off it.
+///
+/// Compared unsigned against `high - low` this is one comparison covering both ends of a stretch: a
+/// value below the bottom wraps round to something enormous and fails the same test a value above
+/// the top fails. It is also what a bit test counts its bits from, which is why it is here rather
+/// than written out twice.
+fn shifted_down(build: &mut Builder<'_>, of: &Lowering, low: i128) -> Value {
+    if low == 0 {
+        return of.value;
+    }
+    let start = build.iconst(of.ty, low);
+    build.binary(Opcode::Sub, of.value, start, Flags::default())
+}
+
+/// A stretch of scattered values, as one range check and then one mask test per destination.
+///
+/// The shape is the one `gcc/tree-switch-conversion.h` states: `if ((1 << (x - low)) & mask)`. The
+/// range check comes first and is not an optimisation. It is what makes the shift defined, since a
+/// shift by the width of the word or more has no answer, and section 24.6 names this as the way a
+/// bit test goes wrong and the range check as the defence.
+///
+/// A value inside the range matching no mask goes to the default rather than on to the next test.
+/// The group is a stretch of clusters that were next to each other in the sorted list, so every case
+/// outside it is outside the range as well, and a value in the range that matched no mask has
+/// already been shown to match nothing at all.
+fn scattered(
+    func: &mut Func,
+    of: &Lowering,
+    at: Block,
+    cluster: &Cluster,
+    next: Block,
+    onward: &[Value],
+) {
+    let Cluster::Bits { low, high, arms } = cluster else {
+        unreachable!("only a bit test is written as one");
+    };
+    let (low, high) = (*low, *high);
+
+    // Every value in the range is named by some mask when the masks together cover it, and then the
+    // last destination needs no test of its own: it is where anything that got past the others goes.
+    // Asking for more than one destination is what keeps at least one test, and a lone destination
+    // covering a whole range is a run rather than a bit test anyway.
+    let all = arms.iter().fold(0u64, |seen, &(mask, _)| seen | mask);
+    let covered = arms.len() > 1 && all == span_mask(low, high);
+    let tests = arms.len() - usize::from(covered);
+    let (spare, onto_spare) = if covered {
+        let call = arms[arms.len() - 1].1;
+        (call.block, func[call.args].to_vec())
+    } else {
+        (of.default.block, func[of.default.args].to_vec())
+    };
+
+    // All of them before a builder exists, because a builder holds the function and a block cannot
+    // be made while it does.
+    let inside = func.create_block();
+    let mut blocks: Vec<Block> = vec![inside];
+    blocks.extend((1..tests).map(|_| func.create_block()));
+    let taken: Vec<Vec<Value>> = arms.iter().map(|&(_, call)| func[call.args].to_vec()).collect();
+
+    let mut build = Builder::new(func, at).at(of.span);
+    let base = shifted_down(&mut build, of, low);
+    let width = build.iconst(of.ty, high - low);
+    let ok = build.icmp(IntPred::Ule, base, width);
+    build.br_if(ok, inside, &[], next, onward);
+
+    // In a word, because that is the width the masks are and what the top of the range needs for a
+    // bit of its own. The range check above is what makes this shift amount a legal one.
+    let word = of.word;
+    let mut build = Builder::new(func, inside).at(of.span);
+    let amount = in_word(&mut build, of, base);
+    let one = build.iconst(word, 1);
+    let bit = build.binary(Opcode::Shl, one, amount, Flags::default());
+
+    for (index, &(mask, call)) in arms[..tests].iter().enumerate() {
+        let want = build.iconst(word, signed_mask(mask, word.bits()));
+        let hit = build.binary(Opcode::And, bit, want, Flags::default());
+        let none = build.iconst(word, 0);
+        let matched = build.icmp(IntPred::Ne, hit, none);
+        let last = index + 1 == tests;
+        let onto = if last { spare } else { blocks[index + 1] };
+        let args = if last { &onto_spare[..] } else { &[][..] };
+        build.br_if(matched, call.block, &taken[index], onto, args);
+        if !last {
+            build = Builder::new(func, blocks[index + 1]).at(of.span);
+        }
+    }
+}
+
+/// `x - low` in the machine's word, once the range check has shown it is below the width of the
+/// stretch. Widened without the sign from a narrower operand, and cut down from a wider one, which
+/// keeps every bit a value that got past the check has.
+fn in_word(build: &mut Builder<'_>, of: &Lowering, base: Value) -> Value {
+    match of.ty.bits().cmp(&of.word.bits()) {
+        std::cmp::Ordering::Equal => base,
+        std::cmp::Ordering::Less => build.unary(Opcode::ZExt, base, of.word),
+        std::cmp::Ordering::Greater => build.unary(Opcode::Trunc, base, of.word),
+    }
+}
+
+/// A mask as the signed constant of a word that many bits wide.
+fn signed_mask(mask: u64, bits: u32) -> i128 {
+    if bits >= u64::BITS {
+        i128::from(mask as i64)
+    } else {
+        let shift = u64::BITS - bits;
+        i128::from(((mask << shift) as i64) >> shift)
+    }
+}
+
+/// The bits of a word that a range from `low` to `high` names, counted from `low`.
+///
+/// The width is one less than a word at most, because that is what [`reach`] gathers, so the shift
+/// below is a legal one and the answer is every bit the range can reach and no bit above it.
+fn span_mask(low: i128, high: i128) -> u64 {
+    let width = u32::try_from(high - low).expect("a group narrower than a word");
+    if width + 1 >= u64::BITS { u64::MAX } else { (1u64 << (width + 1)) - 1 }
+}
+
+/// The blocks a leaf chain of `n` clusters needs beyond the ones the program already had.
+///
+/// Here so that a test can say the number rather than count it, and so that whoever writes the jump
+/// table has one place to compare against. A `switch` that goes to a tree needs more than this,
+/// since the tree's own nodes are blocks too, and a test that cares about one of those counts them.
+#[must_use]
+pub fn blocks_for(clusters: usize) -> usize {
+    clusters.saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_base::hash::Map;
+    use rucc_ir::{
+        Block, BlockCall, Builder, Extra, Func, Hint, Imm, InstData, IntPred, Module, Opcode,
+        Signature, SwitchInfo, Type, Value,
+    };
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
+    use super::{
+        BALANCED, Force, Goal, LINEAR, Lowered, Rules, SWITCH_PEEL_PERCENT, blocks_for, lowered,
+        lowered_by, switches,
+    };
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// Where a `switch` over these cases can end up, as the arms in the order given and the default.
+    struct Built {
+        names: Interner,
+        func: Func,
+        operand: Value,
+        arms: Vec<Block>,
+        default: Block,
+    }
+
+    /// `int sw(int x) { switch (x) { case 1: return 10; ... default: return 0; } }` as the walk
+    /// builds it, which is the program in issue 275.
+    ///
+    /// Every arm is a block of its own even when two cases would naturally share one, because a
+    /// test that wants two cases going to one place says so by passing the same block twice, and
+    /// [`built_sharing`] is how it does that.
+    fn built(cases: &[i128]) -> Built {
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        built_sharing(cases, &arms, Type::int(32))
+    }
+
+    /// The same, with `arms[i]` saying which arm case `i` goes to, so that several cases can share.
+    fn built_sharing(cases: &[i128], arms: &[usize], ty: Type) -> Built {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func =
+            Func::new(names.intern("sw"), Signature::new().with_params(&[ty]).with_returns(&[int]));
+        let entry = func.create_block();
+        let x = func.append_param(entry, ty);
+
+        let default = func.create_block();
+        let count = arms.iter().copied().max().map_or(0, |top| top + 1);
+        let blocks: Vec<Block> = (0..count).map(|_| func.create_block()).collect();
+        let table: Vec<(i128, Block)> =
+            cases.iter().copied().zip(arms.iter().map(|&at| blocks[at])).collect();
+        Builder::new(&mut func, entry).switch(x, default, &table);
+
+        for (index, &arm) in blocks.iter().enumerate() {
+            let mut build = Builder::new(&mut func, arm);
+            let what = i128::try_from(index).expect("a small number of arms");
+            let v = build.iconst(int, (what + 1) * 10);
+            build.ret(&[v]);
+        }
+        let mut build = Builder::new(&mut func, default);
+        let v = build.iconst(int, 0);
+        build.ret(&[v]);
+        Built { names, func, operand: x, arms: blocks, default }
+    }
+
+    fn count(func: &Func) -> usize {
+        func.blocks().count()
+    }
+
+    fn printed(func: &Func, names: &mut Interner) -> String {
+        let module = Module::new(names.intern("sw.c"), &target());
+        rucc_ir::print_func(&module, func, names)
+    }
+
+    fn verified(built: &mut Built) {
+        let module = Module::new(built.names.intern("sw.c"), &target());
+        rucc_ir::verify_func(&module, &built.func, &built.names)
+            .expect("the rewrite builds valid IR");
+    }
+
+    /// Where the operand `x` ends up, worked out by running what the lowering wrote.
+    ///
+    /// This is the test the shape actually needs. Counting compares says the tree is small and says
+    /// nothing about whether it is right, and a decision tree that sends one value down the wrong
+    /// side is a miscompilation that no amount of counting finds. So the blocks the lowering built
+    /// are interpreted for a concrete operand, and the answer is the block it arrives at.
+    ///
+    /// It understands the handful of things this module writes and nothing else, which is how it
+    /// knows it has arrived: an arm ends in a `return`, so the walk stops at the block whose
+    /// instructions it cannot follow.
+    ///
+    /// Every value is held as the number its own type says it is, sign extended, rather than at the
+    /// width of the operand. A bit test computes in a word whatever the operand's width is, so an
+    /// interpreter that assumed one width would get the mask wrong and would agree with itself
+    /// while doing it.
+    fn arrives(func: &Func, operand: Value, x: i128, ty: Type) -> Block {
+        let mut at = func.entry().expect("an entry block");
+        let mut held: Map<Value, i128> = Map::default();
+        held.insert(operand, Imm::int(x, ty).signed(ty));
+        loop {
+            let mut moved = None;
+            for inst in func.insts(at).collect::<Vec<_>>() {
+                let opcode = func[inst].opcode;
+                let extra = func[inst].extra;
+                let result = func[inst].first_result;
+                let args: Vec<i128> = func[func[inst].args]
+                    .iter()
+                    .map(|value| held.get(value).copied().unwrap_or(0))
+                    .collect();
+                let wide = |value: Option<Value>| func[value.expect("a result")].ty;
+                let mut put = |value: Option<Value>, what: i128| {
+                    let value = value.expect("a result");
+                    let ty = func[value].ty;
+                    held.insert(value, Imm::int(what, ty).signed(ty));
+                };
+                match opcode {
+                    Opcode::IConst => {
+                        let Extra::Imm(imm) = extra else { return at };
+                        put(result, func[imm].signed(wide(result)));
+                    }
+                    Opcode::Sub => put(result, args[0] - args[1]),
+                    Opcode::And => put(result, args[0] & args[1]),
+                    Opcode::Shl => put(result, args[0] << args[1]),
+                    Opcode::ZExt => {
+                        let from = func[func[func[inst].args][0]].ty;
+                        let raw = Imm::int(args[0], from).unsigned();
+                        put(result, i128::try_from(raw).expect("a value narrower than a word"));
+                    }
+                    Opcode::ICmp => {
+                        let Extra::IntPred(pred) = extra else { return at };
+                        let of = func[func[func[inst].args][0]].ty;
+                        let unsigned = |v: i128| Imm::int(v, of).unsigned();
+                        let answer = match pred {
+                            IntPred::Eq => args[0] == args[1],
+                            IntPred::Ne => args[0] != args[1],
+                            IntPred::Slt => args[0] < args[1],
+                            IntPred::Ule => unsigned(args[0]) <= unsigned(args[1]),
+                            other => panic!("the lowering does not write {}", other.name()),
+                        };
+                        held.insert(result.expect("a comparison has a result"), i128::from(answer));
+                    }
+                    Opcode::Jump => {
+                        let call = func.successors(inst).next().expect("a jump has a target");
+                        moved = Some(call.block);
+                    }
+                    Opcode::BrIf => {
+                        let mut targets = func.successors(inst);
+                        let taken = targets.next().expect("a branch has two targets");
+                        let other = targets.next().expect("a branch has two targets");
+                        moved = Some(if args[0] != 0 { taken.block } else { other.block });
+                    }
+                    // The one a table is left as, which is read the way the table will be: the
+                    // arm whose case the index is, or the default when no case is.
+                    Opcode::Switch => {
+                        let Extra::Switch(info) = extra else { return at };
+                        let of = func[func[func[inst].args][0]].ty;
+                        let targets: Vec<BlockCall> = func.successors(inst).collect();
+                        let found = func[func[info].cases]
+                            .iter()
+                            .position(|case| case.signed(of) == args[0])
+                            .map_or(targets[0], |arm| targets[arm + 1]);
+                        moved = Some(found.block);
+                    }
+                    _ => return at,
+                }
+            }
+            match moved {
+                Some(next) => at = next,
+                None => return at,
+            }
+        }
+    }
+
+    /// Every probe arrives where the case list says it should, whatever shape the lowering picked.
+    fn routes(built: &mut Built, cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) {
+        switches(&mut built.func, Goal::Speed);
+        lands(built, cases, arms, probes, ty);
+    }
+
+    /// The same check on a function whose `switch` is already lowered, whichever way that was.
+    fn lands(built: &mut Built, cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) {
+        verified(built);
+        for &x in probes {
+            let wanted = cases
+                .iter()
+                .position(|&case| case == x)
+                .map_or(built.default, |at| built.arms[arms[at]]);
+            let got = arrives(&built.func, built.operand, x, ty);
+            assert_eq!(got, wanted, "the operand {x} went to the wrong block");
+        }
+    }
+
+    /// What a `switch` over these cases becomes with this shape forced on it, checked for every
+    /// probe arriving where it should.
+    fn forcing(cases: &[i128], force: Force) -> Lowered {
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(cases);
+        let said = lowered(&mut built.func, Goal::Speed, Some(force), true, u64::BITS);
+        lands(&mut built, cases, &arms, &around(cases, Type::int(32)), Type::int(32));
+        assert_eq!(said.len(), 1);
+        said[0]
+    }
+
+    #[test]
+    fn each_forced_shape_is_the_shape_it_says_and_still_routes_every_value() {
+        let sparse: Vec<i128> = (0..40).map(|at| at * 17).collect();
+        let table = forcing(&sparse, Force::Table);
+        assert_eq!((table.shape(), table.tables, table.clusters), ("table", 1, 1));
+        let tree = forcing(&sparse, Force::Tree);
+        assert_eq!((tree.shape(), tree.clusters), ("tree", 40));
+        let dense: Vec<i128> = (0..40).collect();
+        let walk = forcing(&dense, Force::Walk);
+        assert_eq!((walk.shape(), walk.tables, walk.clusters), ("walk", 0, 40));
+    }
+
+    #[test]
+    fn a_forced_table_too_wide_to_be_worth_it_keeps_the_shape_it_had() {
+        let wide: Vec<i128> = (0..40).map(|at| at * 1000).collect();
+        assert_eq!(forcing(&wide, Force::Table).shape(), "tree");
+    }
+
+    #[test]
+    fn no_table_is_written_when_tables_are_not_allowed_even_a_forced_one() {
+        let dense: Vec<i128> = (0..40).collect();
+        let arms: Vec<usize> = (0..dense.len()).collect();
+        for force in [None, Some(Force::Table)] {
+            let mut built = built(&dense);
+            let said = lowered(&mut built.func, Goal::Speed, force, false, u64::BITS);
+            lands(&mut built, &dense, &arms, &around(&dense, Type::int(32)), Type::int(32));
+            assert_eq!((said[0].tables, said[0].shape()), (0, "tree"), "{force:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_switch_became_is_said_in_one_line() {
+        let dense: Vec<i128> = (0..40).collect();
+        let mut built = built(&dense);
+        let said = lowered(&mut built.func, Goal::Speed, None, true, u64::BITS);
+        assert_eq!(
+            said.iter().map(Lowered::describe).collect::<Vec<_>>(),
+            ["switch of 40 cases lowered as a table; clusters 1, tables 1, bit tests 0"]
+        );
+        let three = forcing(&[1, 5, 9], Force::Walk);
+        assert_eq!(three.shape(), "walk");
+        assert_eq!(Force::named("tree"), Some(Force::Tree));
+        assert_eq!(Force::named("bit-test"), None);
+    }
+
+    /// Every case value, both sides of every one of them, and the ends of the type.
+    fn around(cases: &[i128], ty: Type) -> Vec<i128> {
+        let mut probes: Vec<i128> = Vec::new();
+        for &case in cases {
+            probes.extend([case - 1, case, case + 1]);
+        }
+        let bits = ty.bits();
+        probes.extend([0, -1, 1, i128::from(i32::MIN) >> (32 - bits), (1 << (bits - 1)) - 1]);
+        probes.retain(|&x| Imm::int(x, ty).signed(ty) == x);
+        probes.sort_unstable();
+        probes.dedup();
+        probes
+    }
+
+    #[test]
+    fn a_small_switch_is_a_compare_and_a_branch_for_each_case() {
+        let mut built = built(&[1, 2]);
+        let before = count(&built.func);
+        switches(&mut built.func, Goal::Speed);
+        assert_eq!(count(&built.func), before + blocks_for(2));
+
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "the switch is gone: {text}");
+        assert_eq!(text.matches("icmp eq").count(), 2, "one compare per case: {text}");
+        assert_eq!(text.matches("br_if").count(), 2, "one branch per case: {text}");
+    }
+
+    #[test]
+    fn the_last_case_falls_to_the_default_rather_than_to_a_block_of_its_own() {
+        let mut built = built(&[7]);
+        let before = count(&built.func);
+        switches(&mut built.func, Goal::Speed);
+        // One case needs no chain block at all: the one compare goes to the arm or to the default.
+        assert_eq!(count(&built.func), before);
+        assert_eq!(blocks_for(1), 0);
+    }
+
+    #[test]
+    fn a_switch_with_only_a_default_is_a_jump() {
+        let mut built = built(&[]);
+        switches(&mut built.func, Goal::Speed);
+        let entry = built.func.entry().expect("an entry block");
+        let term = built.func.terminator(entry).expect("a terminator");
+        assert_eq!(built.func[term].opcode, Opcode::Jump);
+    }
+
+    /// The rewrite has to leave a function the verifier still accepts, since every check it makes
+    /// is one the rest of the back end assumes and none of them is rechecked after this runs.
+    #[test]
+    fn what_comes_out_is_valid_ir() {
+        let mut built = built(&[1, 2, 3, 4]);
+        switches(&mut built.func, Goal::Speed);
+        verified(&mut built);
+    }
+
+    /// Nothing else is touched, which matters because this runs over every function whether or not
+    /// one has a `switch` in it.
+    #[test]
+    fn a_function_with_no_switch_is_left_exactly_as_it_was() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[int]).with_returns(&[int]));
+        let entry = func.create_block();
+        let x = func.append_param(entry, int);
+        Builder::new(&mut func, entry).ret(&[x]);
+
+        let before = printed(&func, &mut names);
+        switches(&mut func, Goal::Speed);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    #[test]
+    fn a_run_of_cases_going_to_one_place_is_one_range_test() {
+        let cases = [3, 4, 5, 6, 7, 8, 9, 10];
+        let arms = [0; 8];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp").count(), 1, "eight cases, one test: {text}");
+        assert_eq!(text.matches("icmp ule").count(), 1, "and the test is the range: {text}");
+        assert_eq!(text.matches("sub").count(), 1, "one subtraction to bring it to zero: {text}");
+    }
+
+    #[test]
+    fn a_run_that_starts_at_zero_needs_no_subtraction() {
+        let cases = [0, 1, 2, 3, 4];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ule").count(), 1, "one range test: {text}");
+        assert!(!text.contains("sub"), "nothing to subtract from zero: {text}");
+    }
+
+    /// The clusters are what the tree is built over, so a `switch` of forty cases that fall into
+    /// three runs is a `switch` of three tests and not a search.
+    #[test]
+    fn the_tree_is_built_over_the_clusters_and_not_over_the_cases() {
+        let cases: Vec<i128> = (0..30).collect();
+        let arms: Vec<usize> = (0..30).map(|at: usize| at / 10).collect();
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp").count(), 3, "three runs, three tests: {text}");
+        assert!(!text.contains("icmp slt"), "three clusters is under the leaf size: {text}");
+    }
+
+    /// The number the whole thing is for. Forty scattered cases used to be forty comparisons on the
+    /// way to the last of them, and a binary search is the difference between that and seven.
+    /// Puts these hints on the arms of the built `switch`, the default first.
+    fn hint(built: &mut Built, parts: &[u32]) {
+        let func = &mut built.func;
+        let entry = func.blocks().next().expect("an entry");
+        let term = func.terminator(entry).expect("the switch");
+        for (at, &parts) in func.target_list(term).iter().zip(parts) {
+            let call = func[at];
+            func.set_block_call(at, BlockCall { hint: Hint::parts(parts), ..call });
+        }
+    }
+
+    /// Where the entry's branch goes when its test holds and what each of its two arms says, once
+    /// the `switch` is lowered.
+    fn first(func: &Func) -> (Block, [Option<u32>; 2]) {
+        let entry = func.blocks().next().expect("an entry");
+        let term = func.terminator(entry).expect("a branch");
+        assert_eq!(func[term].opcode, Opcode::BrIf);
+        let calls: Vec<BlockCall> = func.target_list(term).iter().map(|at| func[at]).collect();
+        (calls[0].block, [calls[0].hint.taken(), calls[1].hint.taken()])
+    }
+
+    /// Hints for a `switch` of `cases` cases, with `hot` the index of the case that gets `parts`
+    /// and every other arm, the default included, sharing the rest.
+    fn leaning(cases: usize, hot: usize, parts: u32) -> Vec<u32> {
+        let rest = (10_000 - parts) / u32::try_from(cases).expect("a small switch");
+        (0..=cases).map(|at| if at == hot + 1 { parts } else { rest }).collect()
+    }
+
+    #[test]
+    fn a_case_hinted_hot_is_tested_first_with_the_hint_on_its_branch() {
+        // Sparse and long, so without the hint the entry would test the middle of the tree.
+        let cases: Vec<i128> = (0..40).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        hint(&mut built, &leaning(cases.len(), 7, 9_000));
+        let hot = built.arms[7];
+        routes(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
+        assert_eq!(first(&built.func), (hot, [Some(9_000), Some(1_000)]));
+    }
+
+    #[test]
+    fn a_hot_case_in_a_dense_stretch_is_taken_out_of_the_table() {
+        let cases: Vec<i128> = (0..20).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        hint(&mut built, &leaning(cases.len(), 5, 9_000));
+        let hot = built.arms[5];
+        routes(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
+        assert_eq!(first(&built.func).0, hot);
+    }
+
+    #[test]
+    fn a_hint_under_the_threshold_or_on_the_default_leaves_the_tree_as_it_was() {
+        let cases: Vec<i128> = (0..40).map(|at| at * SPARSE).collect();
+        let mut plain = built(&cases);
+        switches(&mut plain.func, Goal::Speed);
+        let want = printed(&plain.func, &mut plain.names);
+        let bar = SWITCH_PEEL_PERCENT * 100;
+        let mut on_the_default = leaning(cases.len(), 0, 1_000);
+        on_the_default[0] = 9_000;
+        for parts in [leaning(cases.len(), 7, bar - 1), on_the_default] {
+            let mut built = built(&cases);
+            hint(&mut built, &parts);
+            switches(&mut built.func, Goal::Speed);
+            assert_eq!(printed(&built.func, &mut built.names), want);
+        }
+    }
+
+    #[test]
+    fn a_long_sparse_switch_is_a_search_rather_than_a_walk() {
+        // Four leaves' worth, so the tree is two splits deep and the bound below is a bound on
+        // something rather than a restatement of the leaf size. Seventeen apart, which is too
+        // sparse for a table, so the tree is what gets built.
+        let count = 4 * LINEAR as i128;
+        let cases: Vec<i128> = (0..count).map(|at| at * SPARSE).collect();
+        let mut built = built(&cases);
+        switches(&mut built.func, Goal::Speed);
+
+        let worst = deepest(&built.func);
+        assert!(worst <= LINEAR + 2, "{count} cases in {worst} comparisons at worst");
+        assert!(worst > LINEAR, "and the splits are being counted too");
+    }
+
+    /// Under `-fno-jump-tables` the search goes on down to a few cases, as gcc's does, so the
+    /// kernel's system call `switch` reaches any case in about as many tests as there are splits.
+    #[test]
+    fn without_tables_the_search_goes_down_to_a_few_cases() {
+        let count = 4 * LINEAR as i128;
+        let cases: Vec<i128> = (0..count).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        let _ = lowered(&mut built.func, Goal::Speed, None, false, u64::BITS);
+
+        let worst = deepest(&built.func);
+        let (mut splits, mut left) = (0, cases.len());
+        while left > BALANCED {
+            left = left.div_ceil(2);
+            splits += 1;
+        }
+        assert!(worst <= splits + BALANCED, "{count} cases in {worst} comparisons at worst");
+        lands(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
+    }
+
+    /// How far apart the cases of a test about the tree are, which is further than a table would
+    /// cover: seventeen values for each comparison against the eight a table is allowed.
+    const SPARSE: i128 = 17;
+
+    /// The most comparisons on any path from the entry to an arm.
+    ///
+    /// A depth first walk over the blocks the lowering wrote, which is a directed acyclic graph
+    /// because every branch it writes goes forward, so no path is walked twice and nothing loops.
+    fn deepest(func: &Func) -> usize {
+        fn walk(func: &Func, at: Block, seen: &mut Map<Block, usize>) -> usize {
+            if let Some(&known) = seen.get(&at) {
+                return known;
+            }
+            let here = func.insts(at).filter(|&inst| func[inst].opcode == Opcode::ICmp).count();
+            let term = func.terminator(at).expect("a terminator");
+            let onward: Vec<Block> = match func[term].opcode {
+                Opcode::Jump | Opcode::BrIf => {
+                    func.successors(term).map(|call| call.block).collect()
+                }
+                _ => Vec::new(),
+            };
+            let below =
+                onward.into_iter().map(|block| walk(func, block, seen)).max().unwrap_or_default();
+            seen.insert(at, here + below);
+            here + below
+        }
+        walk(func, func.entry().expect("an entry block"), &mut Map::default())
+    }
+
+    #[test]
+    fn every_value_reaches_the_arm_its_case_named_in_a_small_switch() {
+        let cases = [1, 2, 3];
+        let arms = [0, 1, 2];
+        let ty = Type::int(32);
+        let mut built = built(&cases);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    #[test]
+    fn every_value_reaches_the_arm_its_case_named_in_a_search() {
+        let count = 3 * LINEAR;
+        let cases: Vec<i128> = (0..count as i128).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..count).collect();
+        let ty = Type::int(32);
+        let mut built = built(&cases);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// The one the signed sort and the signed split have to agree about. A `switch` whose cases sit
+    /// on both sides of zero is where sorting one way and comparing the other goes wrong.
+    #[test]
+    fn every_value_reaches_its_arm_when_the_cases_straddle_zero() {
+        let half = LINEAR as i128;
+        let cases: Vec<i128> = (-half..half).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..2 * LINEAR).collect();
+        let ty = Type::int(32);
+        let mut built = built(&cases);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// Runs and single values in the same statement, which is the partition the module is named
+    /// after and the thing a design that picked one shape could not say.
+    #[test]
+    fn every_value_reaches_its_arm_when_runs_and_singles_are_mixed() {
+        let cases: Vec<i128> =
+            vec![-9, -8, -7, -6, 0, 5, 6, 7, 8, 9, 10, 40, 41, 90, 91, 92, 93, 94, 95, 200];
+        let arms: Vec<usize> = vec![0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 3, 4, 5, 5, 5, 5, 5, 5, 6];
+        let ty = Type::int(32);
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// A run that covers a whole type, where the width of it is every bit set and the comparison
+    /// against it is a test that is true of everything. Section 24.6 calls this out because the
+    /// same arithmetic in the switch's own type overflows here rather than wrapping usefully.
+    #[test]
+    fn a_run_covering_the_whole_type_matches_everything() {
+        let cases: Vec<i128> = (-128..128).collect();
+        let arms = vec![0; cases.len()];
+        let ty = Type::int(8);
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+        verified(&mut built);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp").count(), 1, "one run, one test: {text}");
+
+        let entry = built.func.entry().expect("an entry block");
+        let operand = built.func[entry].params[0];
+        for x in [-128, -1, 0, 1, 127] {
+            assert_eq!(
+                arrives(&built.func, operand, x, ty),
+                built.arms[0],
+                "every value of the type is in the run"
+            );
+        }
+    }
+
+    /// C forbids one and the front end rejects one, and everything the clusters promise each other
+    /// rests on that, so a duplicate that got this far stops the compiler rather than being guessed
+    /// at. Section 24.6 asks for the assumption to be recorded, and this is the record.
+    #[test]
+    #[should_panic(expected = "two cases of the same value")]
+    fn a_case_value_written_twice_stops_the_compiler() {
+        let cases = [4, 9, 4];
+        let arms = [0, 1, 2];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+    }
+
+    /// Two consecutive cases whose arms are the same block but which pass it different arguments
+    /// are two destinations, so they are two clusters and not one run. Nothing the front end writes
+    /// produces this today, which is why the `switch` has to be built by hand, and the check is
+    /// there because a run that merged them would hand the block one of the two values whichever
+    /// case arrived.
+    #[test]
+    fn cases_that_share_a_block_but_not_its_arguments_are_not_a_run() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func = Func::new(
+            names.intern("sw"),
+            Signature::new().with_params(&[int]).with_returns(&[int]),
+        );
+        let entry = func.create_block();
+        let x = func.append_param(entry, int);
+        let default = func.create_block();
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, entry);
+        let ten = build.iconst(int, 10);
+        let twenty = build.iconst(int, 20);
+        let none = func.push_values(&[]);
+        let first = func.push_values(&[ten]);
+        let second = func.push_values(&[twenty]);
+        let targets = func.push_block_calls(&[
+            BlockCall::new(default, none),
+            BlockCall::new(join, first),
+            BlockCall::new(join, second),
+        ]);
+        let cases = func.push_imms(&[Imm::int(1, int), Imm::int(2, int)]);
+        let info = func.add_switch(SwitchInfo { targets, cases });
+        let args = func.push_values(&[x]);
+        let data = InstData { args, extra: Extra::Switch(info), ..InstData::new(Opcode::Switch) };
+        Builder::new(&mut func, entry).inst(data, &[]);
+
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        let mut build = Builder::new(&mut func, default);
+        let zero = build.iconst(int, 0);
+        build.ret(&[zero]);
+
+        switches(&mut func, Goal::Speed);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches("icmp eq").count(), 2, "two cases, two equality tests: {text}");
+        assert!(!text.contains("icmp ule"), "and no range test over them: {text}");
+    }
+
+    /// The leaf size is a number and not an accident, so it is worth one test that says what it is
+    /// for: at the size itself nothing is built, and one past it the search starts.
+    #[test]
+    fn the_leaf_size_is_where_the_search_starts() {
+        let flat: Vec<i128> = (0..LINEAR as i128).map(|at| at * SPARSE).collect();
+        let mut walked = built(&flat);
+        switches(&mut walked.func, Goal::Speed);
+        assert!(
+            !printed(&walked.func, &mut walked.names).contains("icmp slt"),
+            "a leaf's worth of clusters is still a chain"
+        );
+
+        let one_more: Vec<i128> = (0..LINEAR as i128 + 1).map(|at| at * SPARSE).collect();
+        let mut split = built(&one_more);
+        switches(&mut split.func, Goal::Speed);
+        assert!(
+            printed(&split.func, &mut split.names).contains("icmp slt"),
+            "one more than a leaf splits"
+        );
+    }
+
+    /// The shape the bit test exists for. `case 'a': case 'e': case 'i': case 'o': case 'u':` is
+    /// five values scattered through twenty one, all going to one place, and every one of them used
+    /// to be a comparison of its own.
+    #[test]
+    fn scattered_cases_sharing_one_arm_are_one_mask_and_one_test() {
+        let cases = [97, 101, 105, 111, 117];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("icmp eq"), "no case is compared on its own: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "one bit is picked out: {text}");
+        assert_eq!(text.matches("and").count(), 1, "and one mask is asked about it: {text}");
+        assert_eq!(text.matches("icmp ule").count(), 1, "one bound before the shift: {text}");
+        assert_eq!(text.matches("icmp ne").count(), 1, "one test for the one arm: {text}");
+    }
+
+    /// What the counting above does not say. A mask with a bit in the wrong place still has one
+    /// shift and one test in it, so the test that matters is where each value ends up.
+    #[test]
+    fn every_value_reaches_its_arm_through_a_bit_test() {
+        let ty = Type::int(32);
+        let cases = [97, 101, 105, 111, 117];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// One group can hold several destinations, each as the bits of a mask of its own, and they are
+    /// asked about in turn. The shift is what is shared, and the shift is the expensive part.
+    #[test]
+    fn a_bit_test_carries_several_destinations_in_one_word() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..9).map(|at| at * 3).collect();
+        let arms: Vec<usize> = (0..9).map(|at: usize| at % 3).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("shl").count(), 1, "nine cases, one shift: {text}");
+        assert_eq!(text.matches("icmp ne").count(), 3, "three arms, three masks: {text}");
+        assert!(!text.contains("icmp eq"), "and no case compared on its own: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// When the masks between them account for every value in the span, the last destination is
+    /// where anything in range that matched nothing else has to go, so it needs no test of its own.
+    #[test]
+    fn the_last_destination_needs_no_test_when_the_masks_cover_the_span() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..6).collect();
+        let arms: Vec<usize> = (0..6).map(|at: usize| at % 2).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ne").count(), 1, "two arms, one mask asked about: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// A bit test costs a bound, a shift and a test before the first mask is looked at, so a group
+    /// that has barely more values in it than destinations is worse than the walk it replaces.
+    #[test]
+    fn a_group_that_does_not_pay_for_itself_stays_a_chain() {
+        let cases = [0, 3, 6];
+        let arms = [0, 1, 2];
+        let mut built = built_sharing(&cases, &arms, Type::int(32));
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("shl"), "three values and three arms buys nothing: {text}");
+        assert_eq!(text.matches("icmp eq").count(), 3, "so it stays a walk: {text}");
+    }
+
+    /// The word is a correctness bound and not a tuning one. A mask holds sixty four bits, so a
+    /// group stops at the last value within sixty four of its first, and what is left of the
+    /// `switch` carries on without it.
+    #[test]
+    fn a_bit_test_never_spans_more_than_a_word() {
+        let ty = Type::int(32);
+        let cases = [0, 2, 4, 6, 64];
+        let arms = [0; 5];
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("shl").count(), 1, "one group, not two: {text}");
+        assert_eq!(text.matches("icmp eq").count(), 1, "and the value past it is compared: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// The value sixty three above the first sets the top bit of the mask, which is the shift the
+    /// span bound is there to keep legal and the one an interpreter that computed in the operand's
+    /// width would get wrong.
+    #[test]
+    fn a_bit_test_reaches_the_top_of_its_word() {
+        let ty = Type::int(32);
+        let cases = [0, 2, 4, 63];
+        let arms = [0; 4];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// A run is already one subtraction and one comparison however many values it holds, so folding
+    /// it into a mask would replace two instructions with two instructions and spend a word of span
+    /// doing it. Only single values are grouped.
+    #[test]
+    fn a_run_is_left_alone_rather_than_folded_into_a_mask() {
+        let ty = Type::int(32);
+        let cases = [0, 1, 2, 3, 10, 12, 14, 16];
+        let arms = [0, 0, 0, 0, 1, 1, 1, 1];
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ule").count(), 2, "a run's bound and a group's: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "and only the group is a mask: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// Negative cases are the ones a shift gets wrong if the span is measured with the wrong sign,
+    /// so a group that starts below zero is worth its own routing check.
+    #[test]
+    fn every_value_reaches_its_arm_when_a_bit_test_starts_below_zero() {
+        let ty = Type::int(32);
+        let cases = [-20, -17, -14, -11, -8, -5];
+        let arms = [0, 1, 0, 1, 0, 1];
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+    }
+
+    /// Cases packed closely enough, with enough places to go, are one bound and one lookup, which
+    /// is what gcc writes for the same switch. Nothing is compared case by case.
+    #[test]
+    fn a_dense_switch_is_one_bound_and_a_table() {
+        let cases: Vec<i128> = (0..13).collect();
+        let mut built = built(&cases);
+        switches(&mut built.func, Goal::Speed);
+        verified(&mut built);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("icmp ule").count(), 1, "one bound over the span: {text}");
+        assert_eq!(text.matches("switch").count(), 1, "and one table inside it: {text}");
+        assert!(!text.contains("icmp eq"), "and no case compared on its own: {text}");
+    }
+
+    /// A table with a case for every value in its range has a default only the range check reaches.
+    /// When the default carries an argument, a block made for that argument inside the table would
+    /// be a block nothing jumps to, and `mas_find` in the kernel's maple tree came out with one that
+    /// objtool called an unreachable instruction. So only the range check's edge carries it.
+    #[test]
+    fn a_full_table_makes_no_block_for_a_default_it_cannot_reach() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..13).collect();
+        let mut built = built(&cases);
+        let int = Type::int(32);
+        built.func.append_param(built.default, int);
+        let entry = built.func.entry().expect("an entry block");
+        let term = built.func.terminator(entry).expect("the switch");
+        let at = built.func.target_list(term).iter().next().expect("the default edge");
+        let args = built.func.push_values(&[built.operand]);
+        let call = BlockCall { args, ..built.func[at] };
+        built.func.set_block_call(at, call);
+        let before = count(&built.func);
+        switches(&mut built.func, Goal::Speed);
+        verified(&mut built);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+        // The range check and the block it guards, and nothing for the default's argument.
+        assert_eq!(count(&built.func), before + 1, "{text}");
+        let probes: Vec<i128> = (-3..17).collect();
+        for &x in &probes {
+            let want = match usize::try_from(x) {
+                Ok(at) if at < 13 => built.arms[at],
+                _ => built.default,
+            };
+            assert_eq!(arrives(&built.func, built.operand, x, ty), want, "{x}: {text}");
+        }
+    }
+
+    /// A table with holes in it sends the holes to the default, and the index is the case less the
+    /// low end, so a table that starts away from zero is the one that shows an off-by-one.
+    #[test]
+    fn every_value_reaches_its_arm_through_a_table_with_holes() {
+        let ty = Type::int(32);
+        let cases = [3, 4, 5, 7, 8, 10, 11, 13, 14, 15, 19];
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        routes(&mut built, &cases, &arms, &around(&cases, ty), ty);
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+    }
+
+    /// A `signed char` switch that runs from below zero to above it. The index has to be taken
+    /// after the subtraction and widened without its sign, or the negative cases read the wrong
+    /// cell.
+    #[test]
+    fn every_value_reaches_its_arm_through_a_table_that_straddles_zero() {
+        let ty = Type::int(8);
+        let cases: Vec<i128> = (-7..8).filter(|x| x % 4 != 0).collect();
+        let arms: Vec<usize> = (0..cases.len()).map(|at| at % 5).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        let probes: Vec<i128> = (-128..128).collect();
+        routes(&mut built, &cases, &arms, &probes, ty);
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+    }
+
+    /// What a `switch` over these cases becomes under the native rules with [`Rules::checked`] set
+    /// and a word of 32 bits, which is what the wasm back end asks for, checked for every probe.
+    fn checked(cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) -> String {
+        let mut built = built_sharing(cases, arms, ty);
+        let rules = Rules { checked: true, ..Rules::native(Goal::Speed) };
+        let said = lowered_by(&mut built.func, rules, None, true, 32);
+        assert_eq!(said[0].tables, 1, "the cases are one table");
+        lands(&mut built, cases, arms, probes, ty);
+        printed(&built.func, &mut built.names)
+    }
+
+    /// A table that is the last test before the default gets no range check when the `switch` it
+    /// is left as sends a value outside its cells to the default itself, as `br_table` does.
+    #[test]
+    fn a_checked_table_before_the_default_has_no_range_check() {
+        let ty = Type::int(32);
+        let cases = [3, 4, 5, 7, 8, 10, 11, 13, 14, 15, 19];
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+        assert_eq!(text.matches("switch").count(), 1, "and one table: {text}");
+    }
+
+    /// With no range check, a table with a case for every value in its range can still get a value
+    /// outside the range, so its default is the default of the `switch` and not one of its cases.
+    #[test]
+    fn a_checked_full_table_still_sends_a_value_outside_it_to_the_default() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..13).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+    }
+
+    /// The index of a narrow operand is widened without its sign after the subtraction, so a value
+    /// below the range is a large index and goes to the default with no range check.
+    #[test]
+    fn a_checked_table_on_a_narrow_operand_that_straddles_zero_routes_every_value() {
+        let ty = Type::int(8);
+        let cases: Vec<i128> = (-7..8).filter(|x| x % 4 != 0).collect();
+        let arms: Vec<usize> = (0..cases.len()).map(|at| at % 5).collect();
+        let probes: Vec<i128> = (-128..128).collect();
+        let text = checked(&cases, &arms, &probes, ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+    }
+
+    /// A table that a value can fail on to another test keeps its range check, since the test
+    /// after it is not the default.
+    #[test]
+    fn a_checked_table_with_a_test_after_it_keeps_its_range_check() {
+        let ty = Type::int(32);
+        let mut cases: Vec<i128> = (0..13).collect();
+        cases.push(1000);
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert_eq!(text.matches("icmp ule").count(), 1, "the range check stays: {text}");
+    }
+
+    /// Three places to go are three masks, and gcc keeps that shape too, so a bit test is not
+    /// traded for a table until there are more destinations than it handles well.
+    #[test]
+    fn a_few_destinations_stay_a_bit_test_and_more_become_a_table() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..12).map(|at| at * 3).collect();
+        let few: Vec<usize> = (0..12).map(|at: usize| at % 3).collect();
+        let mut built = built_sharing(&cases, &few, ty);
+        switches(&mut built.func, Goal::Speed);
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "three arms are masks: {text}");
+
+        let many: Vec<usize> = (0..12).map(|at: usize| at % 5).collect();
+        let mut built = built_sharing(&cases, &many, ty);
+        switches(&mut built.func, Goal::Speed);
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "five arms are a table: {text}");
+        let mut built = built_sharing(&cases, &many, ty);
+        routes(&mut built, &cases, &many, &around(&cases, ty), ty);
+    }
+
+    /// Below the smallest table the cases are compared, since a load and an indirect jump cost
+    /// more than a few compares that predict well.
+    #[test]
+    fn too_few_cases_for_a_table_are_compared() {
+        let cases: Vec<i128> = (0..10).collect();
+        let mut built = built(&cases);
+        switches(&mut built.func, Goal::Speed);
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "ten cases are not a table: {text}");
+    }
+
+    /// For size the smallest table is where a table is fewer bytes than the compares, which is
+    /// six cases, and not where it is faster than them.
+    #[test]
+    fn for_size_a_table_starts_at_six_cases() {
+        let tabled = |count: i128, goal: Goal| {
+            let cases: Vec<i128> = (0..count).collect();
+            let mut built = built(&cases);
+            switches(&mut built.func, goal);
+            printed(&built.func, &mut built.names).contains("switch")
+        };
+        assert!(!tabled(5, Goal::Size), "five cases are compared");
+        assert!(tabled(6, Goal::Size), "six are a table");
+        assert!(!tabled(6, Goal::Speed), "which for speed they are not");
+    }
+
+    /// A stretch dense enough for a table at speed can be too sparse for one at size, since each
+    /// cell has to replace more bytes of compares there.
+    #[test]
+    fn a_table_for_speed_can_be_too_sparse_for_size() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..12).map(|at| at * 8).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "at speed a span of 89 is a table: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Size);
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "at size it is searched: {text}");
+    }
+
+    /// An operand wider than a word has no index the machine can load with, so a dense switch over
+    /// one is searched the way it was before tables.
+    #[test]
+    fn an_operand_wider_than_a_word_gets_no_table() {
+        let ty = Type::int(128);
+        let cases: Vec<i128> = (0..13).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        let probes: Vec<i128> = (-2..16).collect();
+        routes(&mut built, &cases, &arms, &probes, ty);
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "a wide operand is searched: {text}");
+    }
+
+    /// Arms that hand the block they go to a value of their own cannot share a cell with an arm
+    /// that hands it another. Each one is reached through a block of its own that makes the call,
+    /// and the table points at those.
+    #[test]
+    fn arms_that_carry_values_are_reached_through_blocks_of_their_own() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func = Func::new(
+            names.intern("sw"),
+            Signature::new().with_params(&[int]).with_returns(&[int]),
+        );
+        let entry = func.create_block();
+        let x = func.append_param(entry, int);
+        let default = func.create_block();
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, entry);
+        let values: Vec<Value> = (0..12).map(|at| build.iconst(int, 100 + at)).collect();
+        let none = func.push_values(&[]);
+        let mut calls = vec![BlockCall::new(default, none)];
+        for &value in &values {
+            let args = func.push_values(&[value]);
+            calls.push(BlockCall::new(join, args));
+        }
+        let targets = func.push_block_calls(&calls);
+        let imms: Vec<Imm> = (0..12).map(|at| Imm::int(at, int)).collect();
+        let cases = func.push_imms(&imms);
+        let info = func.add_switch(SwitchInfo { targets, cases });
+        let args = func.push_values(&[x]);
+        let data = InstData { args, extra: Extra::Switch(info), ..InstData::new(Opcode::Switch) };
+        Builder::new(&mut func, entry).inst(data, &[]);
+
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        let mut build = Builder::new(&mut func, default);
+        let zero = build.iconst(int, 0);
+        build.ret(&[zero]);
+
+        switches(&mut func, Goal::Speed);
+        let module = Module::new(names.intern("sw.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+        let table = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Switch)
+            .expect("a table");
+        for call in func.successors(table).skip(1) {
+            assert!(func[call.args].is_empty(), "a cell passes nothing itself: {text}");
+            assert_ne!(call.block, join, "a cell goes to a block of its own: {text}");
+        }
+        for at in 0..12 {
+            assert_eq!(arrives(&func, x, at, int), join, "case {at} reaches the join");
+        }
+        assert_eq!(arrives(&func, x, 12, int), default, "and a value past the end does not");
+    }
+}

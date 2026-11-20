@@ -1,0 +1,1435 @@
+//! Macro expansion.
+//!
+//! Design: `spec/05-preprocessor.md` section 5.3.
+//!
+//! This is Prosser's algorithm with hide sets, not the expansion-depth approximation. The
+//! two agree on everything anybody writes on purpose and disagree on mutually recursive
+//! macros, which appear in real headers more often than they should and where being wrong is
+//! invisible until it is catastrophic.
+//!
+//! The shape of it: `expand` walks a stream of tokens with pushback, and when it finds a
+//! macro invocation it replaces it with `subst` of the replacement list and pushes that back
+//! onto the front of the stream to be rescanned. Rescanning from the front rather than
+//! recursing is what lets a replacement consume tokens that follow the invocation, which is
+//! required and which is the reason a `Vec` used as a stack shows up here instead of an
+//! iterator chain.
+
+use std::borrow::Cow;
+
+use rucc_base::{Interner, Symbol, sym};
+use rucc_diag::{BytePos, Diagnostic, SourceMap, Span};
+use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
+use rucc_session::PrefixMap;
+
+use crate::hide::{HideSet, HideSets};
+use crate::include::{UNKNOWN, base_name, quoted};
+use crate::macros::{Builtin, MacroDef, MacroTable};
+use crate::token::Tok;
+use crate::trace::{TraceId, Traces};
+
+/// A backstop against a replacement list that grows without bound, counted in tokens looked at
+/// for one macro invocation the user wrote.
+///
+/// Hide sets guarantee that expansion terminates, but they say nothing about how large the
+/// result gets, and a short chain of macros that each mention the next one twice produces a
+/// megabyte from four lines. Input designed to hang the compiler comes near this, and
+/// `spec/19-risks.md` asks for a bound rather than a hang. Real code comes within a factor of
+/// three: the kernel's `pack_fields` checks every field of a table against the one before it for
+/// each table size up to fifty, which is over a million tokens out and six million looked at. A
+/// file can call it several times between two directives, which is why the count starts again
+/// at each invocation rather than at each stretch of the file. Smaller under test, so that a
+/// test can reach it quickly.
+const MAX_STEPS: usize = if cfg!(test) { 1 << 12 } else { 1 << 24 };
+
+/// Macro expansion state that outlives a single expansion.
+///
+/// Hide sets are interned for the whole translation unit, because the same set is produced
+/// over and over by the same nest of headers and re-interning it is free while re-allocating
+/// it is not.
+#[derive(Debug, Default)]
+pub struct Expander {
+    hides: HideSets,
+    /// Every macro traversed by every expansion in this translation unit, interned. Kept next
+    /// to the hide sets and for the same reason: one table per translation unit, so an index
+    /// stays meaningful for as long as any token carrying it does.
+    traces: Traces,
+    diagnostics: Vec<Diagnostic>,
+    /// What `__COUNTER__` says next. Per translation unit, because that is the scope the
+    /// macro promises to be unique over and the scope a header that builds a name out of it
+    /// relies on.
+    counter: u32,
+    /// What `__FILE__` and `__BASE_FILE__` are rewritten by, which is `-fmacro-prefix-map=`.
+    ///
+    /// Here rather than on the source map because it is not a fact about where anything is: a
+    /// diagnostic still names the real file, a line marker still writes the real name, and this
+    /// changes only what the program is told when it asks. That is gcc's division and it is the
+    /// useful one, since the person reading an error is at the machine the file is on and the
+    /// string in the binary is going somewhere else.
+    prefix_map: PrefixMap,
+    /// Whether the text being expanded is assembly, the way a `.S` is. A paste that does not
+    /// make one token is an error in C and not in assembly, where gcc leaves the two halves
+    /// next to each other and `L__sym_size_\name` in a `.macro` body relies on that.
+    assembly: bool,
+    /// Whether the text is in the kencc dialect, where a parameter is replaced in a string
+    /// literal or a character constant of the body too.
+    kencc: bool,
+    /// Lists an expansion has finished with, kept for the next one to fill.
+    spare: Spare,
+}
+
+impl Expander {
+    /// A fresh expander, whose `__FILE__` is the name the file was found under.
+    pub fn new() -> Expander {
+        Expander {
+            hides: HideSets::new(),
+            traces: Traces::new(),
+            diagnostics: Vec::new(),
+            counter: 0,
+            prefix_map: PrefixMap::new(),
+            assembly: false,
+            kencc: false,
+            spare: Spare::default(),
+        }
+    }
+
+    /// The same, with `__FILE__` rewritten by `map`.
+    pub fn with_prefix_map(map: PrefixMap) -> Expander {
+        Expander { prefix_map: map, ..Expander::new() }
+    }
+
+    /// Says whether what comes next is assembly rather than C.
+    pub fn set_assembly(&mut self, assembly: bool) {
+        self.assembly = assembly;
+    }
+
+    /// Says whether what comes next is in the kencc dialect.
+    pub fn set_kencc(&mut self, kencc: bool) {
+        self.kencc = kencc;
+    }
+
+    /// Whether what is being expanded is assembly.
+    pub fn assembly(&self) -> bool {
+        self.assembly
+    }
+
+    /// Everything reported so far.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Takes the diagnostics, leaving the expander empty.
+    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// How many distinct hide sets have been interned, which is the number to watch when
+    /// this starts costing memory.
+    pub fn hide_sets(&self) -> usize {
+        self.hides.len()
+    }
+
+    /// Expands a run of lexed tokens.
+    ///
+    /// The input is a directive-free stretch of the file. An `Eof` token is ignored rather
+    /// than passed through, because the caller decides where the stream ends.
+    pub fn expand(
+        &mut self,
+        tokens: &[PpToken],
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+    ) -> Vec<Tok> {
+        let input: Vec<Tok> =
+            tokens.iter().filter(|t| t.kind != PpTokenKind::Eof).map(|&t| Tok::new(t)).collect();
+        self.expand_toks(input, macros, interner, sources)
+    }
+
+    /// Expands tokens that already carry hide sets, for a caller that is splicing streams
+    /// together itself.
+    ///
+    /// The source map is needed rather than merely useful: `__FILE__` and `__LINE__` are
+    /// answered from where the token turned out to be, and the map is the only thing that
+    /// knows that once a token has come out of three nested macros in two headers.
+    pub fn expand_toks(
+        &mut self,
+        tokens: Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+    ) -> Vec<Tok> {
+        self.run(tokens, macros, interner, sources, None)
+    }
+
+    /// [`Expander::expand_toks`], appending the result to `out` and leaving `tokens` empty with
+    /// its room intact for the caller to fill again.
+    ///
+    /// The run of text between two directives is expanded this way, straight onto the end of
+    /// the translation unit. Returning a list of its own for that caller to copy over was one
+    /// more pass over every token in the file, and each new list was fresh memory to fault in.
+    pub fn expand_toks_into(
+        &mut self,
+        tokens: &mut Vec<Tok>,
+        out: &mut Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+    ) {
+        self.run_into(tokens, out, macros, interner, sources, None);
+    }
+
+    /// Expands the tokens of a `#if` or `#elif` line.
+    ///
+    /// The one difference from [`Expander::expand_toks`] is `defined`, which on such a line is an
+    /// operator that happens to be spelled like an identifier, and whose operand is not expanded.
+    /// A line that says `defined(X)` where the caller has already dealt with it never reaches
+    /// here, so what this is for is the `defined` a macro body wrote.
+    pub fn expand_condition(
+        &mut self,
+        tokens: Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Condition,
+    ) -> Vec<Tok> {
+        self.run(tokens, macros, interner, sources, Some(condition))
+    }
+
+    fn run(
+        &mut self,
+        mut tokens: Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Option<Condition>,
+    ) -> Vec<Tok> {
+        let mut out = Vec::with_capacity(tokens.len());
+        self.run_into(&mut tokens, &mut out, macros, interner, sources, condition);
+        out
+    }
+
+    fn run_into(
+        &mut self,
+        tokens: &mut Vec<Tok>,
+        out: &mut Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Option<Condition>,
+    ) {
+        let mut run = Run {
+            hides: &mut self.hides,
+            traces: &mut self.traces,
+            current: TraceId::NONE,
+            diagnostics: &mut self.diagnostics,
+            macros,
+            va_opt: sym::VA_OPT,
+            interner,
+            sources,
+            counter: &mut self.counter,
+            prefix_map: &self.prefix_map,
+            assembly: self.assembly,
+            kencc: self.kencc,
+            condition,
+            steps: 0,
+            spare: &mut self.spare,
+        };
+        run.expand_into(tokens, out);
+    }
+}
+
+/// What a `#if` line asks of an expansion that an ordinary stretch of a file does not.
+///
+/// Only `defined` is in here, and it carries its own name because the expander has nothing else
+/// to recognise an operator by: by the time a line reaches expansion it is a run of tokens like
+/// any other, and `defined` is an identifier in every one of them.
+#[derive(Debug, Clone, Copy)]
+pub struct Condition {
+    /// What `defined` is called, interned.
+    pub defined: Symbol,
+    /// Whether to report each `defined` an expansion produced, which is `-Wpedantic`.
+    pub report: bool,
+}
+
+/// One expansion, holding the pieces borrowed for its duration.
+struct Run<'a> {
+    hides: &'a mut HideSets,
+    traces: &'a mut Traces,
+    /// The expansion being substituted right now, or [`TraceId::NONE`] at the top level.
+    ///
+    /// A token records its own chain once substitution has finished with it, which is too
+    /// late for a diagnostic raised in the middle of that substitution: at the moment `a ## b`
+    /// fails, the macro whose body wrote the `##` has not been recorded yet. So the chain is
+    /// also kept here, where it is correct while the body is being walked. Saved and restored
+    /// around the call, because pre-expanding an argument re-enters expansion.
+    current: TraceId,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    interner: &'a mut Interner,
+    macros: &'a MacroTable,
+    /// Whether a paste that does not make one token is let through, which it is in assembly.
+    assembly: bool,
+    /// Whether a parameter is replaced in a literal of the body, which it is in kencc.
+    kencc: bool,
+    /// Where a token is, which is what the builtin macros are answered from.
+    sources: &'a SourceMap,
+    /// `__VA_OPT__`, interned once rather than looked up per body token.
+    va_opt: Symbol,
+    /// The translation unit's `__COUNTER__`, borrowed so that it survives this expansion.
+    counter: &'a mut u32,
+    /// What `__FILE__` is rewritten by. See [`Expander::prefix_map`].
+    prefix_map: &'a PrefixMap,
+    /// What the line being expanded is, when it is a `#if` line and not an ordinary one.
+    condition: Option<Condition>,
+    steps: usize,
+    spare: &'a mut Spare,
+}
+
+/// The lists one invocation of a function-like macro needs, kept from the last one to finish.
+///
+/// Each invocation read its arguments into lists of its own, copied the replacement list into
+/// another and substituted into a third, and grew most of them from nothing as it went, which
+/// on a duktape source file was tens of thousands of trips through the allocator. A list given
+/// back here already has the room the next one wants. tamnd/rucc#3052.
+#[derive(Debug, Default)]
+struct Spare {
+    lists: Vec<Vec<Tok>>,
+    args: Vec<Args>,
+}
+
+impl Spare {
+    /// An empty list, with whatever room it was given back with.
+    fn list(&mut self) -> Vec<Tok> {
+        self.lists.pop().unwrap_or_default()
+    }
+
+    fn give(&mut self, mut list: Vec<Tok>) {
+        list.clear();
+        self.lists.push(list);
+    }
+
+    /// Arguments with nothing in them, whose lists have room in them.
+    fn args(&mut self) -> Args {
+        self.args.pop().unwrap_or_else(Args::none)
+    }
+
+    fn give_args(&mut self, mut args: Args) {
+        for expanded in args.expanded.drain(..) {
+            if let Some(Expanded::Made(list)) = expanded {
+                self.give(list);
+            }
+        }
+        args.toks.clear();
+        args.ends.clear();
+        self.args.push(args);
+    }
+}
+
+impl<'a> Run<'a> {
+    /// The main loop.
+    ///
+    /// There is deliberately no "already decided not to expand" flag here. Whether a token
+    /// may expand is entirely a question of its hide set, and hide sets only ever grow as a
+    /// token is carried outwards, so a name that was hidden stays hidden. A function-like
+    /// macro name left alone because no parenthesis followed it is a different matter: it may
+    /// well be invoked later, once the tokens after it have been expanded and the parenthesis
+    /// has appeared. `t(t(g)(0) + t)(1)` in the standard's own example depends on that.
+    ///
+    /// Appends to `out` rather than to a list of its own and leaves `pending` empty with its
+    /// room intact, so that a caller with somewhere to put the result already does not pay to
+    /// copy it there, and one that comes back with more does not pay to grow a new list.
+    fn expand_into(&mut self, pending: &mut Vec<Tok>, out: &mut Vec<Tok>) {
+        let macros = self.macros;
+        pending.reverse();
+        out.reserve(pending.len());
+
+        while let Some(tok) = pending.pop() {
+            // A token the user wrote, reached outside any substitution, is past everything the
+            // invocations before it produced, since their output goes in front of it.
+            if self.current == TraceId::NONE && tok.trace == TraceId::NONE {
+                self.steps = 0;
+            }
+            self.steps += 1;
+            if self.steps > MAX_STEPS {
+                let d = Diagnostic::error("macro expansion is too large", tok.report_span())
+                    .with_code("E0310")
+                    .note("expansion stopped here, the rest of the line is not expanded", tok.span);
+                let d = self.in_expansions(d, tok.trace, tok.span);
+                self.diagnostics.push(d);
+                out.push(tok);
+                pending.reverse();
+                out.append(pending);
+                return;
+            }
+
+            let Some(name) = tok.ident() else {
+                out.push(tok);
+                continue;
+            };
+            // On a `#if` line `defined` is an operator, and neither it nor the name it asks
+            // about is expanded, however the two of them got here. This is in the loop rather
+            // than done to the line before expansion begins because a macro body is allowed to
+            // write the operator: once the expansion of `defined(X)` has finished, `X` has been
+            // replaced by whatever it is defined as and the question is about the wrong thing,
+            // or about nothing at all when the macro is defined as empty.
+            if self.condition.is_some_and(|c| c.defined == name) {
+                self.defined_operator(tok, pending, out);
+                continue;
+            }
+            if self.hides.contains(tok.hides, name) {
+                if self.kencc && self.kencc_recursion(name, pending.last()) {
+                    let d = Diagnostic::error("macro/io expansion too deep", tok.span);
+                    let d = self.in_expansions(d, tok.trace, tok.span);
+                    self.diagnostics.push(d);
+                }
+                out.push(tok);
+                continue;
+            }
+            let Some(def) = macros.lookup(name) else {
+                out.push(tok);
+                continue;
+            };
+
+            // A builtin stands for one token and that token can never expand into anything,
+            // so it goes straight to the output rather than back onto the stack to be
+            // rescanned. `__LINE__` is the most frequently expanded macro in a real build
+            // after the assert family, and this is the short path it deserves.
+            if let Some(builtin) = def.builtin {
+                let value = self.builtin_value(builtin, tok);
+                out.push(value);
+                continue;
+            }
+
+            if !def.function_like {
+                let hs = self.hides.add(tok.hides, name);
+                let mut args = Args::none();
+                self.subst_onto(def, &mut args, hs, tok, pending);
+                continue;
+            }
+
+            // A function-like macro is only invoked when a parenthesis follows. `#define f(x)`
+            // followed by a bare `f` is an ordinary identifier and a great deal of code relies
+            // on that, `errno` and `assert` among them.
+            if !pending.last().is_some_and(|t| t.is(Punct::LParen)) {
+                out.push(tok);
+                continue;
+            }
+
+            let Some((mut args, rparen)) = self.collect_args(def, pending, tok) else {
+                out.push(tok);
+                continue;
+            };
+            let shared = self.hides.intersect(tok.hides, rparen.hides);
+            let hs = self.hides.add(shared, name);
+            self.subst_onto(def, &mut args, hs, tok, pending);
+            self.spare.give_args(args);
+        }
+    }
+
+    /// Whether kencc would expand `name` again here, where C does not.
+    ///
+    /// kencc expands a macro as text and reads the text again with no hide set, so a macro that
+    /// names itself, as `#define x (x+1)`, expands until the input stack of `cc/lex.c` is full,
+    /// and kencc stops with `macro/io expansion too deep`. That is a name that a macro of its
+    /// own expansion hides, which is a macro with a body, and which has its parenthesis when it
+    /// takes arguments. `next` is the token after the name.
+    fn kencc_recursion(&self, name: Symbol, next: Option<&Tok>) -> bool {
+        match self.macros.lookup(name) {
+            Some(def) if def.builtin.is_none() => {
+                !def.function_like || next.is_some_and(|t| t.is(Punct::LParen))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether [`Run::expand_into`] would give back `toks` as they are, which it does when no
+    /// name in them is a macro it would expand. Counts the steps the loop would have counted, so
+    /// the bound on a runaway expansion is reached at the same token either way, and says no
+    /// when it would be reached here, leaving the loop to report it.
+    ///
+    /// Most arguments are a name or a number, and this spares each of them two lists and a copy.
+    fn passes_through(&mut self, toks: &[Tok], current: TraceId) -> bool {
+        let mut steps = self.steps;
+        for (at, tok) in toks.iter().enumerate() {
+            if current == TraceId::NONE && tok.trace == TraceId::NONE {
+                steps = 0;
+            }
+            steps += 1;
+            if steps > MAX_STEPS {
+                return false;
+            }
+            let Some(name) = tok.ident() else {
+                continue;
+            };
+            if self.condition.is_some_and(|c| c.defined == name) {
+                return false;
+            }
+            if self.hides.contains(tok.hides, name) {
+                if self.kencc && self.kencc_recursion(name, toks.get(at + 1)) {
+                    return false;
+                }
+                continue;
+            }
+            match self.macros.lookup(name) {
+                None => {}
+                Some(def) if def.function_like && def.builtin.is_none() => {
+                    if toks.get(at + 1).is_some_and(|t| t.is(Punct::LParen)) {
+                        return false;
+                    }
+                }
+                Some(_) => return false,
+            }
+        }
+        self.steps = steps;
+        true
+    }
+
+    /// Copies a `defined` and the name it asks about through untouched.
+    ///
+    /// The tokens come out in the order they went in and with nothing added, so the line the
+    /// caller resolves `defined` on afterwards is the line the operator was written on. A
+    /// malformed one is therefore still malformed there and the error reported is the error for
+    /// what the user wrote, rather than one about whatever the expansion made of it.
+    ///
+    /// The parentheses are optional and `defined X` is as good as `defined(X)`, so the closing
+    /// one is only taken when an opening one was. Anything else that follows is left where it
+    /// is, since this is not the place that decides the operator is wrong.
+    fn defined_operator(&mut self, tok: Tok, pending: &mut Vec<Tok>, out: &mut Vec<Tok>) {
+        // A macro that expands to `defined` is legal in every compiler and undefined behaviour
+        // in the standard, because the order the two operators run in was never written down.
+        // What the code means here is what it means to GCC and to Clang, and the warning is for
+        // the person who has to build the same file with something else.
+        //
+        // The wording is GCC's, so that a build log filtered on it reads the same either way.
+        // The notes under it are not: they name the macros the operator came out of, which is
+        // the thing the reader has to find and which GCC leaves them to look for.
+        if self.condition.is_some_and(|c| c.report) && tok.trace != TraceId::NONE {
+            let what = "this use of `defined` may not be portable";
+            let d = Diagnostic::warning(what, tok.report_span()).with_code("W0334");
+            let d = self.in_expansions(d, tok.trace, tok.span);
+            self.diagnostics.push(d);
+        }
+        out.push(tok);
+        let parenthesised = pending.last().is_some_and(|t| t.is(Punct::LParen));
+        if parenthesised {
+            out.push(pending.pop().expect("the parenthesis just looked at"));
+        }
+        if let Some(operand) = pending.pop() {
+            out.push(operand);
+        }
+        if parenthesised && pending.last().is_some_and(|t| t.is(Punct::RParen)) {
+            out.push(pending.pop().expect("the parenthesis just looked at"));
+        }
+    }
+
+    /// What one of the builtin macros stands for at the place it was used.
+    ///
+    /// The position asked about is [`Tok::report_span`], the outermost invocation, rather than
+    /// where the token is spelled. `#define WHERE __FILE__ ":" __LINE__` written in a header
+    /// has to answer with the file and the line of the code that used it, and a version of
+    /// this that answered with the header would be worse than not having the macros at all.
+    fn builtin_value(&mut self, which: Builtin, tok: Tok) -> Tok {
+        let at = tok.report_span().lo;
+        let (kind, text) = match which {
+            Builtin::File => (PpTokenKind::StringLit, quoted(&self.mapped(self.name_of(at)))),
+            // The unmapped name, because a mapping rewrites the front of a path and this is the
+            // part of it after the last separator. gcc leaves this macro alone for that reason
+            // and so does this: a build asking for a name with no directories in it has already
+            // got what a prefix map is for.
+            Builtin::FileName => (PpTokenKind::StringLit, quoted(base_name(self.name_of(at)))),
+            Builtin::BaseFile => (PpTokenKind::StringLit, quoted(&self.mapped(self.base_file(at)))),
+            Builtin::Line => (PpTokenKind::Number, self.line_of(at).to_string()),
+            Builtin::IncludeLevel => {
+                (PpTokenKind::Number, self.sources.include_stack(at).len().to_string())
+            }
+            Builtin::Counter => {
+                let value = *self.counter;
+                // Saturating rather than wrapping. A translation unit that expanded this four
+                // billion times has other problems, and repeating a number that was promised
+                // to be unique is a miscompile rather than an error.
+                *self.counter = self.counter.saturating_add(1);
+                (PpTokenKind::Number, value.to_string())
+            }
+        };
+        Tok {
+            kind,
+            flags: tok.flags,
+            value: Some(self.interner.intern(&text)),
+            span: tok.span,
+            expansion: tok.expansion,
+            trace: tok.trace,
+            hides: tok.hides,
+            placemarker: false,
+        }
+    }
+
+    /// The name of the file `at` is in, as a diagnostic would print it.
+    ///
+    /// The presented name rather than the real one, so that a `#line` moves `__FILE__` with
+    /// it. That is the whole point of the directive: a generator writes the name of the file
+    /// it was given, and the error a user reads has to name that file rather than the
+    /// generated one they have never seen.
+    fn name_of(&self, at: BytePos) -> &str {
+        self.sources.presumed(at).map_or(UNKNOWN, |loc| loc.name)
+    }
+
+    /// That name as the program is to be told it, which is with `-fmacro-prefix-map=` applied.
+    ///
+    /// Separate from [`Run::name_of`] rather than folded into it, because the two answers are
+    /// wanted in different places: this one goes into the binary and the other goes to the person
+    /// at the machine the file is on.
+    fn mapped<'n>(&self, name: &'n str) -> Cow<'n, str> {
+        self.prefix_map.apply(name)
+    }
+
+    /// The line `at` is on, counting from one, and presented rather than real for the same
+    /// reason the name is.
+    ///
+    /// Zero for a position in no file, which is a token the preprocessor made up rather than
+    /// read. Nothing in a real translation unit gets there, and answering zero is better than
+    /// answering with some other file's line.
+    fn line_of(&self, at: BytePos) -> u32 {
+        self.sources.presumed(at).map_or(0, |loc| loc.line)
+    }
+
+    /// The file at the bottom of the include stack, which is the one on the command line.
+    fn base_file(&self, at: BytePos) -> &str {
+        match self.sources.include_stack(at).last() {
+            Some(outermost) => self.name_of(outermost.lo),
+            None => self.name_of(at),
+        }
+    }
+
+    /// Reads an argument list, `pending` positioned on the opening parenthesis.
+    ///
+    /// Returns the arguments and the closing parenthesis token, whose hide set the caller
+    /// needs. Returns `None` after reporting a problem, in which case the macro name is
+    /// emitted unexpanded and the argument tokens are dropped, which is what GCC and Clang
+    /// both do: an argument list that does not fit the macro has no useful reading and
+    /// putting it back only produces a second error from the parser.
+    fn collect_args(
+        &mut self,
+        def: &MacroDef,
+        pending: &mut Vec<Tok>,
+        name: Tok,
+    ) -> Option<(Args, Tok)> {
+        let open = pending.pop().expect("the caller checked for an opening parenthesis");
+        // Every argument's tokens in one list, and where each argument ends in it, which is two
+        // lists for the whole invocation rather than one for each argument and its growth.
+        let mut args = self.spare.args();
+        let Args { toks, ends, .. } = &mut args;
+        ends.reserve(def.arity() + 1);
+        let end = |len: usize| u32::try_from(len).expect("an argument list that fits");
+        let mut depth = 1usize;
+        let rparen = loop {
+            let Some(tok) = pending.pop() else {
+                let d = Diagnostic::error("unterminated macro argument list", open.report_span())
+                    .with_code("E0311")
+                    .note("this macro was invoked here", name.report_span());
+                let d = self.in_expansions(d, name.trace, name.span);
+                self.diagnostics.push(d);
+                self.spare.give_args(args);
+                return None;
+            };
+            match tok.punct() {
+                Some(Punct::LParen) => {
+                    depth += 1;
+                    toks.push(tok);
+                }
+                Some(Punct::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break tok;
+                    }
+                    toks.push(tok);
+                }
+                // Once the named parameters are filled, a variadic macro's remaining commas
+                // are part of the last argument rather than separators.
+                Some(Punct::Comma)
+                    if depth == 1 && !(def.is_variadic() && ends.len() >= def.arity()) =>
+                {
+                    ends.push(end(toks.len()));
+                }
+                _ => toks.push(tok),
+            }
+        };
+
+        // `F()` on a macro that takes nothing is no arguments. On a macro that takes one, the
+        // same text is one empty argument, which is why this cannot be decided by looking at
+        // the tokens alone.
+        let empty_invocation = ends.is_empty() && toks.is_empty();
+        if !(empty_invocation && def.arity() == 0 && !def.is_variadic()) {
+            ends.push(end(toks.len()));
+        }
+        if def.is_variadic() && ends.len() == def.arity() {
+            ends.push(end(toks.len()));
+        }
+
+        let expected = def.arity() + usize::from(def.is_variadic());
+        if ends.len() != expected {
+            let word = if ends.len() < expected { "few" } else { "many" };
+            let d = Diagnostic::error(
+                format!(
+                    "too {word} arguments to macro `{}`, expected {}{}, got {}",
+                    self.interner.resolve(def.name),
+                    def.arity(),
+                    if def.is_variadic() { " or more" } else { "" },
+                    ends.len()
+                ),
+                name.report_span(),
+            )
+            .with_code("E0312")
+            .note("defined here", def.span);
+            let d = self.in_expansions(d, name.trace, name.span);
+            self.diagnostics.push(d);
+            self.spare.give_args(args);
+            return None;
+        }
+        args.expanded.resize(args.ends.len(), None);
+        args.outer = name.trace;
+        Some((args, rparen))
+    }
+
+    /// Appends the chain of macros `trace` records to `d`, outermost first.
+    ///
+    /// The diagnostic itself points at the outermost invocation, because that is the line the
+    /// user wrote. Each note then names one macro and points at where the next thing in was
+    /// written, so a reader walks from their own code into the header that surprised them
+    /// rather than being handed both ends and left to guess the middle. The last note points
+    /// at `innermost`, which is where inside the innermost macro's body the trouble is.
+    ///
+    /// A token the user wrote has an empty chain and gets nothing added, which is the common
+    /// case and is why this is cheap to call unconditionally.
+    fn in_expansions(&self, mut d: Diagnostic, trace: TraceId, innermost: Span) -> Diagnostic {
+        let chain = self.traces.chain(trace);
+        for (i, step) in chain.iter().enumerate() {
+            let at = chain.get(i + 1).map_or(innermost, |next| next.at);
+            let name = self.interner.resolve(step.macro_name);
+            d = d.note(format!("expanded from macro `{name}`"), at);
+        }
+        d
+    }
+
+    /// Argument substitution over a replacement list, put on the front of `pending` to be
+    /// rescanned.
+    ///
+    /// The order of the cases matters and each one of them is a known source of bugs, so
+    /// they are written out separately rather than folded together.
+    fn subst_onto(
+        &mut self,
+        def: &MacroDef,
+        args: &mut Args,
+        hs: HideSet,
+        invocation: Tok,
+        pending: &mut Vec<Tok>,
+    ) {
+        // The name is always there: this is only reached through an identifier that looked
+        // a macro up. The fallback keeps the trace merely incomplete rather than making this a
+        // panic on a path the compiler is not supposed to be able to take.
+        let name = invocation.ident();
+        // The chain for everything this expansion produces, known before the body is walked so
+        // that a diagnostic raised while walking it can say which macro it is inside. The
+        // invocation's own trace is the chain above, which is right whether it came from the
+        // user's file or from three macros further out.
+        let here = match name {
+            Some(name) => self.traces.push(name, invocation.span, invocation.trace),
+            None => invocation.trace,
+        };
+        // Body tokens start with the chain of the invocation rather than with none, so that a
+        // token written in this body comes out with the macros above this one on it. An
+        // argument token already has that chain, having been substituted from the call site.
+        let body = |t: &PpToken| Tok { trace: invocation.trace, ..Tok::new(*t) };
+        // An object-like macro has no parameters, so with no `##` and no `__VA_OPT__` in it every
+        // token of its body comes through `subst_list` as it is and none of them is a
+        // placemarker. That is nearly every object-like macro there is, and the body is its own
+        // substitution, written straight onto the front of what is rescanned rather than into a
+        // list of its own to be copied there. tamnd/rucc#3052.
+        let va_opt = Some(self.va_opt);
+        let plain = |t: &PpToken| {
+            t.kind != PpTokenKind::Punct(Punct::HashHash)
+                && !(t.kind == PpTokenKind::Ident && t.value == va_opt)
+        };
+        if !def.function_like && def.body.iter().all(plain) {
+            let start = pending.len();
+            pending.extend(def.body.iter().rev().map(body));
+            // Every token of the body has the same chain and no hide set, so the order they are
+            // marked in makes no difference to what they are marked with.
+            self.mark(&mut pending[start..], hs, invocation, here);
+            match pending[start..].last_mut() {
+                Some(first) => first.flags = carried_spacing(invocation.flags),
+                None => carry_spacing(pending, invocation),
+            }
+            return;
+        }
+        let outer = std::mem::replace(&mut self.current, here);
+        let mut list = self.spare.list();
+        list.extend(def.body.iter().map(body));
+        let mut os = drop_placemarkers(self.subst_list(def, args, &list, invocation));
+        self.spare.give(list);
+        self.current = outer;
+        self.mark(&mut os, hs, invocation, here);
+        if let Some(first) = os.first_mut() {
+            first.flags = carried_spacing(invocation.flags);
+        }
+        push_front(pending, &mut os, invocation);
+        self.spare.give(os);
+    }
+
+    /// Gives the tokens a substitution made the hide set, the place and the chain they come
+    /// out of it with.
+    fn mark(&mut self, os: &mut [Tok], hs: HideSet, invocation: Tok, here: TraceId) {
+        let name = invocation.ident();
+        // The steps this expansion has made, by the trace the tokens came with. The body has
+        // the invocation's, which is `here`, and each argument has its own, so a few cover an
+        // ordinary call, and `x * x` gives both uses of `x` the same step. Past the few a trace
+        // just gets another step that reads the same. tamnd/rucc#3052.
+        let mut made = [(invocation.trace, here); 8];
+        let mut len = 1;
+        let mut last = made[0];
+        // The set each token came with and what it comes out with, for the last one asked.
+        // Every token of the body has none, and those of an argument have that argument's, so
+        // most tokens are hidden the same as the one before. The body's have `hs` alone.
+        let mut hidden = (HideSet::EMPTY, hs);
+        for tok in os {
+            if tok.hides != hidden.0 {
+                hidden = (tok.hides, self.hides.union(tok.hides, hs));
+            }
+            tok.hides = hidden.1;
+            // The outermost invocation wins, because substitution of the outer macro runs
+            // after substitution of the inner ones, and the outer call is the line the user
+            // wrote and the line a diagnostic should point at.
+            tok.expansion = invocation.report_span();
+            // The trace keeps what `expansion` throws away. Every token here already carries
+            // the chain above this macro, so this records one step inside it, and `made`
+            // means the whole replacement list usually shares one node.
+            if let Some(name) = name {
+                if tok.trace != last.0 {
+                    last = match made[..len].iter().find(|m| m.0 == tok.trace) {
+                        Some(&m) => m,
+                        None => {
+                            let m = (tok.trace, self.traces.push(name, invocation.span, tok.trace));
+                            if len < made.len() {
+                                made[len] = m;
+                                len += 1;
+                            }
+                            m
+                        }
+                    };
+                }
+                tok.trace = last.1;
+            }
+        }
+    }
+
+    /// The recursive half of substitution, which `__VA_OPT__` re-enters for its contents.
+    fn subst_list(
+        &mut self,
+        def: &MacroDef,
+        args: &mut Args,
+        is: &[Tok],
+        invocation: Tok,
+    ) -> Vec<Tok> {
+        let mut os = self.spare.list();
+        os.reserve(is.len());
+        let mut at = 0;
+        // Whitespace owed to the output because the thing that carried it substituted to
+        // nothing. `#define f(a, ...) [a __VA_ARGS__]` invoked as `f(1)` produces `[1 ]`, not
+        // `[1]`, and matching that is part of what makes `-E` output diffable against GCC's,
+        // per `spec/05-preprocessor.md` section 5.6.
+        let mut owed = false;
+        // Whether the last thing written was an argument, which kencc joins with the
+        // punctuator after it.
+        let mut after_argument = false;
+        while at < is.len() {
+            let tok = is[at];
+
+            // `# parameter`, and the C23 `# __VA_OPT__(...)`.
+            if def.function_like && tok.is(Punct::Hash) {
+                if let Some(next) = is.get(at + 1) {
+                    if let Some(idx) = next.ident().and_then(|s| def.param_index(s)) {
+                        let text = self.stringize(args.raw(idx));
+                        let string = self.string_token(&text, tok.span.to(next.span));
+                        emit(&mut os, &[string], tok, &mut owed);
+                        at += 2;
+                        continue;
+                    }
+                    if next.ident() == Some(self.va_opt) {
+                        if let Some(inner) = va_opt_group(is, at + 1) {
+                            let close = inner.end;
+                            let raw = if self.no_variadic_tokens(def, args) {
+                                Vec::new()
+                            } else {
+                                self.subst_raw(def, args, &is[inner])
+                            };
+                            let text = self.stringize(&raw);
+                            let string = self.string_token(&text, tok.span.to(is[close].span));
+                            emit(&mut os, &[string], tok, &mut owed);
+                            at = close + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // `## operand`. The definition check guarantees there is an operand. A paste
+            // clears any owed whitespace, because the point of it is that the two operands
+            // become one token with nothing between them.
+            if tok.is(Punct::HashHash) {
+                let next = is[at + 1];
+                owed = false;
+                let param = next.ident().and_then(|s| def.param_index(s).map(|idx| (s, idx)));
+                if let Some((name, idx)) = param {
+                    let raw = args.raw(idx);
+                    // The GNU extension: in `, ## __VA_ARGS__` the paste is not a paste at
+                    // all. It drops the comma when there are no variable arguments and does
+                    // nothing at all when there are. An enormous amount of existing code
+                    // depends on it and will for another decade.
+                    let comma_variadic = def.is_variadic_param(name)
+                        && os.last().is_some_and(|l| l.is(Punct::Comma));
+                    if comma_variadic {
+                        if raw.is_empty() {
+                            os.pop();
+                        } else {
+                            emit(&mut os, raw, next, &mut owed);
+                        }
+                    } else {
+                        self.glue(&mut os, raw, next.span, tok.span);
+                    }
+                    at += 2;
+                    continue;
+                }
+                if next.ident() == Some(self.va_opt) {
+                    if let Some(inner) = va_opt_group(is, at + 1) {
+                        let close = inner.end;
+                        let rhs = self.va_opt_value(def, args, &is[inner], invocation, next.span);
+                        self.glue(&mut os, &rhs, next.span, tok.span);
+                        at = close + 1;
+                        continue;
+                    }
+                }
+                self.glue(&mut os, &[next], next.span, tok.span);
+                at += 2;
+                continue;
+            }
+
+            // `__VA_OPT__(...)` in an ordinary position.
+            if tok.ident() == Some(self.va_opt) {
+                if let Some(inner) = va_opt_group(is, at) {
+                    let close = inner.end;
+                    let value = self.va_opt_value(def, args, &is[inner], invocation, tok.span);
+                    emit(&mut os, &value, tok, &mut owed);
+                    at = close + 1;
+                    continue;
+                }
+            }
+
+            // kencc replaces a parameter in a literal of the body with the text of the argument,
+            // so `#define assert(x) if(x){}else _assert("x")` gives the condition as a string.
+            if self.kencc && matches!(tok.kind, PpTokenKind::StringLit | PpTokenKind::CharConst) {
+                let literal = self.kencc_literal(def, args, tok);
+                emit_plain(&mut os, literal, &mut owed);
+                at += 1;
+                continue;
+            }
+
+            // A parameter. Pasted with what follows it means the raw argument; otherwise the
+            // fully expanded one.
+            if let Some(idx) = tok.ident().and_then(|s| def.param_index(s)) {
+                if is.get(at + 1).is_some_and(|n| n.is(Punct::HashHash)) {
+                    let raw = args.raw(idx);
+                    let placemarker = [Tok::placemarker_at(tok.span)];
+                    let value = if raw.is_empty() { &placemarker[..] } else { raw };
+                    emit(&mut os, value, tok, &mut owed);
+                } else if self.kencc {
+                    let value = args.expanded(idx, self).to_vec();
+                    let start = os.len();
+                    emit(&mut os, &value, tok, &mut owed);
+                    if !tok.flags.has(TokenFlags::LEADING_SPACE) && os.len() > start {
+                        self.kencc_join(&mut os, start);
+                    }
+                    after_argument = os.len() > start;
+                    at += 1;
+                    continue;
+                } else {
+                    emit(&mut os, args.expanded(idx, self), tok, &mut owed);
+                }
+                at += 1;
+                continue;
+            }
+
+            emit_plain(&mut os, tok, &mut owed);
+            if after_argument && !tok.flags.has(TokenFlags::LEADING_SPACE) {
+                let at = os.len() - 1;
+                self.kencc_join(&mut os, at);
+            }
+            after_argument = false;
+            at += 1;
+        }
+        os
+    }
+
+    /// Under kencc, join the punctuators `os[at - 1]` and `os[at]` when they make one, as
+    /// `+` and `=` make `+=`.
+    ///
+    /// kencc expands a macro as text and reads the text again, so an argument and the body next
+    /// to it with no space between them are read as one. games/life.c has
+    /// `#define neighbour(di, dj, op) lp[(di)*NLIFE+(dj)] op= 2` and then `neighbour(-1, -1, +)`.
+    /// Only punctuators are joined, which is all that the 9front sources need.
+    fn kencc_join(&mut self, os: &mut Vec<Tok>, at: usize) {
+        if at == 0 || at >= os.len() {
+            return;
+        }
+        let (lhs, rhs) = (os[at - 1], os[at]);
+        let punct = |t: Tok| matches!(t.kind, PpTokenKind::Punct(_));
+        if !punct(lhs) || !punct(rhs) || lhs.is_placemarker() || rhs.is_placemarker() {
+            return;
+        }
+        if let Some(joined) = self.join(lhs, rhs) {
+            os.splice(at - 1..=at, [joined]);
+        }
+    }
+
+    /// What a `__VA_OPT__(...)` group stands for: its substituted contents when the variadic
+    /// argument has tokens, and a placemarker when it does not.
+    fn va_opt_value(
+        &mut self,
+        def: &MacroDef,
+        args: &mut Args,
+        inner: &[Tok],
+        invocation: Tok,
+        span: Span,
+    ) -> Vec<Tok> {
+        if self.no_variadic_tokens(def, args) {
+            return vec![Tok::placemarker_at(span)];
+        }
+        let value = self.subst_list(def, args, inner, invocation);
+        if value.is_empty() { vec![Tok::placemarker_at(span)] } else { value }
+    }
+
+    /// Whether the variadic argument is empty once it has been expanded, which is the test
+    /// `__VA_OPT__` makes in C23 and in gcc and Clang. An argument that is a macro expanding to
+    /// nothing counts as no argument at all, and the kernel depends on that: xe's `IF_ARGS`
+    /// asks `__VA_OPT__` whether `PICK_ARG3(70, 44)` picked anything.
+    fn no_variadic_tokens(&mut self, def: &MacroDef, args: &mut Args) -> bool {
+        args.raw(def.arity()).is_empty() || args.expanded(def.arity(), self).is_empty()
+    }
+
+    /// Substitution with parameters replaced by their unexpanded arguments, which is what
+    /// stringizing a `__VA_OPT__` group needs.
+    fn subst_raw(&mut self, def: &MacroDef, args: &mut Args, inner: &[Tok]) -> Vec<Tok> {
+        let mut out = Vec::with_capacity(inner.len());
+        for &tok in inner {
+            match tok.ident().and_then(|s| def.param_index(s)) {
+                Some(idx) => out.extend_from_slice(args.raw(idx)),
+                None => out.push(tok),
+            }
+        }
+        out
+    }
+
+    /// Pastes `rhs` onto the last token of `os`.
+    ///
+    /// An empty `rhs` is a placemarker, and pasting anything onto a placemarker or a
+    /// placemarker onto anything leaves the anything, which is what makes `a ## b` with an
+    /// empty `b` produce `a` instead of an error.
+    fn glue(&mut self, os: &mut Vec<Tok>, rhs: &[Tok], span: Span, op: Span) {
+        let placemarker = [Tok::placemarker_at(span)];
+        let rhs = if rhs.is_empty() { &placemarker[..] } else { rhs };
+        let Some(lhs) = os.pop() else {
+            os.extend_from_slice(rhs);
+            return;
+        };
+        let first = rhs[0];
+        if lhs.is_placemarker() {
+            os.extend_from_slice(rhs);
+            return;
+        }
+        if first.is_placemarker() {
+            os.push(lhs);
+            os.extend_from_slice(&rhs[1..]);
+            return;
+        }
+        match self.paste(lhs, first, op) {
+            Some(joined) => os.push(joined),
+            None => {
+                // The two were meant to be one token, so they are printed with nothing
+                // between them even though the paste failed. GCC and Clang both do this.
+                let mut first = first;
+                first.flags = TokenFlags::EMPTY;
+                os.push(lhs);
+                os.push(first);
+            }
+        }
+        os.extend_from_slice(&rhs[1..]);
+    }
+
+    /// Concatenates two spellings and re-lexes the result.
+    ///
+    /// A result that is not exactly one preprocessing token is a constraint violation. GCC
+    /// diagnoses it and keeps both tokens, and we do the same, because rejecting the
+    /// translation unit here would stop a build over something that in practice never
+    /// reaches the parser.
+    fn paste(&mut self, lhs: Tok, rhs: Tok, op: Span) -> Option<Tok> {
+        if let Some(joined) = self.join(lhs, rhs) {
+            return Some(joined);
+        }
+        if self.assembly {
+            return None;
+        }
+        let mut text = String::new();
+        self.spell(lhs, &mut text);
+        let split = text.len();
+        self.spell(rhs, &mut text);
+        {
+            let d = Diagnostic::error(
+                format!(
+                    "pasting `{}` and `{}` does not give a valid preprocessing token",
+                    &text[..split],
+                    &text[split..]
+                ),
+                lhs.report_span().to(rhs.report_span()),
+            )
+            .with_code("E0313")
+            .note("the left operand is here", lhs.span)
+            .note("the right operand is here", rhs.span);
+            let d = self.in_expansions(d, self.current, op);
+            self.diagnostics.push(d);
+            None
+        }
+    }
+
+    /// The one token that the spellings of `lhs` and `rhs` make together, or `None` when they
+    /// do not make exactly one.
+    fn join(&mut self, lhs: Tok, rhs: Tok) -> Option<Tok> {
+        let mut text = String::new();
+        self.spell(lhs, &mut text);
+        self.spell(rhs, &mut text);
+        let (tokens, _) = tokenize(text.as_bytes(), 0, Options::new(), self.interner);
+        let single = tokens.len() == 2
+            && tokens[0].kind != PpTokenKind::Eof
+            && tokens[1].kind == PpTokenKind::Eof
+            && tokens[0].span.lo == 0
+            && tokens[0].span.hi as usize == text.len();
+        if !single {
+            return None;
+        }
+        Some(Tok {
+            kind: tokens[0].kind,
+            flags: lhs.flags,
+            value: tokens[0].value,
+            span: lhs.span.to(rhs.span),
+            expansion: lhs.expansion,
+            trace: lhs.trace,
+            // Only what hides both halves hides the token they make, as in Prosser's `glue`. A
+            // name the argument half picked up inside an expansion that has already finished,
+            // such as the `DROP_FIRST_ARG` that took the head off a list, says nothing about the
+            // new name, and the macro that is expanding now is added to every token of its body
+            // after this anyway. With the union a name made by pasting, and everything in its
+            // body, could not call any macro that had once taken its argument apart.
+            hides: self.hides.intersect(lhs.hides, rhs.hides),
+            placemarker: false,
+        })
+    }
+
+    /// Builds the string literal `#` produces.
+    ///
+    /// Internal whitespace runs collapse to one space, leading and trailing space is
+    /// dropped, and a backslash or double quote inside a string or character literal is
+    /// escaped, per `spec/05-preprocessor.md` section 5.3.
+    fn stringize(&self, toks: &[Tok]) -> String {
+        let mut out = String::from("\"");
+        let mut first = true;
+        for &tok in toks.iter().filter(|t| !t.is_placemarker()) {
+            if !first && tok.flags.has(TokenFlags::LEADING_SPACE) {
+                out.push(' ');
+            }
+            first = false;
+            let mut spelled = String::new();
+            self.spell(tok, &mut spelled);
+            if matches!(tok.kind, PpTokenKind::StringLit | PpTokenKind::CharConst) {
+                for ch in spelled.chars() {
+                    if ch == '\\' || ch == '"' {
+                        out.push('\\');
+                    }
+                    out.push(ch);
+                }
+            } else {
+                out.push_str(&spelled);
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    /// A literal of a body with each parameter in it replaced by the text of its argument, as
+    /// `macdef` in `cc/macbody` of kencc does it. A word in the literal is a parameter when its
+    /// spelling is the name of one. The character after a backslash is not the start of a word,
+    /// so `"\\nx"` has the word `x` and not `nx`.
+    fn kencc_literal(&mut self, def: &MacroDef, args: &mut Args, tok: Tok) -> Tok {
+        let mut spelled = String::new();
+        self.spell(tok, &mut spelled);
+        let Some(open) = spelled.find(['"', '\'']) else { return tok };
+        let word = |c: char| c == '_' || c.is_ascii_alphanumeric() || !c.is_ascii();
+        let mut out = String::from(&spelled[..open]);
+        let mut changed = false;
+        let mut chars = spelled[open..].char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if c == '\\' {
+                out.push(c);
+                if let Some((_, next)) = chars.next() {
+                    out.push(next);
+                }
+                continue;
+            }
+            if !(word(c) && !c.is_ascii_digit()) {
+                out.push(c);
+                continue;
+            }
+            let mut end = at + c.len_utf8();
+            while let Some(&(next_at, next)) = chars.peek() {
+                if !word(next) {
+                    break;
+                }
+                end = next_at + next.len_utf8();
+                chars.next();
+            }
+            let name = &spelled[open + at..open + end];
+            let param = self.interner.find(name).and_then(|sym| def.param_index(sym));
+            match param {
+                Some(idx) => {
+                    let mut first = true;
+                    for &arg in args.raw(idx).iter().filter(|t| !t.is_placemarker()) {
+                        if !first && arg.flags.has(TokenFlags::LEADING_SPACE) {
+                            out.push(' ');
+                        }
+                        first = false;
+                        self.spell(arg, &mut out);
+                    }
+                    changed = true;
+                }
+                None => out.push_str(name),
+            }
+        }
+        if !changed {
+            return tok;
+        }
+        Tok { value: Some(self.interner.intern(&out)), ..tok }
+    }
+
+    /// Wraps stringized text as a token.
+    fn string_token(&mut self, text: &str, span: Span) -> Tok {
+        Tok {
+            kind: PpTokenKind::StringLit,
+            flags: TokenFlags::EMPTY,
+            value: Some(self.interner.intern(text)),
+            span,
+            expansion: Span::DUMMY,
+            trace: TraceId::NONE,
+            hides: HideSet::EMPTY,
+            placemarker: false,
+        }
+    }
+
+    /// Appends a token's spelling.
+    fn spell(&self, tok: Tok, out: &mut String) {
+        if tok.is_placemarker() {
+            return;
+        }
+        match (tok.kind, tok.value) {
+            (PpTokenKind::Punct(p), _) => out.push_str(p.as_str()),
+            (_, Some(sym)) => out.push_str(self.interner.resolve(sym)),
+            (_, None) => {}
+        }
+    }
+}
+
+/// Appends what a body token substituted to.
+///
+/// The first token of the result takes the spacing of the token it replaced, so that
+/// `#define f(x) (x + x)` prints as `(1 + 1)` rather than `(1 +1)`. A group that substituted
+/// to nothing leaves its spacing owed to whatever comes next.
+fn emit(os: &mut Vec<Tok>, value: &[Tok], source: Tok, owed: &mut bool) {
+    let Some((&first, rest)) = value.split_first() else {
+        *owed = *owed || source.flags.has(TokenFlags::LEADING_SPACE);
+        return;
+    };
+    let mut first = first;
+    first.flags = carried_spacing(source.flags);
+    if *owed {
+        first.flags = first.flags.with(TokenFlags::LEADING_SPACE);
+        *owed = false;
+    }
+    os.push(first);
+    os.extend_from_slice(rest);
+}
+
+/// Appends a token that stands for itself, which is every token of a replacement list that
+/// is not a parameter or an operator.
+fn emit_plain(os: &mut Vec<Tok>, tok: Tok, owed: &mut bool) {
+    let mut tok = tok;
+    if *owed {
+        tok.flags = tok.flags.with(TokenFlags::LEADING_SPACE);
+        *owed = false;
+    }
+    os.push(tok);
+}
+
+/// Removes placemarkers, handing any whitespace they carried to the next real token.
+///
+/// In place, since most lists have none and the copy into a second list was an allocation for
+/// every expansion.
+fn drop_placemarkers(mut toks: Vec<Tok>) -> Vec<Tok> {
+    let mut owed = false;
+    toks.retain_mut(|tok| {
+        if tok.is_placemarker() {
+            owed = owed || tok.flags.has(TokenFlags::LEADING_SPACE);
+            return false;
+        }
+        if owed {
+            tok.flags = tok.flags.with(TokenFlags::LEADING_SPACE);
+            owed = false;
+        }
+        true
+    });
+    toks
+}
+
+/// Finds the parenthesised group belonging to a `__VA_OPT__` at `at`.
+///
+/// Returns the range of the contents. The closing parenthesis is at `range.end`, so the
+/// group ends at `range.end + 1`, which is what every caller wants next.
+fn va_opt_group(is: &[Tok], at: usize) -> Option<std::ops::Range<usize>> {
+    if !is.get(at + 1).is_some_and(|t| t.is(Punct::LParen)) {
+        return None;
+    }
+    let start = at + 2;
+    let mut depth = 1usize;
+    let mut end = start;
+    while end < is.len() {
+        match is[end].punct() {
+            Some(Punct::LParen) => depth += 1,
+            Some(Punct::RParen) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start..end);
+                }
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+    None
+}
+
+/// Pushes a replacement onto the front of the pushback stack, preserving its order.
+fn push_front(pending: &mut Vec<Tok>, replacement: &mut Vec<Tok>, invocation: Tok) {
+    // An expansion that came to nothing still leaves its spacing behind. `#define E` used as
+    // `int a E;` preprocesses to `int a ;` and not to `int a;`, in GCC and in clang both. On
+    // the glibc headers that is most of the difference between agreeing with the reference and
+    // not, because `__THROW` and the rest of the attribute macros expand to nothing on a
+    // non-GNU dialect and sit next to a `;` or a `,` several hundred times per header.
+    //
+    // The space is handed to whatever gets rescanned next, which may itself be a macro that
+    // vanishes, so `a E E E b` walks the debt along until something real takes it.
+    //
+    // Standing at the front of a line is handed along the same way. The line belongs to the
+    // file rather than to the macro, so when the macro that was written first on one leaves
+    // nothing behind, the token that ends up first there is the one that starts the line.
+    // Losing it is not cosmetic: a `#pragma` line is read as the tokens between the `pragma`
+    // and the next one that starts a line, so a declaration written as `SQLITE_API const char
+    // sqlite3_version[] = ...` after a `#pragma pack` gets eaten by the pragma instead, and the
+    // program is left without the declaration and with a complaint about junk on the pragma.
+    if replacement.is_empty() {
+        carry_spacing(pending, invocation);
+        return;
+    }
+    replacement.reverse();
+    pending.append(replacement);
+}
+
+/// Hands the spacing of an invocation that came to nothing on to the token rescanned after it.
+/// See [`push_front`].
+fn carry_spacing(pending: &mut [Tok], invocation: Tok) {
+    if let Some(next) = pending.last_mut() {
+        next.flags = next.flags.with(carried_spacing(invocation.flags));
+    }
+}
+
+/// The flags a replacement's first token inherits from the invocation.
+///
+/// Only spacing carries over. A macro that expanded from a spliced or digraph token did not
+/// itself come from one, and saying it did would put the wrong thing in `-E` output.
+fn carried_spacing(flags: TokenFlags) -> TokenFlags {
+    let mut carried = TokenFlags::EMPTY;
+    if flags.has(TokenFlags::START_OF_LINE) {
+        carried = carried.with(TokenFlags::START_OF_LINE);
+    }
+    if flags.has(TokenFlags::LEADING_SPACE) {
+        carried = carried.with(TokenFlags::LEADING_SPACE);
+    }
+    carried
+}
+
+/// The arguments of one invocation, raw and expanded.
+///
+/// An argument used twice in a replacement list is expanded once. That is not just a saving:
+/// `spec/02-the-goal.md` wants the same input to produce the same diagnostics, and expanding
+/// an argument twice would report anything wrong inside it twice.
+#[derive(Debug)]
+struct Args {
+    /// Every argument's tokens, one after another.
+    toks: Vec<Tok>,
+    /// Where each argument ends in `toks`, and so where the next one starts.
+    ends: Vec<u32>,
+    expanded: Vec<Option<Expanded>>,
+    /// The chain the invocation itself came out of, which is the chain the argument text is
+    /// in as well, since the caller wrote it and the macro being called did not.
+    outer: TraceId,
+}
+
+/// What expanding one argument gave.
+#[derive(Debug, Clone)]
+enum Expanded {
+    /// The argument as it was written, because nothing in it expands.
+    Same,
+    /// Anything else.
+    Made(Vec<Tok>),
+}
+
+impl Args {
+    /// The argument list of an object-like macro, which has none.
+    fn none() -> Args {
+        Args { toks: Vec::new(), ends: Vec::new(), expanded: Vec::new(), outer: TraceId::NONE }
+    }
+
+    fn raw(&self, idx: usize) -> &[Tok] {
+        let Some(&end) = self.ends.get(idx) else {
+            return &[];
+        };
+        let start = idx.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.toks[start as usize..end as usize]
+    }
+
+    fn expanded(&mut self, idx: usize, run: &mut Run<'_>) -> &[Tok] {
+        let Some(slot) = self.expanded.get(idx) else {
+            return &[];
+        };
+        if slot.is_none() {
+            let expanded = if run.passes_through(self.raw(idx), self.outer) {
+                Expanded::Same
+            } else {
+                let saved = std::mem::replace(&mut run.current, self.outer);
+                let mut input = run.spare.list();
+                input.extend_from_slice(self.raw(idx));
+                let mut expanded = run.spare.list();
+                run.expand_into(&mut input, &mut expanded);
+                run.spare.give(input);
+                run.current = saved;
+                Expanded::Made(expanded)
+            };
+            self.expanded[idx] = Some(expanded);
+        }
+        match &self.expanded[idx] {
+            Some(Expanded::Made(expanded)) => expanded,
+            _ => self.raw(idx),
+        }
+    }
+}

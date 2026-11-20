@@ -1,0 +1,817 @@
+//! What one machine instruction is, and what an operand is.
+//!
+//! Design: `spec/10-backend.md` section 10.1.
+//!
+//! An instruction is an opcode, a run of operands, the three things an opcode may carry besides
+//! its operands, which are an immediate, a memory addressing mode and a symbol, and one set of
+//! flags. Twenty-eight bytes, all of it either a small number or an index into a table the
+//! function owns, so walking a function is walking one dense array and nothing in it is
+//! separately freed.
+//!
+//! An operand is a register, the class it is drawn from, whether the instruction reads or
+//! writes it, and any constraint on where it may live. That is what the allocator reads and it
+//! is all the allocator reads, which is the point: the opcode is a name to everything except
+//! the encoder, and the allocator never has to know what any particular target's instructions
+//! mean.
+//!
+//! # Where the other pieces are
+//!
+//! [`Role`] and [`Constraint`] are in `rucc-target`, and this crate re-exports them. A target
+//! says what its instructions do to their operands before there is any machine IR to say it in,
+//! and both the selector that builds the IR and the encoder that reads it need the answer, so
+//! the two of them live below both.
+//!
+//! Successors are on the block rather than on the terminator, in the order the terminator's own
+//! arms run. That is regalloc2's arrangement, which `spec/10-backend.md` section 10.4 says the
+//! allocator interface follows, and it keeps a branch's arguments out of the operand vector
+//! where they would otherwise be uses the allocator has to be told to treat differently.
+//!
+//! The source location is a parallel array in the function, reached by [`crate::Func::span`],
+//! for the same reason `rucc-ir` puts it there: it is read when a diagnostic is being made and
+//! at no other time, so it does not belong on the row that every pass walks.
+
+use std::fmt;
+
+use rucc_base::{Idx, IdxRange, Symbol};
+use rucc_target::{Constraint, PhysReg, RegClass, Role, Segment};
+
+/// One instruction, in the function that owns it.
+pub type Inst = Idx<InstData>;
+/// One basic block, in the function that owns it.
+pub type Block = Idx<BlockData>;
+/// A run of operands, which is what an instruction's operand vector is.
+pub type OperandList = IdxRange<Operand>;
+/// One immediate, in the function's immediate table.
+pub type ImmRef = Idx<Imm>;
+/// One addressing mode, in the function's table of them.
+pub type MemRef = Idx<Amode>;
+
+/// Which instruction this is.
+///
+/// A name rather than a variant of an enum. `spec/10-backend.md` section 10.8 says no pipeline
+/// crate holds target-specific code, and an enum of every x86-64 opcode in the crate every
+/// target's MIR passes through is exactly that. The opcodes a target has are data: they come out
+/// of its rule set, which is what the selector was compiled from, and this crate never asks what
+/// one of them means. The encoder does, against the same description the rules were written
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Opcode(Symbol);
+
+impl Opcode {
+    /// The opcode of that name.
+    #[must_use]
+    pub const fn new(name: Symbol) -> Self {
+        Self(name)
+    }
+
+    /// Its name, which needs the interner it was made with to read.
+    #[must_use]
+    pub const fn name(self) -> Symbol {
+        self.0
+    }
+}
+
+/// A register, either one the allocator has still to place or one it has placed.
+///
+/// The two are one type and four bytes because every operand holds one and because a pass that
+/// runs both before and after allocation should not be two passes. Which of the two it is, is
+/// the top bit, so a virtual register is its own number and nothing has to be masked to compare
+/// two of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Reg(u32);
+
+impl Reg {
+    /// The bit that says the rest is a physical register rather than a virtual one.
+    const PHYSICAL: u32 = 1 << 31;
+
+    /// The virtual register with that number.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number is two billion or more, which no function reaches.
+    #[must_use]
+    pub const fn virtual_reg(number: u32) -> Self {
+        assert!(number < Self::PHYSICAL, "a function with two billion virtual registers");
+        Self(number)
+    }
+
+    /// The physical register, once one has been chosen.
+    #[must_use]
+    pub const fn physical(reg: PhysReg) -> Self {
+        Self(Self::PHYSICAL | reg.number() as u32)
+    }
+
+    /// Whether the allocator has still to place it.
+    #[must_use]
+    pub const fn is_virtual(self) -> bool {
+        self.0 & Self::PHYSICAL == 0
+    }
+
+    /// Its number as a virtual register, or `None` once it is a physical one.
+    #[must_use]
+    pub const fn number(self) -> Option<u32> {
+        if self.is_virtual() { Some(self.0) } else { None }
+    }
+
+    /// The physical register it is, or `None` while it is still virtual.
+    ///
+    /// Which class the register is in is on the operand rather than here, because an operand
+    /// carries its class already and a second copy of it is a thing that can disagree.
+    #[must_use]
+    pub const fn phys(self) -> Option<PhysReg> {
+        if self.is_virtual() { None } else { Some(PhysReg::new((self.0 & 0xff) as u8)) }
+    }
+}
+
+/// One operand of one instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Operand {
+    /// The register, virtual until the allocator has run.
+    pub reg: Reg,
+    /// The class it is drawn from.
+    pub class: RegClass,
+    /// Whether the instruction reads it or writes it.
+    pub role: Role,
+    /// Where it is allowed to live.
+    pub constraint: Constraint,
+}
+
+impl Operand {
+    /// An operand the instruction reads.
+    #[must_use]
+    pub const fn read(reg: Reg, class: RegClass) -> Self {
+        Self { reg, class, role: Role::Use, constraint: Constraint::Reg }
+    }
+
+    /// An operand the instruction writes as it finishes.
+    #[must_use]
+    pub const fn write(reg: Reg, class: RegClass) -> Self {
+        Self { reg, class, role: Role::Def, constraint: Constraint::Reg }
+    }
+
+    /// An operand the instruction writes before it has finished reading.
+    #[must_use]
+    pub const fn write_early(reg: Reg, class: RegClass) -> Self {
+        Self { reg, class, role: Role::EarlyDef, constraint: Constraint::Reg }
+    }
+
+    /// The same operand, constrained.
+    #[must_use]
+    pub const fn with(mut self, constraint: Constraint) -> Self {
+        self.constraint = constraint;
+        self
+    }
+}
+
+/// One immediate.
+///
+/// Signed and sixty-four bits, which every immediate field of every target we have is narrower
+/// than. What fits in the field the encoder is about to write is the encoder's question, and it
+/// is one it can only answer per opcode, so nothing here tries to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Imm(pub i64);
+
+/// What the four bytes beside a symbol in an address hold.
+///
+/// Three different numbers written in the same place, and nothing about the instruction says which
+/// one it is: `movq sym(%rip)`, `movq sym@GOTPCREL(%rip)` and `movq sym@GOTTPOFF(%rip)` are the
+/// same opcode with the same operands, and the only thing that tells them apart is the relocation
+/// the assembler leaves behind. So the difference has to be carried here, beside the symbol, rather
+/// than being read back out of the shape of the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Reach {
+    /// The distance to the symbol itself, which is the ordinary case. `R_X86_64_PC32`.
+    #[default]
+    Itself,
+    /// The distance to the slot of the global offset table holding the symbol's address, which is
+    /// a load rather than an arithmetic. See [`Mem::got`].
+    Table,
+    /// The distance to the slot of the global offset table holding the symbol's offset inside a
+    /// thread's own block of storage. See [`Mem::thread`].
+    Thread,
+    /// How far the symbol is from the front of the section it is in, added to the base register
+    /// rather than to the instruction pointer. `IMAGE_REL_AMD64_SECREL` on COFF, which is how a
+    /// Windows thread finds its copy of a thread-local variable in the block `_tls_index` picks.
+    /// See [`Mem::section`].
+    Section,
+    /// The symbol's own address as a 32 bit number the machine sign extends, not counted from the
+    /// instruction pointer, which is `R_X86_64_32S`. Only code linked in the top 2 GiB of the
+    /// address space may write an address this way, which is `-mcmodel=kernel`, and what it buys is
+    /// that a register can be added to it: `sym(,%rdi,8)` indexes a static array in one
+    /// instruction, and `movq $sym, %rax` is the address itself. See tamnd/rucc#2275.
+    Absolute,
+    /// How far the symbol is from the global offset table, added to the table's own address in the
+    /// base register. `R_386_GOTOFF`, which is how i386 position independent code reaches a name
+    /// in this same image, since the machine has no addressing relative to the instruction
+    /// pointer. A label and a jump table of the function are reached the same way. See
+    /// [`Mem::got_off`].
+    GotOff,
+}
+
+/// How an index narrower than the address is widened to it, which AArch64 does inside the access.
+///
+/// `arr[i]` with an `int` subscript adds a 32 bit index to a 64 bit address. AArch64 can take the W
+/// register as it is and extend it on the way in, as in `ldr x0, [x1, w0, sxtw #3]`, so the
+/// extension needs no instruction of its own. No widening is an index as wide as the address,
+/// which is every index on x86.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widen {
+    /// Sign extended, which is `sxtw`.
+    Signed,
+    /// Zero extended, which is `uxtw`.
+    Unsigned,
+}
+
+/// A memory addressing mode, as the instruction holds it.
+///
+/// The registers are the indices of the operands holding them rather than the registers
+/// themselves, because an address register is a register the allocator has to see and rewrite,
+/// and the only thing it looks at is the operand vector. [`Mem`] is the same thing written the
+/// way a caller writes it, and [`crate::InstBuilder::mem`] turns one into the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Amode {
+    /// The operand holding the base register.
+    pub base: Option<u8>,
+    /// The operand holding the index register.
+    pub index: Option<u8>,
+    /// What the index is multiplied by, which is 1 when there is no index.
+    pub scale: u8,
+    /// The constant added to the address.
+    pub disp: i32,
+    /// The symbol the address is relative to, for an access to a global.
+    pub symbol: Option<Symbol>,
+    /// The block of this function the address is of, for the address of a label. See
+    /// [`Mem::block`].
+    pub block: Option<Block>,
+    /// The jump table of this function the address is of, as its place in
+    /// [`crate::Func::tables`]. See [`Mem::table`].
+    pub table: Option<u32>,
+    /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
+    pub reach: Reach,
+    /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
+    pub segment: Option<Segment>,
+    /// How the index is widened to the address, when it is narrower. See [`Widen`].
+    pub widen: Option<Widen>,
+}
+
+impl Amode {
+    /// The addressing mode naming no register and no symbol, at offset zero.
+    pub const NOTHING: Self = Self {
+        base: None,
+        index: None,
+        scale: 1,
+        disp: 0,
+        symbol: None,
+        block: None,
+        table: None,
+        reach: Reach::Itself,
+        segment: None,
+        widen: None,
+    };
+}
+
+/// A memory addressing mode as a caller writes one down.
+///
+/// The difference from [`Amode`] is that the registers are here rather than in the operand
+/// vector, which is what [`crate::InstBuilder::mem`] fixes. Keeping the two apart is what lets
+/// the operand indices in an [`Amode`] be an invariant of the builder rather than something
+/// every caller has to get right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Mem {
+    /// The base register, which the instruction reads.
+    pub base: Option<Operand>,
+    /// The index register, which the instruction reads.
+    pub index: Option<Operand>,
+    /// What the index is multiplied by.
+    pub scale: u8,
+    /// The constant added to the address.
+    pub disp: i32,
+    /// The symbol the address is relative to.
+    pub symbol: Option<Symbol>,
+    /// The block of this function the address is of. See [`Mem::block`].
+    pub block: Option<Block>,
+    /// The jump table of this function the address is of. See [`Mem::table`].
+    pub table: Option<u32>,
+    /// What the four bytes beside the symbol hold, when there is a symbol. See [`Reach`].
+    pub reach: Reach,
+    /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
+    pub segment: Option<Segment>,
+    /// How the index is widened to the address, when it is narrower. See [`Widen`].
+    pub widen: Option<Widen>,
+}
+
+impl Mem {
+    /// The address in that register.
+    #[must_use]
+    pub const fn at(base: Operand) -> Self {
+        Self {
+            base: Some(base),
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            block: None,
+            table: None,
+            reach: Reach::Itself,
+            segment: None,
+            widen: None,
+        }
+    }
+
+    /// The address of that symbol.
+    #[must_use]
+    pub const fn of(symbol: Symbol) -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: Some(symbol),
+            block: None,
+            table: None,
+            reach: Reach::Itself,
+            segment: None,
+            widen: None,
+        }
+    }
+
+    /// The address of that block of this function, which is what GNU's `&&label` is.
+    ///
+    /// A block rather than a symbol because the block it names is in this same function and has no
+    /// name outside it. What the assembler is given is the local label the block already carries,
+    /// which is a name the object file need not keep, and what the object writer is given is
+    /// nothing at all: the distance is between two places in one section and both of them are
+    /// known once the blocks have been laid out, so it is filled in here rather than left to a
+    /// linker the way the distance to a global is.
+    #[must_use]
+    pub const fn block(block: Block) -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            block: Some(block),
+            table: None,
+            reach: Reach::Itself,
+            segment: None,
+            widen: None,
+        }
+    }
+
+    /// The address of one of this function's jump tables, which is what a `switch` dense enough to
+    /// be one reads its destination out of.
+    ///
+    /// An index into [`crate::Func::tables`] rather than a symbol, for the reason [`Self::block`]
+    /// is a block: the table is written into the same section as the function, straight after its
+    /// last instruction, so both ends of the distance are places the assembler lays out itself and
+    /// there is nothing for a linker to be told.
+    #[must_use]
+    pub const fn table(table: u32) -> Self {
+        Self { table: Some(table), ..Self::of_nothing() }
+    }
+
+    /// The address naming nothing at all, which the constructors above start from.
+    const fn of_nothing() -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: 0,
+            symbol: None,
+            block: None,
+            table: None,
+            reach: Reach::Itself,
+            segment: None,
+            widen: None,
+        }
+    }
+
+    /// That many bytes into a thread's own block of words, which names no register at all.
+    ///
+    /// The whole address is the constant, because where the block is is something only the machine
+    /// knows: the segment register is what holds it and nothing loads one. See [`Segment`].
+    #[must_use]
+    pub const fn in_segment(segment: Segment, disp: i32) -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            disp,
+            symbol: None,
+            block: None,
+            table: None,
+            reach: Reach::Itself,
+            segment: Some(segment),
+            widen: None,
+        }
+    }
+
+    /// The slot of the global offset table holding that symbol's address.
+    ///
+    /// Not the same thing as [`Self::of`] and not an optimization of it. `sym(%rip)` is the
+    /// address worked out from where the instruction is, which is only the right address when the
+    /// symbol is in this same object, and the linker refuses it in a position independent
+    /// executable when the symbol may turn out to be in a shared library. `sym@GOTPCREL(%rip)` is
+    /// a slot the linker fills in with the one address everybody agrees on, so it is a load rather
+    /// than an arithmetic, and whatever reads it gets an address rather than a place.
+    ///
+    /// The linker relaxes it back into the arithmetic when the symbol turns out to be in this
+    /// program after all, which is why nothing is lost by asking for it.
+    #[must_use]
+    pub const fn got(symbol: Symbol) -> Self {
+        Self { reach: Reach::Table, ..Self::of(symbol) }
+    }
+
+    /// The slot of the global offset table holding that symbol's offset inside a thread's block.
+    ///
+    /// A thread-local variable has no one address, since every thread has a copy of it, so there is
+    /// nothing for [`Self::of`] to be the distance to and a linker refuses one aimed at such a
+    /// symbol. What every copy does share is where it sits inside the block a thread gets, and that
+    /// offset is the number this slot holds: add it to the address of the running thread's block,
+    /// which the machine keeps in `%fs`, and the result is this thread's copy.
+    ///
+    /// The offset is a slot rather than a constant because how big the blocks in front of this
+    /// object's are is only known once the program is linked together, and in a shared library only
+    /// once it is loaded. The linker writes the constant into the instruction instead when it is
+    /// making an executable, where it does know, so this costs nothing in the case that is common.
+    #[must_use]
+    pub const fn thread(symbol: Symbol) -> Self {
+        Self { reach: Reach::Thread, ..Self::of(symbol) }
+    }
+
+    /// That symbol's distance from the global offset table, added to the table's address in that
+    /// register, which is how i386 position independent code reaches a name in its own image. See
+    /// [`Reach::GotOff`].
+    #[must_use]
+    pub const fn got_off(base: Operand, symbol: Symbol) -> Self {
+        Self { symbol: Some(symbol), reach: Reach::GotOff, ..Self::at(base) }
+    }
+
+    /// The same address counted from the global offset table whose address is in that register,
+    /// rather than from the instruction pointer, for a mode that names a symbol, a block or a jump
+    /// table and no register. The name, the label or the table itself becomes `@GOTOFF`, and a
+    /// slot of the table stays a slot, read as `@GOT` or `@GOTNTPOFF` from the register. i386 has
+    /// no other way to write any of them.
+    #[must_use]
+    pub const fn from_table(mut self, base: Operand) -> Self {
+        self.base = Some(base);
+        if matches!(self.reach, Reach::Itself) {
+            self.reach = Reach::GotOff;
+        }
+        self
+    }
+
+    /// That symbol's own address as a number, which is how the kernel code model writes it. See
+    /// [`Reach::Absolute`].
+    #[must_use]
+    pub const fn absolute(symbol: Symbol) -> Self {
+        Self { reach: Reach::Absolute, ..Self::of(symbol) }
+    }
+
+    /// That symbol's offset in its own section, added to the address in that register.
+    ///
+    /// A Windows thread's copy of the thread-local variables of one image is a copy of the image's
+    /// `.tls` section, so the offset of a variable in that section is also its offset in the copy.
+    /// The linker writes the offset into the four bytes of displacement.
+    #[must_use]
+    pub const fn section(base: Operand, symbol: Symbol) -> Self {
+        Self { symbol: Some(symbol), reach: Reach::Section, ..Self::at(base) }
+    }
+
+    /// The same address with an index register scaled by that much.
+    #[must_use]
+    pub const fn indexed(mut self, index: Operand, scale: u8) -> Self {
+        self.index = Some(index);
+        self.scale = scale;
+        self
+    }
+
+    /// The same address, that many bytes along.
+    #[must_use]
+    pub const fn plus(mut self, disp: i32) -> Self {
+        self.disp = disp;
+        self
+    }
+}
+
+/// How often something happens, next to once for every time the function is entered.
+///
+/// Ten thousand is once, which is the scale the block frequencies in `rucc_opt` are worked out
+/// in. The numbers here are those carried down rather than worked out again: by the time the
+/// blocks are laid out the loops the frequency came from are branches and there is nothing left
+/// to work one out from.
+///
+/// Nothing keeps these in step with the graph afterwards. A pass that makes a block says how
+/// often the block runs, and a pass that does not is one whose new blocks run as often as the
+/// function does, which is what [`Weight::ONCE`] is and is the only answer available to something
+/// that was never told. They are a layout heuristic, nothing reads them for anything a wrong
+/// answer could make incorrect, and the worst a stale one costs is a jump where a fall-through
+/// would have done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Weight(u64);
+
+impl Weight {
+    /// The scale: how many parts one run of the function is divided into.
+    ///
+    /// Ten thousand rather than one, because a block inside three conditionals runs a fraction of
+    /// a time per call and a fraction is not an integer. It is the same scale `rucc_opt` uses,
+    /// which is what makes carrying a frequency down here a copy rather than a conversion.
+    pub const SCALE: u64 = 10_000;
+
+    /// Once for every time the function is entered.
+    pub const ONCE: Self = Self(Self::SCALE);
+
+    /// Never.
+    pub const NEVER: Self = Self(0);
+
+    /// That many parts of [`Weight::SCALE`].
+    #[must_use]
+    pub const fn parts(parts: u64) -> Self {
+        Self(parts)
+    }
+
+    /// How many parts of [`Weight::SCALE`] it is.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// What fraction of `whole` this is, in parts of [`Weight::SCALE`].
+    ///
+    /// A whole of nothing answers nothing, since a block that never runs has no arm that is taken
+    /// more often than any other and the question has no answer rather than an arbitrary one.
+    #[must_use]
+    pub const fn out_of(self, whole: Self) -> u64 {
+        if whole.0 == 0 {
+            return 0;
+        }
+        // Saturating rather than wrapping, for the same reason a frequency saturates: a nest of
+        // loops multiplies, and a number that wrapped would read as cold where it is hottest.
+        match self.0.checked_mul(Self::SCALE) {
+            Some(scaled) => scaled / whole.0,
+            None => (self.0 / whole.0).saturating_mul(Self::SCALE),
+        }
+    }
+}
+
+impl Default for Weight {
+    /// Once, which is what a block nobody worked a number out for runs as often as.
+    fn default() -> Self {
+        Self::ONCE
+    }
+}
+
+/// One arm of a terminator: where it goes, and what it takes with it.
+///
+/// The arguments are the values the target block's parameters arrive as, so this is the edge on
+/// which a phi would otherwise sit. After allocation the parameters are physical registers and
+/// these arguments have become the moves that write them, which is the point at which MIR stops
+/// being in SSA form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockCall {
+    /// The block it goes to.
+    pub block: Block,
+    /// What its parameters arrive as, one for one.
+    pub args: Vec<Reg>,
+    /// How often the edge is taken, next to how often the function is entered. See [`Weight`].
+    pub weight: Weight,
+}
+
+impl BlockCall {
+    /// A jump to that block carrying nothing.
+    #[must_use]
+    pub const fn to(block: Block) -> Self {
+        Self { block, args: Vec::new(), weight: Weight::ONCE }
+    }
+
+    /// A jump to that block carrying those registers.
+    #[must_use]
+    pub fn with(block: Block, args: Vec<Reg>) -> Self {
+        Self { block, args, weight: Weight::ONCE }
+    }
+
+    /// The same arm, taken that often.
+    #[must_use]
+    pub fn taken(mut self, weight: Weight) -> Self {
+        self.weight = weight;
+        self
+    }
+}
+
+/// One parameter of a block: the register the value arrives in, and its class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Param {
+    /// What the value arrives as, virtual until the allocator has run.
+    pub reg: Reg,
+    /// The class it is drawn from.
+    pub class: RegClass,
+}
+
+/// What is true of an instruction besides what its operands say.
+///
+/// One flag, and a set rather than a `bool` because the thing it is the first of is a class: a
+/// fact the front end knew about an access, which selection has to carry down because no pass
+/// below can work it out again. A second `bool` on the row every pass walks is how a struct
+/// turns into a bag, and a second bit here is free.
+///
+/// Empty on every instruction the machine writes for itself, which is most of them. A prologue,
+/// a spill, a jump and the move the allocator writes to put a value where the machine wants it
+/// were all asked for by this compiler rather than by the program, so there is nothing the
+/// program said about them to carry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Flags(u8);
+
+impl Flags {
+    /// Nothing besides what the operands say.
+    pub const NONE: Self = Self(0);
+
+    /// The access happens exactly once, and is never moved or merged with another.
+    ///
+    /// `rucc_ir::Flags::VOLATILE` on the load or the store this instruction was selected from.
+    /// Every pass above selection reads that flag, and until it was carried down here the
+    /// instruction that reached the machine level passes was the same instruction whether the
+    /// program had written `volatile` or not, so a pass that merges two accesses merged these
+    /// as well. See [`InstData::flags`] and tamnd/rucc#1302.
+    pub const VOLATILE: Self = Self(1);
+
+    /// The instruction reads its two sources either way round.
+    ///
+    /// The one flag the program has nothing to do with. The target knows which of its two address
+    /// instructions commute, and the allocator needs to know it of the instruction in front of it
+    /// to write the answer over the second source when the first is still wanted. It is set just
+    /// before allocation, so no pass above that has to carry it. See tamnd/rucc#1895.
+    pub const COMMUTES: Self = Self(2);
+
+    /// A call to a name goes through the procedure linkage table, which the listing says with
+    /// `@PLT` after the name. i386 position independent code is the one place it is written: the
+    /// entry a shared object's table has for a name jumps through the global offset table from the
+    /// address in `%ebx`, so the call also reads the table's address there, and nothing else can
+    /// tell the assembler which relocation to write. See tamnd/rucc#2247.
+    pub const PLT: Self = Self(4);
+
+    /// A call that can come back by an indirect jump rather than a `ret`, which is one to a
+    /// `returns_twice` function or one of an `__attribute__((indirect_return))` type. Under
+    /// `-fcf-protection=branch` the code generator writes a landing pad right after it, where the
+    /// jump lands.
+    pub const LANDS: Self = Self(8);
+
+    /// The instruction was written in an `asm` statement's template rather than chosen by this
+    /// compiler. It reads and writes what the template says it does, and a pass that rewrites one
+    /// instruction into another that does the same work would still be writing an instruction the
+    /// program did not ask for, which a test or a reader of the listing will not find where they
+    /// put it.
+    pub const TEMPLATE: Self = Self(16);
+
+    /// Both of them at once.
+    #[must_use]
+    pub const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every flag in the other one is in this one. True of [`Self::NONE`] always, since
+    /// there is nothing in it to be missing.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether nothing is set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl fmt::Display for Flags {
+    /// Each flag with a space in front of it, so that it reads as written after the opcode and
+    /// prints as nothing at all when there is nothing set. The same arrangement `rucc_ir` uses
+    /// for the flags an IR instruction carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.contains(Self::VOLATILE) {
+            f.write_str(" volatile")?;
+        }
+        if self.contains(Self::COMMUTES) {
+            f.write_str(" commutes")?;
+        }
+        if self.contains(Self::PLT) {
+            f.write_str(" plt")?;
+        }
+        if self.contains(Self::LANDS) {
+            f.write_str(" lands")?;
+        }
+        if self.contains(Self::TEMPLATE) {
+            f.write_str(" template")?;
+        }
+        Ok(())
+    }
+}
+
+/// One instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstData {
+    /// Which instruction this is.
+    pub opcode: Opcode,
+    /// Its operands, defs first and then uses, with the registers a memory operand names last.
+    /// The order is what the printer and the parser agree on, and [`crate::InstBuilder`] is
+    /// what keeps it.
+    pub operands: OperandList,
+    /// Its immediate, if it has one.
+    pub imm: Option<ImmRef>,
+    /// Its memory operand, if it has one.
+    pub mem: Option<MemRef>,
+    /// The symbol it names, which is the callee of a direct call and the target of a direct
+    /// jump to another function.
+    pub symbol: Option<Symbol>,
+    /// What the program said about it that its operands do not. See [`Flags`].
+    pub flags: Flags,
+}
+
+impl InstData {
+    /// An instruction with that opcode and nothing else.
+    #[must_use]
+    pub const fn new(opcode: Opcode) -> Self {
+        Self {
+            opcode,
+            operands: OperandList::EMPTY,
+            imm: None,
+            mem: None,
+            symbol: None,
+            flags: Flags::NONE,
+        }
+    }
+}
+
+/// Where an instruction sits: which block it is in, and what is either side of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct InstLayout {
+    pub(crate) block: Option<Block>,
+    pub(crate) prev: Option<Inst>,
+    pub(crate) next: Option<Inst>,
+}
+
+/// One block: what arrives in it, what is in it, and where it goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockData {
+    /// The values that arrive in it, which are the function's arguments in the entry block.
+    pub params: Vec<Param>,
+    /// Where its terminator goes, in the order the terminator's arms run.
+    pub succs: Vec<BlockCall>,
+    /// How often the block runs, next to how often the function is entered. See [`Weight`].
+    pub weight: Weight,
+    /// Whether control never leaves it, which is a block that ended in `unreachable` or on a stop.
+    /// Such a block has no successors, the way a block that returns has none, and this is what
+    /// tells the two apart: one that returns gets an epilogue and a `ret`, and this one gets
+    /// nothing, because nothing reaches its end.
+    pub dead_end: bool,
+    /// Whether the block is one the program is not expected to run, which is a block on the way to
+    /// a call of a function written `cold` and nowhere else. The layout puts these after the rest
+    /// of the function, in a part of their own the listing writes in `.text.unlikely`. See
+    /// [`crate::Func::cold`].
+    pub cold: bool,
+    pub(crate) first_inst: Option<Inst>,
+    pub(crate) last_inst: Option<Inst>,
+    pub(crate) prev: Option<Block>,
+    pub(crate) next: Option<Block>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_instruction_is_the_size_the_design_says() {
+        assert_eq!(size_of::<InstData>(), 28);
+        assert_eq!(size_of::<Operand>(), 8);
+    }
+
+    #[test]
+    fn a_virtual_register_is_its_own_number() {
+        let reg = Reg::virtual_reg(7);
+        assert!(reg.is_virtual());
+        assert_eq!(reg.number(), Some(7));
+        assert_eq!(reg.phys(), None);
+    }
+
+    #[test]
+    fn a_physical_register_is_not_a_virtual_one_of_the_same_number() {
+        let reg = Reg::physical(PhysReg::new(7));
+        assert!(!reg.is_virtual());
+        assert_eq!(reg.number(), None);
+        assert_eq!(reg.phys(), Some(PhysReg::new(7)));
+        assert_ne!(reg, Reg::virtual_reg(7));
+    }
+
+    #[test]
+    fn an_operand_keeps_what_it_was_constrained_to() {
+        let class = RegClass::new(0);
+        let plain = Operand::write(Reg::virtual_reg(1), class);
+        assert_eq!(plain.role, Role::Def);
+        assert_eq!(plain.constraint, Constraint::Reg);
+        let tied = plain.with(Constraint::Reuse(1));
+        assert_eq!(tied.constraint, Constraint::Reuse(1));
+        assert_eq!(tied.reg, plain.reg);
+        assert!(tied.role.is_def());
+        assert!(!Operand::read(Reg::virtual_reg(1), class).role.is_def());
+    }
+}

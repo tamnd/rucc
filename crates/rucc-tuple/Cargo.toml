@@ -1,0 +1,20 @@
+[package]
+name = "rucc-tuple"
+description = "The ten field target tuple, the target table and the tier model for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0. Nothing below it, and nothing in it that is C-specific, because a target tuple
+# is a fact about a machine rather than about a language.
+[dependencies]

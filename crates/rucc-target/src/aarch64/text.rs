@@ -1,0 +1,1585 @@
+//! What each AArch64 machine instruction is in assembly, and what it hands the encoder.
+//!
+//! Design: `spec/11-asm-objects-debug.md` section 11.1.
+//!
+//! The same arrangement as `rucc_target::x86_64::written`: an opcode is a list of instructions and
+//! each argument of each instruction names the operand it wants by index. What is different is the
+//! last step. The x86 description hands its arguments to a writer and to an encoder that each know
+//! how to spell them, and this one turns every argument into the [`Value`] the encoder takes with
+//! [`fill`], so the object writer hands the values to [`encode`](crate::aarch64::encode) and `-S`
+//! hands the same values to [`write`](crate::aarch64::write). What is printed is then what was
+//! encoded, and not only what the table says ought to be.
+//!
+//! # Operand order
+//!
+//! The order the machine reads them, destination first, which is also the order the operand vector
+//! holds them in. So an argument names its operand by index for the other reasons the x86 table
+//! gives: an instruction may name one operand twice, a choice names its two sources the other way
+//! round, and an instruction in the middle of an opcode may name none of them.
+//!
+//! # Register 31
+//!
+//! The register file numbers the stack pointer 31, and an instruction that writes 31 into a
+//! register field means the stack pointer in some places and the zero register in others. [`fill`]
+//! reads an allocated 31 as the stack pointer, since the zero register is not one the allocator
+//! hands out, and the encoder refuses the stack pointer where the machine has no way to say it.
+
+use std::sync::LazyLock;
+
+use crate::aarch64::encode::{
+    Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
+};
+use crate::aarch64::read::system_field;
+use crate::named;
+
+use Arg::{Arranged, Doubles, Lane};
+use Arg::{
+    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Lowest,
+    Mem, Near, Ones, Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Shifted, Symbol, Task, Teb,
+    Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
+};
+use Arrangement::{B16, D2, H8, S4};
+use Scalar::{B, D, H, Q, S};
+use Width::{W, X};
+
+/// One argument of one instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arg {
+    /// The general register the operand at that index was given, at that width.
+    Reg(u8, Width),
+    /// The register in the other file the operand at that index was given, at that size.
+    Fp(u8, Scalar),
+    /// All sixteen bytes of the register in the other file the operand at that index was given.
+    Vector(u8),
+    /// The same sixteen bytes as two eight byte lanes, `v0.2d`, which is how gcc writes the
+    /// `movi` that clears a vector register in front of a `ret` under `-fzero-call-used-regs=`.
+    Doubles(u8),
+    /// The sixteen bytes of the register in the other file the operand at that index was given,
+    /// as lanes of that arrangement.
+    Arranged(u8, Arrangement),
+    /// The lane of that size of the register in the other file the operand at that index was
+    /// given, the lane the instruction's constant names.
+    Lane(u8, Scalar),
+    /// The instruction's constant.
+    Imm,
+    /// A constant that is part of the opcode rather than of the instruction.
+    Lit(i64),
+    /// A shift that is part of the opcode.
+    Shift(Shift, u8),
+    /// A shift that is part of the opcode, by as much as the instruction's constant says.
+    Shifted(Shift),
+    /// Where the run of ones in the instruction's constant starts, taking that many bits of it.
+    Lowest(u32),
+    /// How many ones there are in the instruction's constant, taking that many bits of it.
+    Ones(u32),
+    /// How the register before this one is widened, as part of the opcode.
+    Extend(Extend),
+    /// A condition that is part of the opcode.
+    Cond(Cond),
+    /// A barrier option that is part of the opcode.
+    Barrier(u8),
+    /// What a `prfm` is asked to do, as the five bits the encoding gives it.
+    Prefetch(u8),
+    /// A general register that is part of the opcode rather than one the allocator chose, where
+    /// thirty one is the zero register.
+    Fixed(u8, Width),
+    /// The instruction's addressing mode.
+    Mem,
+    /// The base register of the instruction's addressing mode, as a register on its own.
+    Base,
+    /// The constant of the instruction's addressing mode, as a constant on its own.
+    Disp,
+    /// The page the instruction's symbol is on.
+    Page,
+    /// The low twelve bits of the instruction's symbol.
+    Low,
+    /// The page the global offset table slot of the instruction's symbol is on.
+    GotPage,
+    /// The global offset table slot of the instruction's symbol, reached from the page in the
+    /// register the operand at that index was given.
+    GotSlot(u8),
+    /// The page of the global offset table slot that holds the offset of the instruction's symbol
+    /// from the thread pointer.
+    TlsPage,
+    /// That slot, reached from the page in the register the operand at that index was given.
+    TlsSlot(u8),
+    /// The high twelve bits of the offset of the instruction's symbol from the thread pointer.
+    TprelHi,
+    /// The low twelve bits of the same offset.
+    TprelLo,
+    /// The instruction's symbol, read from the page in the register the operand at that index
+    /// was given, which is a load from a symbol this image defines.
+    LowSlot(u8),
+    /// That many bytes into the thread's TEB, which Windows keeps in `x18`.
+    Teb(u8),
+    /// The word the register of the first index was given plus eight times the register of the
+    /// second, which is a slot in an array of pointers.
+    Scaled(u8, u8),
+    /// Bits twelve to twenty three of the offset of the instruction's symbol in its section,
+    /// which is how far a Windows thread-local variable is into the thread's copy of `.tls`.
+    SecrelHi,
+    /// The low twelve bits of the same offset.
+    SecrelLo,
+    /// The register that holds the thread pointer.
+    Thread,
+    /// The register an arm64 kernel keeps the running task in, `sp_el0`.
+    Task,
+    /// Sixteen bytes below the stack pointer, moving the stack pointer there first.
+    Push,
+    /// The stack pointer, moving it sixteen bytes up afterwards.
+    Pop,
+    /// The instruction's symbol, as a branch or a call reaches it.
+    Symbol,
+    /// The block a branch goes to.
+    Label,
+    /// The first register the instruction reads, which is what a call through a register reads.
+    Through,
+    /// The address in the register the operand at that index was given, with nothing added, which
+    /// is the only address an acquiring or exclusive access takes.
+    At(u8),
+    /// The instruction that many places away in the same opcode, counted in instructions, which is
+    /// where a loop inside one opcode branches to. The listing writes it as a distance from `.`,
+    /// since an opcode has no label of its own to name.
+    Near(i8),
+}
+
+/// One machine instruction an opcode is written as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// The mnemonic, as GNU as reads it.
+    pub mnemonic: &'static str,
+    /// The arguments, in the order GNU as reads them.
+    pub args: &'static [Arg],
+}
+
+const fn spell(mnemonic: &'static str, args: &'static [Arg]) -> Written {
+    Written { mnemonic, args }
+}
+
+static TEXT: &[(&str, &[Written])] = &[
+    // Constants. A constant that is not one `mov` writes is a `mov` of one sixteen bit piece and a
+    // `movk` for each piece after it.
+    ("mov_ri_32", &[spell("mov", &[Reg(0, W), Imm])]),
+    ("mov_ri_64", &[spell("mov", &[Reg(0, X), Imm])]),
+    ("movk_ri_16_32", &[spell("movk", &[Reg(0, W), Imm, Arg::Shift(Shift::Lsl, 16)])]),
+    ("movk_ri_16_64", &[spell("movk", &[Reg(0, X), Imm, Arg::Shift(Shift::Lsl, 16)])]),
+    ("movk_ri_32_64", &[spell("movk", &[Reg(0, X), Imm, Arg::Shift(Shift::Lsl, 32)])]),
+    ("movk_ri_48_64", &[spell("movk", &[Reg(0, X), Imm, Arg::Shift(Shift::Lsl, 48)])]),
+    // Copies.
+    ("mov_rr_32", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("mov_rr_64", &[spell("mov", &[Reg(0, X), Reg(1, X)])]),
+    // Arithmetic on two registers.
+    ("add_rr_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("add_rr_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("sub_rr_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("sub_rr_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("and_rr_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("and_rr_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("orr_rr_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("orr_rr_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("eor_rr_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("eor_rr_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("bic_rr_32", &[spell("bic", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("bic_rr_64", &[spell("bic", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("orn_rr_32", &[spell("orn", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("orn_rr_64", &[spell("orn", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("mul_rr_32", &[spell("mul", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("mul_rr_64", &[spell("mul", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("sdiv_rr_32", &[spell("sdiv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("sdiv_rr_64", &[spell("sdiv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("udiv_rr_32", &[spell("udiv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("udiv_rr_64", &[spell("udiv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsl_rr_32", &[spell("lslv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("lsl_rr_64", &[spell("lslv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsr_rr_32", &[spell("lsrv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("lsr_rr_64", &[spell("lsrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("asr_rr_32", &[spell("asrv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("asr_rr_64", &[spell("asrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("ror_rr_32", &[spell("rorv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
+    ("ror_rr_64", &[spell("rorv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsl_rw_64", &[spell("lslv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsr_rw_64", &[spell("lsrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("asr_rw_64", &[spell("asrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("smulh_rr_64", &[spell("smulh", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("umulh_rr_64", &[spell("umulh", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    // Arithmetic on a register and a constant. The constant is one the instruction can hold, which
+    // for `add` and `sub` is twelve bits and for the three logical operations is a bitmask.
+    ("add_ri_32", &[spell("add", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("add_ri_64", &[spell("add", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("sub_ri_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("sub_ri_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("and_ri_32", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("and_ri_64", &[spell("and", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("orr_ri_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("orr_ri_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("eor_ri_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("eor_ri_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("lsl_ri_32", &[spell("lsl", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("lsl_ri_64", &[spell("lsl", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("lsr_ri_32", &[spell("lsr", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("lsr_ri_64", &[spell("lsr", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("asr_ri_32", &[spell("asr", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("asr_ri_64", &[spell("asr", &[Reg(0, X), Reg(1, X), Imm])]),
+    // A right shift of a byte or a half, which widens it first because the bits above it in the
+    // register are not known.
+    (
+        "lsr_ri_8",
+        &[spell("uxtb", &[Reg(0, W), Reg(1, W)]), spell("lsr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "lsr_ri_16",
+        &[spell("uxth", &[Reg(0, W), Reg(1, W)]), spell("lsr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "asr_ri_8",
+        &[spell("sxtb", &[Reg(0, W), Reg(1, W)]), spell("asr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "asr_ri_16",
+        &[spell("sxth", &[Reg(0, W), Reg(1, W)]), spell("asr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    ("ror_ri_32", &[spell("ror", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("ror_ri_64", &[spell("ror", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("add_lsl_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("add_lsl_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("add_lsr_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("add_lsr_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("add_asr_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("add_asr_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("sub_lsl_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("sub_lsl_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("sub_lsr_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("sub_lsr_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("sub_asr_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("sub_asr_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("and_lsl_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("and_lsl_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("and_lsr_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("and_lsr_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("and_asr_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("and_asr_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("orr_lsl_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("orr_lsl_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("orr_lsr_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("orr_lsr_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("orr_asr_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("orr_asr_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("eor_lsl_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("eor_lsl_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("eor_lsr_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("eor_lsr_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("eor_asr_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("eor_asr_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    // Multiply and add, and multiply and subtract, which is how a remainder is taken: the quotient
+    // times the divisor, subtracted from the dividend.
+    ("madd_rrr_32", &[spell("madd", &[Reg(0, W), Reg(1, W), Reg(2, W), Reg(3, W)])]),
+    ("madd_rrr_64", &[spell("madd", &[Reg(0, X), Reg(1, X), Reg(2, X), Reg(3, X)])]),
+    ("msub_rrr_32", &[spell("msub", &[Reg(0, W), Reg(1, W), Reg(2, W), Reg(3, W)])]),
+    ("msub_rrr_64", &[spell("msub", &[Reg(0, X), Reg(1, X), Reg(2, X), Reg(3, X)])]),
+    // One register to one register.
+    ("neg_r_32", &[spell("neg", &[Reg(0, W), Reg(1, W)])]),
+    ("neg_r_64", &[spell("neg", &[Reg(0, X), Reg(1, X)])]),
+    ("mvn_r_32", &[spell("mvn", &[Reg(0, W), Reg(1, W)])]),
+    ("mvn_r_64", &[spell("mvn", &[Reg(0, X), Reg(1, X)])]),
+    ("clz_r_32", &[spell("clz", &[Reg(0, W), Reg(1, W)])]),
+    ("clz_r_64", &[spell("clz", &[Reg(0, X), Reg(1, X)])]),
+    ("rbit_r_32", &[spell("rbit", &[Reg(0, W), Reg(1, W)])]),
+    ("rbit_r_64", &[spell("rbit", &[Reg(0, X), Reg(1, X)])]),
+    ("rev_r_32", &[spell("rev", &[Reg(0, W), Reg(1, W)])]),
+    ("rev_r_64", &[spell("rev", &[Reg(0, X), Reg(1, X)])]),
+    ("rev16_r_32", &[spell("rev16", &[Reg(0, W), Reg(1, W)])]),
+    // The set bits, counted a byte at a time in a vector register and added across it. The move
+    // in clears the rest of the vector register, so counting all sixteen bytes counts only the
+    // source, and the sum is at most sixty four, so the move back of the low word is the count.
+    (
+        "cnt_32",
+        &[
+            spell("fmov", &[Fp(1, S), Reg(2, W)]),
+            spell("cnt", &[Vector(1), Vector(1)]),
+            spell("addv", &[Fp(1, B), Vector(1)]),
+            spell("fmov", &[Reg(0, W), Fp(1, S)]),
+        ],
+    ),
+    (
+        "cnt_64",
+        &[
+            spell("fmov", &[Fp(1, D), Reg(2, X)]),
+            spell("cnt", &[Vector(1), Vector(1)]),
+            spell("addv", &[Fp(1, B), Vector(1)]),
+            spell("fmov", &[Reg(0, W), Fp(1, S)]),
+        ],
+    ),
+    // Widening. Each reads the low bits of its source and agrees with it about every one of them,
+    // which is what `copies_low` asks.
+    // A value of eight or sixteen bits lives in a W register, so widening to sixteen bits is the
+    // thirty two bit instruction under a head that says how much of it the result is.
+    ("sxtb_16", &[spell("sxtb", &[Reg(0, W), Reg(1, W)])]),
+    ("sxtb_32", &[spell("sxtb", &[Reg(0, W), Reg(1, W)])]),
+    ("sxtb_64", &[spell("sxtb", &[Reg(0, X), Reg(1, W)])]),
+    ("sxth_32", &[spell("sxth", &[Reg(0, W), Reg(1, W)])]),
+    ("sxth_64", &[spell("sxth", &[Reg(0, X), Reg(1, W)])]),
+    ("uxtb_16", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
+    ("uxtb_32", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
+    // Writing a W register clears the top half of the X register, so the widening to sixty four
+    // bits is the thirty two bit instruction under a head that says so.
+    ("uxtb_64", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
+    ("uxth_32", &[spell("uxth", &[Reg(0, W), Reg(1, W)])]),
+    ("uxth_64", &[spell("uxth", &[Reg(0, W), Reg(1, W)])]),
+    ("sxtw_64", &[spell("sxtw", &[Reg(0, X), Reg(1, W)])]),
+    ("uxtw_64", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("bit_to_8", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_16", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_32", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_64", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("low_8", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("low_16", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("low_32", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("bit_of_32", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("bit_of_64", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("ubfx_32", &[spell("ubfx", &[Reg(0, W), Reg(1, W), Lowest(32), Ones(32)])]),
+    ("ubfx_64", &[spell("ubfx", &[Reg(0, X), Reg(1, X), Lowest(64), Ones(64)])]),
+    ("bit_at_32", &[spell("ubfx", &[Reg(0, W), Reg(1, W), Lowest(32), Lit(1)])]),
+    ("bit_at_64", &[spell("ubfx", &[Reg(0, X), Reg(1, X), Lowest(64), Lit(1)])]),
+    // Comparisons that keep nothing but the condition state, which is what a branch on one is
+    // folded into.
+    ("cmp_rr_32", &[spell("cmp", &[Reg(0, W), Reg(1, W)])]),
+    ("cmp_ri_32", &[spell("cmp", &[Reg(0, W), Imm])]),
+    ("test_32", &[spell("cmp", &[Reg(0, W), Lit(0)])]),
+    ("cmp_rr_64", &[spell("cmp", &[Reg(0, X), Reg(1, X)])]),
+    ("cmp_ri_64", &[spell("cmp", &[Reg(0, X), Imm])]),
+    ("test_64", &[spell("cmp", &[Reg(0, X), Lit(0)])]),
+    ("tst_ri_32", &[spell("tst", &[Reg(0, W), Imm])]),
+    ("tst_ri_64", &[spell("tst", &[Reg(0, X), Imm])]),
+    // Comparisons that keep the answer, which is `cset` after the comparison.
+    (
+        "cmp_set_eq_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "cmp_set_eq_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "cmp_set_ne_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "cmp_set_ne_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "cmp_set_lt_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "cmp_set_lt_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "cmp_set_le_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "cmp_set_le_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "cmp_set_gt_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "cmp_set_gt_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "cmp_set_ge_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    (
+        "cmp_set_ge_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    (
+        "cmp_set_lo_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])],
+    ),
+    (
+        "cmp_set_lo_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])],
+    ),
+    (
+        "cmp_set_ls_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "cmp_set_ls_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "cmp_set_hi_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "cmp_set_hi_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "cmp_set_hs_32",
+        &[spell("cmp", &[Reg(1, W), Reg(2, W)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])],
+    ),
+    (
+        "cmp_set_hs_64",
+        &[spell("cmp", &[Reg(1, X), Reg(2, X)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])],
+    ),
+    (
+        "cmp_set_eq_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "cmp_set_eq_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "cmp_set_ne_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "cmp_set_ne_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "cmp_set_lt_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "cmp_set_lt_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "cmp_set_le_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "cmp_set_le_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "cmp_set_gt_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "cmp_set_gt_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "cmp_set_ge_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    (
+        "cmp_set_ge_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    (
+        "cmp_set_lo_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])],
+    ),
+    (
+        "cmp_set_lo_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])],
+    ),
+    (
+        "cmp_set_ls_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "cmp_set_ls_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "cmp_set_hi_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "cmp_set_hi_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "cmp_set_hs_ri_32",
+        &[spell("cmp", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])],
+    ),
+    (
+        "cmp_set_hs_ri_64",
+        &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])],
+    ),
+    (
+        "tst_set_eq_ri_32",
+        &[spell("tst", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "tst_set_eq_ri_64",
+        &[spell("tst", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "tst_set_ne_ri_32",
+        &[spell("tst", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "tst_set_ne_ri_64",
+        &[spell("tst", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    // A choice on a byte, which is the second source when the byte is not zero and the first when
+    // it is, and the same choice straight off a condition some comparison left.
+    (
+        "sel_32",
+        &[
+            spell("cmp", &[Reg(3, W), Lit(0)]),
+            spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Ne)]),
+        ],
+    ),
+    (
+        "sel_64",
+        &[
+            spell("cmp", &[Reg(3, W), Lit(0)]),
+            spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Ne)]),
+        ],
+    ),
+    ("csel_eq_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Eq)])]),
+    ("csel_eq_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Eq)])]),
+    ("csel_ne_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Ne)])]),
+    ("csel_ne_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Ne)])]),
+    ("csel_lt_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Lt)])]),
+    ("csel_lt_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Lt)])]),
+    ("csel_le_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Le)])]),
+    ("csel_le_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Le)])]),
+    ("csel_gt_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Gt)])]),
+    ("csel_gt_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Gt)])]),
+    ("csel_ge_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Ge)])]),
+    ("csel_ge_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Ge)])]),
+    ("csel_lo_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Lo)])]),
+    ("csel_lo_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Lo)])]),
+    ("csel_ls_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Ls)])]),
+    ("csel_ls_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Ls)])]),
+    ("csel_hi_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Hi)])]),
+    ("csel_hi_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Hi)])]),
+    ("csel_hs_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Hs)])]),
+    ("csel_hs_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Hs)])]),
+    ("cset_eq", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])]),
+    ("cset_ne", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])]),
+    ("cset_lt", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])]),
+    ("cset_le", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])]),
+    ("cset_gt", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])]),
+    ("cset_ge", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])]),
+    ("cset_lo", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])]),
+    ("cset_ls", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])]),
+    ("cset_hi", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])]),
+    ("cset_hs", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])]),
+    ("cset_mi", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)])]),
+    // Addresses. A base and a constant is one `add`, and a symbol is the page it is on and then the
+    // offset into that page.
+    ("lea_64", &[spell("add", &[Reg(0, X), Base, Disp])]),
+    ("addr_64", &[spell("adrp", &[Reg(0, X), Page]), spell("add", &[Reg(0, X), Reg(0, X), Low])]),
+    ("page_64", &[spell("adrp", &[Reg(0, X), Page])]),
+    ("adr_64", &[spell("adr", &[Reg(0, X), Symbol])]),
+    ("got_64", &[spell("adrp", &[Reg(0, X), GotPage]), spell("ldr", &[Reg(0, X), GotSlot(0)])]),
+    // A pointer this image holds, which is where COFF keeps the address of a name a DLL or
+    // another object may define. The symbol is the pointer rather than the name it points to.
+    ("slot_64", &[spell("adrp", &[Reg(0, X), Page]), spell("ldr", &[Reg(0, X), LowSlot(0)])]),
+    // A thread-local variable's offset from the thread pointer sits in a slot of the global offset
+    // table the link fills in, and the thread pointer is read on its own. Adding the two is the
+    // initial exec model, which works in a shared library as well as in the program.
+    (
+        "gottprel_64",
+        &[spell("adrp", &[Reg(0, X), TlsPage]), spell("ldr", &[Reg(0, X), TlsSlot(0)])],
+    ),
+    ("thread_64", &[spell("mrs", &[Reg(0, X), Thread])]),
+    ("sp_el0_64", &[spell("mrs", &[Reg(0, X), Task])]),
+    // Windows. A thread-local variable is in this thread's copy of the image's `.tls` section, the
+    // copy is the slot `_tls_index` names in the array the TEB holds at 88, and the variable is as
+    // far into the copy as it is into the section. The three are the six instructions clang
+    // writes, split where a register is handed from one to the next.
+    ("ldr_sym_32", &[spell("adrp", &[Reg(0, X), Page]), spell("ldr", &[Reg(0, W), LowSlot(0)])]),
+    ("teb_64", &[spell("ldr", &[Reg(0, X), Teb(88)])]),
+    (
+        "secrel_64",
+        &[
+            spell("ldr", &[Reg(0, X), Scaled(1, 2)]),
+            spell("add", &[Reg(0, X), Reg(0, X), SecrelHi, Arg::Shift(Shift::Lsl, 12)]),
+            spell("add", &[Reg(0, X), Reg(0, X), SecrelLo]),
+        ],
+    ),
+    (
+        "tls_64",
+        &[
+            spell("mrs", &[Reg(0, X), Thread]),
+            spell("add", &[Reg(0, X), Reg(0, X), TprelHi, Arg::Shift(Shift::Lsl, 12)]),
+            spell("add", &[Reg(0, X), Reg(0, X), TprelLo]),
+        ],
+    ),
+    // Loads, which write a whole register whatever they read.
+    ("ldr_8", &[spell("ldrb", &[Reg(0, W), Mem])]),
+    ("ldr_16", &[spell("ldrh", &[Reg(0, W), Mem])]),
+    ("ldr_32", &[spell("ldr", &[Reg(0, W), Mem])]),
+    ("ldr_64", &[spell("ldr", &[Reg(0, X), Mem])]),
+    ("ldrs_8_32", &[spell("ldrsb", &[Reg(0, W), Mem])]),
+    ("ldrs_8_64", &[spell("ldrsb", &[Reg(0, X), Mem])]),
+    ("ldrs_16_32", &[spell("ldrsh", &[Reg(0, W), Mem])]),
+    ("ldrs_16_64", &[spell("ldrsh", &[Reg(0, X), Mem])]),
+    ("ldrs_32_64", &[spell("ldrsw", &[Reg(0, X), Mem])]),
+    ("ldr_bit", &[spell("ldrb", &[Reg(0, W), Mem])]),
+    ("str_bit", &[spell("strb", &[Reg(0, W), Mem])]),
+    // Stores.
+    ("str_8", &[spell("strb", &[Reg(0, W), Mem])]),
+    ("str_16", &[spell("strh", &[Reg(0, W), Mem])]),
+    ("str_32", &[spell("str", &[Reg(0, W), Mem])]),
+    ("str_64", &[spell("str", &[Reg(0, X), Mem])]),
+    ("ldp_32", &[spell("ldp", &[Reg(0, W), Reg(1, W), Mem])]),
+    ("ldp_64", &[spell("ldp", &[Reg(0, X), Reg(1, X), Mem])]),
+    ("stp_32", &[spell("stp", &[Reg(0, W), Reg(1, W), Mem])]),
+    ("stp_64", &[spell("stp", &[Reg(0, X), Reg(1, X), Mem])]),
+    // Loads and stores of the other register file.
+    ("ldr_f16", &[spell("ldr", &[Fp(0, H), Mem])]),
+    ("ldr_f32", &[spell("ldr", &[Fp(0, S), Mem])]),
+    ("ldr_f64", &[spell("ldr", &[Fp(0, D), Mem])]),
+    ("ldr_f128", &[spell("ldr", &[Fp(0, Q), Mem])]),
+    ("str_f16", &[spell("str", &[Fp(0, H), Mem])]),
+    ("str_f32", &[spell("str", &[Fp(0, S), Mem])]),
+    ("str_f64", &[spell("str", &[Fp(0, D), Mem])]),
+    ("str_f128", &[spell("str", &[Fp(0, Q), Mem])]),
+    ("ldp_f32", &[spell("ldp", &[Fp(0, S), Fp(1, S), Mem])]),
+    ("ldp_f64", &[spell("ldp", &[Fp(0, D), Fp(1, D), Mem])]),
+    ("ldp_f128", &[spell("ldp", &[Fp(0, Q), Fp(1, Q), Mem])]),
+    ("stp_f32", &[spell("stp", &[Fp(0, S), Fp(1, S), Mem])]),
+    ("stp_f64", &[spell("stp", &[Fp(0, D), Fp(1, D), Mem])]),
+    ("stp_f128", &[spell("stp", &[Fp(0, Q), Fp(1, Q), Mem])]),
+    // Floating point arithmetic.
+    ("fadd_f32", &[spell("fadd", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fadd_f64", &[spell("fadd", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fsub_f32", &[spell("fsub", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fsub_f64", &[spell("fsub", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fmul_f32", &[spell("fmul", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fmul_f64", &[spell("fmul", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fdiv_f32", &[spell("fdiv", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fdiv_f64", &[spell("fdiv", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fmadd_f32", &[spell("fmadd", &[Fp(0, S), Fp(1, S), Fp(2, S), Fp(3, S)])]),
+    ("fmadd_f64", &[spell("fmadd", &[Fp(0, D), Fp(1, D), Fp(2, D), Fp(3, D)])]),
+    ("fmin_f32", &[spell("fmin", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fmin_f64", &[spell("fmin", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fmax_f32", &[spell("fmax", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fmax_f64", &[spell("fmax", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fminnm_f32", &[spell("fminnm", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fminnm_f64", &[spell("fminnm", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fmaxnm_f32", &[spell("fmaxnm", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
+    ("fmaxnm_f64", &[spell("fmaxnm", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fneg_f32", &[spell("fneg", &[Fp(0, S), Fp(1, S)])]),
+    ("fneg_f64", &[spell("fneg", &[Fp(0, D), Fp(1, D)])]),
+    ("fabs_f32", &[spell("fabs", &[Fp(0, S), Fp(1, S)])]),
+    ("fabs_f64", &[spell("fabs", &[Fp(0, D), Fp(1, D)])]),
+    ("fsqrt_f32", &[spell("fsqrt", &[Fp(0, S), Fp(1, S)])]),
+    ("fsqrt_f64", &[spell("fsqrt", &[Fp(0, D), Fp(1, D)])]),
+    ("frintz_f32", &[spell("frintz", &[Fp(0, S), Fp(1, S)])]),
+    ("frintz_f64", &[spell("frintz", &[Fp(0, D), Fp(1, D)])]),
+    ("frintm_f32", &[spell("frintm", &[Fp(0, S), Fp(1, S)])]),
+    ("frintm_f64", &[spell("frintm", &[Fp(0, D), Fp(1, D)])]),
+    ("frintp_f32", &[spell("frintp", &[Fp(0, S), Fp(1, S)])]),
+    ("frintp_f64", &[spell("frintp", &[Fp(0, D), Fp(1, D)])]),
+    ("frinta_f32", &[spell("frinta", &[Fp(0, S), Fp(1, S)])]),
+    ("frinta_f64", &[spell("frinta", &[Fp(0, D), Fp(1, D)])]),
+    ("frintn_f32", &[spell("frintn", &[Fp(0, S), Fp(1, S)])]),
+    ("frintn_f64", &[spell("frintn", &[Fp(0, D), Fp(1, D)])]),
+    ("frintx_f32", &[spell("frintx", &[Fp(0, S), Fp(1, S)])]),
+    ("frintx_f64", &[spell("frintx", &[Fp(0, D), Fp(1, D)])]),
+    ("frinti_f32", &[spell("frinti", &[Fp(0, S), Fp(1, S)])]),
+    ("frinti_f64", &[spell("frinti", &[Fp(0, D), Fp(1, D)])]),
+    // Copies within the other register file. A 128 bit value is copied as sixteen bytes, since
+    // there is no scalar move that wide.
+    ("fmov_rr_f32", &[spell("fmov", &[Fp(0, S), Fp(1, S)])]),
+    ("fmov_rr_f64", &[spell("fmov", &[Fp(0, D), Fp(1, D)])]),
+    ("mov_rr_f128", &[spell("mov", &[Vector(0), Vector(1)])]),
+    // A vector register cleared in front of a `ret`, which `-fzero-call-used-regs=` asks for and
+    // nothing else writes. The register is read as well as written as far as the form says, which
+    // costs nothing, since the one thing writing it does so after the allocator.
+    ("movi_zero", &[spell("movi", &[Doubles(0), Lit(0)])]),
+    // Sixteen bytes of the other register file as a vector of integer lanes. The bitwise ones are
+    // written on bytes, which is how gcc writes them whatever the lanes are.
+    ("ldr_q", &[spell("ldr", &[Fp(0, Q), Mem])]),
+    ("str_q", &[spell("str", &[Fp(0, Q), Mem])]),
+    ("add_16b", &[spell("add", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("add_8h", &[spell("add", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("add_4s", &[spell("add", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("add_2d", &[spell("add", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("sub_16b", &[spell("sub", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("sub_8h", &[spell("sub", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("sub_4s", &[spell("sub", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("sub_2d", &[spell("sub", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("and_v", &[spell("and", &[Vector(0), Vector(1), Vector(2)])]),
+    ("orr_v", &[spell("orr", &[Vector(0), Vector(1), Vector(2)])]),
+    ("eor_v", &[spell("eor", &[Vector(0), Vector(1), Vector(2)])]),
+    ("not_v", &[spell("not", &[Vector(0), Vector(1)])]),
+    ("neg_16b", &[spell("neg", &[Arranged(0, B16), Arranged(1, B16)])]),
+    ("neg_8h", &[spell("neg", &[Arranged(0, H8), Arranged(1, H8)])]),
+    ("neg_4s", &[spell("neg", &[Arranged(0, S4), Arranged(1, S4)])]),
+    ("neg_2d", &[spell("neg", &[Arranged(0, D2), Arranged(1, D2)])]),
+    ("cmeq_16b", &[spell("cmeq", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmeq_8h", &[spell("cmeq", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmeq_4s", &[spell("cmeq", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmeq_2d", &[spell("cmeq", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmgt_16b", &[spell("cmgt", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmgt_8h", &[spell("cmgt", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmgt_4s", &[spell("cmgt", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmgt_2d", &[spell("cmgt", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmge_16b", &[spell("cmge", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmge_8h", &[spell("cmge", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmge_4s", &[spell("cmge", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmge_2d", &[spell("cmge", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmhi_16b", &[spell("cmhi", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmhi_8h", &[spell("cmhi", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmhi_4s", &[spell("cmhi", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmhi_2d", &[spell("cmhi", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmhs_16b", &[spell("cmhs", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmhs_8h", &[spell("cmhs", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmhs_4s", &[spell("cmhs", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmhs_2d", &[spell("cmhs", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("shl_16b", &[spell("shl", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("shl_8h", &[spell("shl", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("shl_4s", &[spell("shl", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("shl_2d", &[spell("shl", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("ushr_16b", &[spell("ushr", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("ushr_8h", &[spell("ushr", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("ushr_4s", &[spell("ushr", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("ushr_2d", &[spell("ushr", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("sshr_16b", &[spell("sshr", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("sshr_8h", &[spell("sshr", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("sshr_4s", &[spell("sshr", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("sshr_2d", &[spell("sshr", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("dup_16b", &[spell("dup", &[Arranged(0, B16), Reg(1, W)])]),
+    ("dup_8h", &[spell("dup", &[Arranged(0, H8), Reg(1, W)])]),
+    ("dup_4s", &[spell("dup", &[Arranged(0, S4), Reg(1, W)])]),
+    ("dup_2d", &[spell("dup", &[Arranged(0, D2), Reg(1, X)])]),
+    ("movi_16b", &[spell("movi", &[Vector(0), Imm])]),
+    ("umov_b", &[spell("umov", &[Reg(0, W), Lane(1, B)])]),
+    ("umov_h", &[spell("umov", &[Reg(0, W), Lane(1, H)])]),
+    ("umov_s", &[spell("umov", &[Reg(0, W), Lane(1, S)])]),
+    ("umov_d", &[spell("umov", &[Reg(0, X), Lane(1, D)])]),
+    ("ins_b", &[spell("ins", &[Lane(0, B), Reg(2, W)])]),
+    ("ins_h", &[spell("ins", &[Lane(0, H), Reg(2, W)])]),
+    ("ins_s", &[spell("ins", &[Lane(0, S), Reg(2, W)])]),
+    ("ins_d", &[spell("ins", &[Lane(0, D), Reg(2, X)])]),
+    // Between the two floating point widths.
+    ("fcvt_f64_f32", &[spell("fcvt", &[Fp(0, S), Fp(1, D)])]),
+    ("fcvt_f32_f64", &[spell("fcvt", &[Fp(0, D), Fp(1, S)])]),
+    ("fcvt_f16_f32", &[spell("fcvt", &[Fp(0, S), Fp(1, H)])]),
+    ("fcvt_f32_f16", &[spell("fcvt", &[Fp(0, H), Fp(1, S)])]),
+    ("fcvt_f16_f64", &[spell("fcvt", &[Fp(0, D), Fp(1, H)])]),
+    ("fcvt_f64_f16", &[spell("fcvt", &[Fp(0, H), Fp(1, D)])]),
+    // From an integer to a float, and back, rounding toward zero the way C does. The name is the
+    // source and then the destination.
+    ("scvtf_32_f32", &[spell("scvtf", &[Fp(0, S), Reg(1, W)])]),
+    ("scvtf_32_f64", &[spell("scvtf", &[Fp(0, D), Reg(1, W)])]),
+    ("scvtf_64_f32", &[spell("scvtf", &[Fp(0, S), Reg(1, X)])]),
+    ("scvtf_64_f64", &[spell("scvtf", &[Fp(0, D), Reg(1, X)])]),
+    ("ucvtf_32_f32", &[spell("ucvtf", &[Fp(0, S), Reg(1, W)])]),
+    ("ucvtf_32_f64", &[spell("ucvtf", &[Fp(0, D), Reg(1, W)])]),
+    ("ucvtf_64_f32", &[spell("ucvtf", &[Fp(0, S), Reg(1, X)])]),
+    ("ucvtf_64_f64", &[spell("ucvtf", &[Fp(0, D), Reg(1, X)])]),
+    ("fcvtzs_f32_32", &[spell("fcvtzs", &[Reg(0, W), Fp(1, S)])]),
+    ("fcvtzs_f32_64", &[spell("fcvtzs", &[Reg(0, X), Fp(1, S)])]),
+    ("fcvtzs_f64_32", &[spell("fcvtzs", &[Reg(0, W), Fp(1, D)])]),
+    ("fcvtzs_f64_64", &[spell("fcvtzs", &[Reg(0, X), Fp(1, D)])]),
+    ("fcvtzu_f32_32", &[spell("fcvtzu", &[Reg(0, W), Fp(1, S)])]),
+    ("fcvtzu_f32_64", &[spell("fcvtzu", &[Reg(0, X), Fp(1, S)])]),
+    ("fcvtzu_f64_32", &[spell("fcvtzu", &[Reg(0, W), Fp(1, D)])]),
+    ("fcvtzu_f64_64", &[spell("fcvtzu", &[Reg(0, X), Fp(1, D)])]),
+    // The bits of a register moved across to the other file unchanged, which is how a float
+    // constant is built and how a union is read.
+    ("fmov_to_f32", &[spell("fmov", &[Fp(0, S), Reg(1, W)])]),
+    ("fmov_to_f64", &[spell("fmov", &[Fp(0, D), Reg(1, X)])]),
+    ("fmov_from_f32", &[spell("fmov", &[Reg(0, W), Fp(1, S)])]),
+    ("fmov_from_f64", &[spell("fmov", &[Reg(0, X), Fp(1, D)])]),
+    ("fmov_to_f16", &[spell("fmov", &[Fp(0, S), Reg(1, W)])]),
+    ("fmov_from_f16", &[spell("fmov", &[Reg(0, W), Fp(1, S)])]),
+    // Floating point comparisons. The conditions are chosen so that every ordered one is false when
+    // either side is not a number and `ne` is true, which is what C asks of each of them.
+    ("fcmp_f32", &[spell("fcmp", &[Fp(0, S), Fp(1, S)])]),
+    ("fcmp_f64", &[spell("fcmp", &[Fp(0, D), Fp(1, D)])]),
+    (
+        "fcmp_set_eq_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "fcmp_set_eq_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "fcmp_set_ne_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "fcmp_set_ne_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "fcmp_set_lt_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)])],
+    ),
+    (
+        "fcmp_set_lt_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)])],
+    ),
+    (
+        "fcmp_set_le_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "fcmp_set_le_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])],
+    ),
+    (
+        "fcmp_set_gt_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "fcmp_set_gt_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])],
+    ),
+    (
+        "fcmp_set_ge_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    (
+        "fcmp_set_ge_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
+    ),
+    // After `fcmp` a NaN on either side sets C and V and clears N and Z, so `lt`, `le`, `hi` and
+    // `pl` are the unordered forms of the four orderings, `vs` is unordered and `vc` is ordered.
+    // Ordered and not equal is `mi` or `gt`, and unordered or equal is `eq` or `vs`, and each of
+    // those is a `cset` of one and a `csinc` that makes it one when the other held, as gcc does.
+    (
+        "fcmp_set_ult_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "fcmp_set_ult_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "fcmp_set_ule_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "fcmp_set_ule_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "fcmp_set_ugt_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "fcmp_set_ugt_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "fcmp_set_uge_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Pl)])],
+    ),
+    (
+        "fcmp_set_uge_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Pl)])],
+    ),
+    (
+        "fcmp_set_uno_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vs)])],
+    ),
+    (
+        "fcmp_set_uno_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vs)])],
+    ),
+    (
+        "fcmp_set_ord_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vc)])],
+    ),
+    (
+        "fcmp_set_ord_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vc)])],
+    ),
+    (
+        "fcmp_set_one_f32",
+        &[
+            spell("fcmp", &[Fp(1, S), Fp(2, S)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Le)]),
+        ],
+    ),
+    (
+        "fcmp_set_one_f64",
+        &[
+            spell("fcmp", &[Fp(1, D), Fp(2, D)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Le)]),
+        ],
+    ),
+    (
+        "fcmp_set_ueq_f32",
+        &[
+            spell("fcmp", &[Fp(1, S), Fp(2, S)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Vc)]),
+        ],
+    ),
+    (
+        "fcmp_set_ueq_f64",
+        &[
+            spell("fcmp", &[Fp(1, D), Fp(2, D)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Vc)]),
+        ],
+    ),
+    // Values arriving and leaving in the registers the convention names. None is an instruction,
+    // and each is here so the allocator knows which register the value has to be in.
+    ("ret_val_32", &[]),
+    ("ret_val_64", &[]),
+    ("ret_val_f16", &[]),
+    ("ret_val_f32", &[]),
+    ("ret_val_f64", &[]),
+    ("ret_val_f128", &[]),
+    ("ret_val2_32", &[]),
+    ("ret_val2_64", &[]),
+    ("ret_val2_f16", &[]),
+    ("ret_val2_f32", &[]),
+    ("ret_val2_f64", &[]),
+    ("ret_val2_f128", &[]),
+    ("ret_val3_f16", &[]),
+    ("ret_val3_f32", &[]),
+    ("ret_val3_f64", &[]),
+    ("ret_val3_f128", &[]),
+    ("ret_val4_f16", &[]),
+    ("ret_val4_f32", &[]),
+    ("ret_val4_f64", &[]),
+    ("ret_val4_f128", &[]),
+    ("arg_val_32", &[]),
+    ("arg_val_64", &[]),
+    ("arg_val_f16", &[]),
+    ("arg_val_f32", &[]),
+    ("arg_val_f64", &[]),
+    ("arg_val_f128", &[]),
+    ("br_cond_32", &[]),
+    // Branches, calls and the return.
+    ("b", &[spell("b", &[Label])]),
+    ("b_eq", &[spell("b.eq", &[Label])]),
+    ("b_ne", &[spell("b.ne", &[Label])]),
+    ("b_lt", &[spell("b.lt", &[Label])]),
+    ("b_le", &[spell("b.le", &[Label])]),
+    ("b_gt", &[spell("b.gt", &[Label])]),
+    ("b_ge", &[spell("b.ge", &[Label])]),
+    ("b_lo", &[spell("b.lo", &[Label])]),
+    ("b_ls", &[spell("b.ls", &[Label])]),
+    ("b_hi", &[spell("b.hi", &[Label])]),
+    ("b_hs", &[spell("b.hs", &[Label])]),
+    ("b_mi", &[spell("b.mi", &[Label])]),
+    ("b_pl", &[spell("b.pl", &[Label])]),
+    ("b_vs", &[spell("b.vs", &[Label])]),
+    ("b_vc", &[spell("b.vc", &[Label])]),
+    ("cbz_32", &[spell("cbz", &[Reg(0, W), Label])]),
+    ("cbz_64", &[spell("cbz", &[Reg(0, X), Label])]),
+    ("cbnz_32", &[spell("cbnz", &[Reg(0, W), Label])]),
+    ("cbnz_64", &[spell("cbnz", &[Reg(0, X), Label])]),
+    ("tbz_32", &[spell("tbz", &[Reg(0, W), Lowest(32), Label])]),
+    ("tbz_64", &[spell("tbz", &[Reg(0, X), Lowest(64), Label])]),
+    ("tbnz_32", &[spell("tbnz", &[Reg(0, W), Lowest(32), Label])]),
+    ("tbnz_64", &[spell("tbnz", &[Reg(0, X), Lowest(64), Label])]),
+    ("b_away", &[spell("b", &[Symbol])]),
+    ("br", &[spell("br", &[Reg(0, X)])]),
+    ("bl", &[spell("bl", &[Symbol])]),
+    ("blr", &[spell("blr", &[Through])]),
+    ("ret", &[spell("ret", &[])]),
+    // A register saved and restored sixteen bytes at a time, since the stack pointer has to stay a
+    // multiple of sixteen whenever it is used to reach memory.
+    ("push_64", &[spell("str", &[Reg(0, X), Push])]),
+    ("pop_64", &[spell("ldr", &[Reg(0, X), Pop])]),
+    ("push_pair_64", &[spell("stp", &[Reg(0, X), Reg(1, X), Push])]),
+    ("pop_pair_64", &[spell("ldp", &[Reg(0, X), Reg(1, X), Pop])]),
+    (
+        "align_sp_64",
+        &[spell("mov", &[Fixed(16, X), Reg(1, X)]), spell("and", &[Reg(0, X), Fixed(16, X), Imm])],
+    ),
+    ("probe_64", &[spell("str", &[Fixed(31, X), Mem])]),
+    // The frame taken after the ARM64 Windows `__chkstk`, whose size is counted in sixteens.
+    ("grow_16_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Arg::Shift(Shift::Lsl, 4)])]),
+    // The locality gcc 16.2.0 picks for each: nothing kept is a streaming load into the nearest
+    // cache, and one, two and three are loads kept in the third, second and first. A write is the
+    // same with `pst` for `pld`.
+    ("prefetch_nta", &[spell("prfm", &[Arg::Prefetch(0b00001), Mem])]),
+    ("prefetch_t2", &[spell("prfm", &[Arg::Prefetch(0b00100), Mem])]),
+    ("prefetch_t1", &[spell("prfm", &[Arg::Prefetch(0b00010), Mem])]),
+    ("prefetch_t0", &[spell("prfm", &[Arg::Prefetch(0b00000), Mem])]),
+    ("prefetch_w_nta", &[spell("prfm", &[Arg::Prefetch(0b10001), Mem])]),
+    ("prefetch_w_t2", &[spell("prfm", &[Arg::Prefetch(0b10100), Mem])]),
+    ("prefetch_w_t1", &[spell("prfm", &[Arg::Prefetch(0b10010), Mem])]),
+    ("prefetch_w_t0", &[spell("prfm", &[Arg::Prefetch(0b10000), Mem])]),
+    // Everything else.
+    ("nop", &[spell("nop", &[])]),
+    // Written as the hints they are, which is what clang writes, so that an assembler that was not
+    // told about pointer authentication takes them.
+    ("paciasp", &[spell("hint", &[Lit(25)])]),
+    ("autiasp", &[spell("hint", &[Lit(29)])]),
+    ("bti_c", &[spell("hint", &[Lit(34)])]),
+    ("bti_j", &[spell("hint", &[Lit(36)])]),
+    (
+        "strip_ra_64",
+        &[
+            spell("mov", &[Fixed(30, X), Reg(1, X)]),
+            spell("hint", &[Lit(7)]),
+            spell("mov", &[Reg(0, X), Fixed(30, X)]),
+        ],
+    ),
+    ("trap", &[spell("brk", &[Lit(1)])]),
+    // Never written: the epilogue `rucc_codegen::finish` puts in its place is.
+    ("eh_return", &[]),
+    ("fence", &[spell("dmb", &[Barrier(0b1011)])]),
+    ("fence_acquire", &[spell("dmb", &[Barrier(0b1001)])]),
+    // The ordered accesses, and the read modify writes as loops of an exclusive load and an
+    // exclusive store that go round again when something else wrote the address in between. Both
+    // halves of every loop acquire and release, which is right at every ordering and is what gcc
+    // 16.2.0 writes for the strongest one. The narrow widths compare the expected value as the
+    // byte or the half the load zero extended, since what is above it in the register means
+    // nothing.
+    ("ldar_8", &[spell("ldarb", &[Reg(0, W), At(1)])]),
+    ("ldar_16", &[spell("ldarh", &[Reg(0, W), At(1)])]),
+    ("ldar_32", &[spell("ldar", &[Reg(0, W), At(1)])]),
+    ("ldar_64", &[spell("ldar", &[Reg(0, X), At(1)])]),
+    ("stlr_8", &[spell("stlrb", &[Reg(0, W), At(1)])]),
+    ("stlr_16", &[spell("stlrh", &[Reg(0, W), At(1)])]),
+    ("stlr_32", &[spell("stlr", &[Reg(0, W), At(1)])]),
+    ("stlr_64", &[spell("stlr", &[Reg(0, X), At(1)])]),
+    (
+        "xchg_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(2)]),
+            spell("stlxrb", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(2)]),
+            spell("stlxrh", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(2)]),
+            spell("stlxr", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(2)]),
+            spell("stlxr", &[Reg(1, W), Reg(3, X), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xadd_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrb", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrh", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(3)]),
+            spell("add", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, X), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrb", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrh", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(3)]),
+            spell("sub", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, X), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "cmpxchg_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W), Arg::Extend(Extend::Uxtb)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxrb", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W), Arg::Extend(Extend::Uxth)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxrh", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxr", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(2)]),
+            spell("cmp", &[Reg(0, X), Reg(3, X)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxr", &[Reg(1, W), Reg(4, X), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    // Nothing from the table. The text it carries is the program's and the writer puts it down.
+    ("template", &[]),
+];
+
+/// The instructions the opcode of that name is written as.
+///
+/// `None` for a name this target does not have, and an empty slice for one that is an opcode and
+/// not an instruction, which are two different answers.
+#[must_use]
+pub fn written(name: &str) -> Option<&'static [Written]> {
+    static AT: LazyLock<named::Names<usize>> = LazyLock::new(|| named::index(TEXT));
+    AT.get(name).map(|&at| TEXT[at].1)
+}
+
+/// How many bits of the operand at that index the opcode of that name names, or `None` for all
+/// of it.
+///
+/// `None` for an operand no instruction of the opcode names as a general register, which is one
+/// in the other file, one inside an addressing mode, one of an opcode that is written as nothing,
+/// and every operand of a name this target does not have. The widest where one operand is named
+/// more than once, since that is how much of it something reads.
+///
+/// This is [`crate::BitInsts::width`] for this target, taken from the table the encoder and the
+/// listing both read, as the x86 one is.
+#[must_use]
+pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
+    let mut found: Option<u32> = None;
+    for inst in written(name)? {
+        for arg in inst.args {
+            let bits = match *arg {
+                Reg(at, width) if at == operand => width.bits(),
+                GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) if at == operand => 64,
+                Scaled(base, index) if base == operand || index == operand => 64,
+                Fp(at, _) | Vector(at) | Doubles(at) | Arranged(at, _) | Lane(at, _)
+                    if at == operand =>
+                {
+                    return None;
+                }
+                _ => continue,
+            };
+            found = Some(found.map_or(bits, |had: u32| had.max(bits)));
+        }
+    }
+    found
+}
+
+/// What an allocated instruction has that its arguments are filled in from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Operands<'a> {
+    /// The number of the register each operand was given, in the operand's own class.
+    pub regs: &'a [u8],
+    /// Where the operands the instruction reads start, which is after every one it writes.
+    pub reads: usize,
+    /// The instruction's constant, or zero for one that has none.
+    pub imm: i64,
+    /// The instruction's addressing mode, with its registers already allocated.
+    pub mem: Option<Addr>,
+}
+
+/// Why an argument could not be filled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// The argument names an operand the instruction does not have.
+    Operand(u8),
+    /// The argument is part of an addressing mode and the instruction has none.
+    Mem,
+}
+
+/// The sixteen bits `mrs` carries for `tpidr_el0`, which is where the thread pointer is.
+const TPIDR_EL0: u16 = system_field([3, 3, 13, 0, 2]);
+
+/// The sixteen bits `mrs` carries for `sp_el0`, which is where an arm64 kernel keeps the task.
+const SP_EL0: u16 = system_field([3, 0, 4, 1, 0]);
+
+/// The low `bits` of a constant, which is where a field mask of a thirty two bit register is
+/// whether or not the constant was sign extended on the way here.
+fn field(imm: i64, bits: u32) -> u64 {
+    let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    u64::from_ne_bytes(imm.to_ne_bytes()) & mask
+}
+
+/// One argument as the value [`encode`](crate::aarch64::encode) and
+/// [`write`](crate::aarch64::write) both take.
+///
+/// A symbol or a block comes back as [`Value::Symbol`] and which one it is, and where it is, is
+/// the caller's to keep: the encoder answers with the relocation that fills it in.
+///
+/// # Errors
+///
+/// When the argument names an operand or an addressing mode the instruction does not have, which
+/// is a table that disagrees with the form it is written against.
+pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
+    let reg = |at: u8| with.regs.get(usize::from(at)).copied().ok_or(Missing::Operand(at));
+    let gpr = |width: Width, number: u8| {
+        if number == 31 { Value::Sp(width) } else { Value::Gpr(width, number) }
+    };
+    Ok(match arg {
+        Reg(at, width) => gpr(width, reg(at)?),
+        Fp(at, scalar) => Value::Fp(scalar, reg(at)?),
+        Vector(at) => Value::Vector(B16, reg(at)?),
+        Doubles(at) => Value::Vector(D2, reg(at)?),
+        Arranged(at, arrangement) => Value::Vector(arrangement, reg(at)?),
+        // A lane past the last is one no instruction names, which the encoder refuses.
+        Lane(at, scalar) => {
+            Value::Element(scalar, reg(at)?, u8::try_from(with.imm).unwrap_or(u8::MAX))
+        }
+        Imm => Value::Imm(with.imm),
+        Lit(imm) => Value::Imm(imm),
+        Arg::Shift(shift, amount) => Value::Shift(shift, amount),
+        // Too far to name is a shift no instruction makes, which the encoder refuses.
+        Shifted(shift) => Value::Shift(shift, u8::try_from(with.imm).unwrap_or(u8::MAX)),
+        Lowest(bits) => Value::Imm(i64::from(field(with.imm, bits).trailing_zeros())),
+        Ones(bits) => Value::Imm(i64::from(field(with.imm, bits).count_ones())),
+        Arg::Extend(extend) => Value::Extend(extend, None),
+        Arg::Cond(cond) => Value::Cond(cond),
+        Barrier(option) => Value::Barrier(option),
+        Arg::Prefetch(operation) => Value::Prefetch(operation),
+        Fixed(number, width) => Value::Gpr(width, number),
+        Mem => Value::Mem(with.mem.ok_or(Missing::Mem)?),
+        Base => gpr(X, with.mem.ok_or(Missing::Mem)?.base),
+        Disp => match with.mem.ok_or(Missing::Mem)?.offset {
+            Offset::Imm(imm) => Value::Imm(imm),
+            _ => return Err(Missing::Mem),
+        },
+        Page | Symbol | Label | Near(_) => Value::Symbol(Operator::Plain),
+        At(at) => Value::Mem(Addr { base: reg(at)?, offset: Offset::Imm(0), mode: Mode::Offset }),
+        Low => Value::Symbol(Operator::Lo12),
+        GotPage => Value::Symbol(Operator::Got),
+        GotSlot(at) => Value::Mem(Addr {
+            base: reg(at)?,
+            offset: Offset::Symbol(Operator::GotLo12),
+            mode: Mode::Offset,
+        }),
+        TlsPage => Value::Symbol(Operator::GotTprel),
+        TlsSlot(at) => Value::Mem(Addr {
+            base: reg(at)?,
+            offset: Offset::Symbol(Operator::GotTprelLo12),
+            mode: Mode::Offset,
+        }),
+        TprelHi => Value::Symbol(Operator::TprelHi12),
+        TprelLo => Value::Symbol(Operator::TprelLo12Nc),
+        LowSlot(at) => Value::Mem(Addr {
+            base: reg(at)?,
+            offset: Offset::Symbol(Operator::Lo12),
+            mode: Mode::Offset,
+        }),
+        Teb(at) => {
+            Value::Mem(Addr { base: 18, offset: Offset::Imm(i64::from(at)), mode: Mode::Offset })
+        }
+        Scaled(base, index) => Value::Mem(Addr {
+            base: reg(base)?,
+            offset: Offset::Reg { reg: reg(index)?, extend: Extend::Uxtx, amount: Some(3) },
+            mode: Mode::Offset,
+        }),
+        SecrelHi => Value::Symbol(Operator::SecrelHi12),
+        SecrelLo => Value::Symbol(Operator::SecrelLo12),
+        Thread => Value::System(TPIDR_EL0),
+        Task => Value::System(SP_EL0),
+        Push => Value::Mem(Addr { base: 31, offset: Offset::Imm(-16), mode: Mode::Pre }),
+        Pop => Value::Mem(Addr { base: 31, offset: Offset::Imm(16), mode: Mode::Post }),
+        Through => {
+            let at = u8::try_from(with.reads).map_err(|_| Missing::Operand(u8::MAX))?;
+            gpr(X, reg(at)?)
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aarch64::insts::{Form, INSTS, form};
+    use crate::aarch64::{FPR, GPR, Spelling, encode, write};
+    use crate::operand::Role;
+
+    #[test]
+    fn every_opcode_is_described_and_written_and_nothing_else_is() {
+        for &(name, _) in INSTS {
+            assert!(written(name).is_some(), "{name} has a form and is not written");
+        }
+        for &(name, _) in TEXT {
+            assert!(form(name).is_some(), "{name} is written and has no form");
+        }
+    }
+
+    #[test]
+    fn every_argument_names_an_operand_of_the_file_it_is_written_as() {
+        for &(name, form) in INSTS {
+            let operands = form.operands();
+            for inst in written(name).unwrap() {
+                for arg in inst.args {
+                    let (at, class) = match *arg {
+                        Reg(at, _) | GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) => (at, GPR),
+                        Scaled(base, index) => {
+                            for at in [base, index] {
+                                let operand = operands.get(usize::from(at));
+                                assert_eq!(operand.map(|op| op.class), Some(GPR), "{name} {at}");
+                            }
+                            continue;
+                        }
+                        Fp(at, _) | Vector(at) | Doubles(at) | Arranged(at, _) | Lane(at, _) => {
+                            (at, FPR)
+                        }
+                        Mem | Base | Disp => {
+                            assert!(form.takes_mem(), "{name} names an address it has not got");
+                            continue;
+                        }
+                        Imm => {
+                            assert!(form.takes_imm(), "{name} names a constant it has not got");
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    let operand = operands.get(usize::from(at));
+                    assert_eq!(operand.map(|op| op.class), Some(class), "{name} operand {at}");
+                }
+            }
+        }
+    }
+
+    /// The operands an instruction of that form is filled in from in the test below: every
+    /// register a different one and none of them the stack pointer, and a constant and an address
+    /// every instruction here can hold.
+    ///
+    /// Five registers whatever the form says, because a call's operands are the arguments it
+    /// passes and those are the lowering's to add rather than the form's, and five is what the
+    /// longest of the atomic loops names.
+    fn sample(form: Form, regs: &mut Vec<u8>) -> Operands<'_> {
+        regs.clear();
+        regs.extend(1..=5);
+        let reads = form.operands().iter().take_while(|op| op.role != Role::Use).count();
+        let mem = Addr { base: 9, offset: Offset::Imm(16), mode: Mode::Offset };
+        Operands { regs, reads, imm: 1, mem: Some(mem) }
+    }
+
+    #[test]
+    fn every_instruction_every_opcode_is_written_as_is_one_the_encoder_writes() {
+        let mut wrong = Vec::new();
+        let mut regs = Vec::new();
+        for &(name, form) in INSTS {
+            let with = sample(form, &mut regs);
+            for inst in written(name).unwrap() {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, &with).unwrap()).collect();
+                if let Err(e) = encode(inst.mnemonic, &values) {
+                    wrong.push(format!(
+                        "{name}: {}: {e}",
+                        write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} do not encode:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    #[test]
+    fn every_instruction_is_the_word_gnu_as_writes_for_the_line_it_is_listed_as() {
+        let mut want = include_str!("listing.txt").lines().filter(|line| !line.starts_with('#'));
+        let mut wrong = Vec::new();
+        let mut regs = Vec::new();
+        for &(name, form) in INSTS {
+            let with = sample(form, &mut regs);
+            for inst in written(name).unwrap() {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, &with).unwrap()).collect();
+                let word = encode(inst.mnemonic, &values).unwrap().word;
+                let got = format!(
+                    "{word:08x}\t{}\t{name}",
+                    write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
+                );
+                match want.next() {
+                    Some(line) if line == got => {}
+                    line => wrong.push(format!("{got}, GNU as: {line:?}")),
+                }
+            }
+        }
+        assert_eq!(want.next(), None, "listing.txt has lines no opcode is written as");
+        assert!(wrong.is_empty(), "{} lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    fn listing(name: &str, with: &Operands<'_>) -> Vec<String> {
+        written(name)
+            .unwrap()
+            .iter()
+            .map(|inst| {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, with).unwrap()).collect();
+                write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_opcode_is_listed_as_the_instructions_a_reader_expects() {
+        let with = Operands { regs: &[0, 1, 2, 3], reads: 1, imm: 42, mem: None };
+        assert_eq!(listing("cmp_set_lt_64", &with), ["cmp x1, x2", "cset w0, lt"]);
+        assert_eq!(listing("fcmp_set_lt_f64", &with), ["fcmp d1, d2", "cset w0, mi"]);
+        assert_eq!(listing("sel_32", &with), ["cmp w3, #0", "csel w0, w2, w1, ne"]);
+        assert_eq!(listing("movk_ri_32_64", &with), ["movk x0, #42, lsl #32"]);
+        assert_eq!(listing("addr_64", &with), ["adrp x0, s", "add x0, x0, :lo12:s"]);
+        assert_eq!(listing("got_64", &with), ["adrp x0, :got:s", "ldr x0, [x0, :got_lo12:s]"]);
+        assert_eq!(listing("slot_64", &with), ["adrp x0, s", "ldr x0, [x0, :lo12:s]"]);
+        assert_eq!(
+            listing("gottprel_64", &with),
+            ["adrp x0, :gottprel:s", "ldr x0, [x0, :gottprel_lo12:s]"]
+        );
+        assert_eq!(listing("thread_64", &with), ["mrs x0, tpidr_el0"]);
+        assert_eq!(listing("sp_el0_64", &with), ["mrs x0, sp_el0"]);
+        assert_eq!(listing("ldr_sym_32", &with), ["adrp x0, s", "ldr w0, [x0, :lo12:s]"]);
+        assert_eq!(listing("teb_64", &with), ["ldr x0, [x18, #88]"]);
+        assert_eq!(
+            listing("secrel_64", &with),
+            [
+                "ldr x0, [x1, x2, lsl #3]",
+                "add x0, x0, :secrel_hi12:s, lsl #12",
+                "add x0, x0, :secrel_lo12:s"
+            ]
+        );
+        assert_eq!(
+            listing("tls_64", &with),
+            [
+                "mrs x0, tpidr_el0",
+                "add x0, x0, :tprel_hi12:s, lsl #12",
+                "add x0, x0, :tprel_lo12_nc:s"
+            ]
+        );
+        assert_eq!(listing("blr", &with), ["blr x1"]);
+        assert_eq!(listing("push_64", &with), ["str x0, [sp, #-16]!"]);
+        assert_eq!(listing("pop_64", &with), ["ldr x0, [sp], #16"]);
+        assert_eq!(listing("cset_hs", &with), ["cset w0, hs"]);
+        let sp = Addr { base: 31, offset: Offset::Imm(0), mode: Mode::Offset };
+        let touched = Operands { regs: &[], reads: 0, imm: 0, mem: Some(sp) };
+        assert_eq!(listing("probe_64", &touched), ["str xzr, [sp]"]);
+        let aligned = Operands { regs: &[31, 31], reads: 1, imm: -64, mem: None };
+        assert_eq!(listing("align_sp_64", &aligned), ["mov x16, sp", "and sp, x16, #-64"]);
+        assert!(listing("arg_val_64", &with).is_empty());
+    }
+
+    #[test]
+    fn the_stack_pointer_is_written_where_the_machine_has_a_way_to_say_it() {
+        let sp = Operands {
+            regs: &[31, 31, 9],
+            reads: 1,
+            imm: 32,
+            mem: Some(Addr { base: 31, offset: Offset::Imm(24), mode: Mode::Offset }),
+        };
+        assert_eq!(listing("add_ri_64", &sp), ["add sp, sp, #32"]);
+        assert_eq!(listing("sub_ri_64", &sp), ["sub sp, sp, #32"]);
+        assert_eq!(listing("mov_rr_64", &sp), ["mov sp, sp"]);
+        assert_eq!(listing("lea_64", &sp), ["add sp, sp, #24"]);
+        for name in ["add_ri_64", "sub_ri_64", "sub_rr_64", "mov_rr_64", "lea_64"] {
+            for inst in written(name).unwrap() {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, &sp).unwrap()).collect();
+                assert!(encode(inst.mnemonic, &values).is_ok(), "{name} with the stack pointer");
+            }
+        }
+        let load = Operands { regs: &[9], ..sp };
+        assert_eq!(listing("ldr_64", &load), ["ldr x9, [sp, #24]"]);
+        // The frame record and the way back from the frame pointer to it, which is the one address
+        // with a negative distance a prologue or epilogue hands this machine.
+        let record = Operands { regs: &[29, 30], ..sp };
+        assert_eq!(listing("push_pair_64", &record), ["stp x29, x30, [sp, #-16]!"]);
+        assert_eq!(listing("pop_pair_64", &record), ["ldp x29, x30, [sp], #16"]);
+        let back = Operands {
+            regs: &[31, 29],
+            mem: Some(Addr { base: 29, offset: Offset::Imm(-16), mode: Mode::Offset }),
+            ..sp
+        };
+        for name in ["push_pair_64", "pop_pair_64", "lea_64"] {
+            let with = if name == "lea_64" { &back } else { &record };
+            for inst in written(name).unwrap() {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, with).unwrap()).collect();
+                assert!(encode(inst.mnemonic, &values).is_ok(), "{name}");
+            }
+        }
+        assert_eq!(listing("str_f64", &load), ["str d9, [sp, #24]"]);
+    }
+
+    #[test]
+    fn the_thread_pointer_is_tpidr_el0() {
+        let line = crate::aarch64::read("mrs x0, tpidr_el0").unwrap();
+        assert_eq!(line.values[1], Value::System(TPIDR_EL0));
+    }
+}

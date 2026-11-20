@@ -1,0 +1,4840 @@
+//! The directive engine: translation phase 4 over one file's preprocessing tokens.
+//!
+//! Design: `spec/05-preprocessor.md` section 5.4.
+//!
+//! A directive is a line whose first token is `#`. That is the whole of the recognition rule,
+//! and the two halves of it are both load bearing: `#` has to be first on the line, and the
+//! line is what the lexer says it is after splices and comments have been resolved, which is
+//! why `x /*\n*/ #define F 1` really does define `F`.
+//!
+//! The part that is easy to get wrong is skipped regions. Inside `#if 0` a line beginning with
+//! `#` still has to be recognised well enough to keep the conditional nesting balanced, and it
+//! must not be diagnosed for anything else. Real code puts prose, unbalanced quotes and future
+//! syntax inside `#if 0`, and a preprocessor that reports errors from there is unusable. So
+//! skipping looks at the directive name and nothing else, and only the seven conditional
+//! directives mean anything while it is going on.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol, sym};
+use rucc_diag::{Diagnostic, FileId, SourceMap, SourceMapFull, Span};
+use rucc_gnu::Kind;
+use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
+use rucc_session::{Found, IncludeForm, PrefixMap, Preinclude};
+use rucc_target::{Env, Os, TargetInfo, Triple};
+
+use crate::cond;
+use crate::embed;
+use crate::expand::{Condition, Expander};
+use crate::include::{
+    Context, Dependency, Frame, Header, Reader, directory_of, header_from_token,
+    header_from_tokens, spelling,
+};
+use crate::macros::{Builtin, MacroDef, MacroTable, parse_define_in};
+use crate::options::{OptionsLine, TargetLines};
+use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line, kencc_cpp};
+use crate::token::Tok;
+
+/// Why a file that has already been read does not need reading again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    /// `#pragma once`, so the file is read once however many times it is named.
+    Once,
+    /// The whole file is wrapped in `#ifndef NAME`, and `NAME` is now defined, so reading it
+    /// again would produce nothing at all. This is the multiple-include optimization, and on
+    /// a real code base it is the difference between reading a header once and reading it a
+    /// few hundred times.
+    Macro(Symbol),
+}
+
+/// How far through the file the guard shape has been recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Nothing has been seen yet, so the next line may open the guard.
+    Start,
+    /// Inside the conditional the file opened with.
+    Inside(Symbol),
+    /// The conditional closed and the file has to end here for the shape to hold.
+    Closed(Symbol),
+    /// Something else was seen, so this file has no guard.
+    No,
+}
+
+/// One `#if` and everything hanging off it.
+#[derive(Debug)]
+struct Cond {
+    /// Where the `#if` was written, so an unterminated one can point at it.
+    span: Span,
+    /// Whether tokens in the branch currently open are kept. Already accounts for whether the
+    /// enclosing region was live, so [`Preprocessor::live`] only has to look at the top.
+    live: bool,
+    /// Whether some branch of this chain has been taken. A later `#elif` is not evaluated once
+    /// this is set, which is what makes `#elif 1/0` after a taken branch legal.
+    taken: bool,
+    /// Whether the enclosing region was live.
+    enclosing_live: bool,
+    /// Whether `#else` has been seen, so a second one is an error.
+    seen_else: bool,
+}
+
+/// A `#line` directive, as read and as applied to the source map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineDirective {
+    /// Where the directive is.
+    pub span: Span,
+    /// The line number the next line is to be called.
+    pub line: u32,
+    /// The file name the following lines are to be called, if one was given.
+    pub file: Option<Symbol>,
+    /// How many tokens had been emitted when this was read, which is where it sits in the
+    /// stream.
+    ///
+    /// A position is not enough to say that. A file included from here is added to the source
+    /// map after this file, so its bytes come after every byte of this one, and the token
+    /// after the `#include` is at a lower position than the tokens of the header. `-E` has to
+    /// write a marker for a `#line` where the directive was written rather than where its
+    /// bytes are, and this is what says where that is.
+    pub at: usize,
+}
+
+/// Translation phase 4 over one file.
+///
+/// Holds the macro table and the conditional stack, so a single instance processes a whole
+/// translation unit and the definitions a header makes are visible after it.
+#[derive(Debug, Default)]
+pub struct Preprocessor {
+    /// The target as the GNU matrix sees it, which is what the `__has_*` operators ask with.
+    ///
+    /// Some of gcc's answers are the target's: the 32-bit conventions and `ms_struct` are there
+    /// on x86 alone, `dllimport` on Windows alone, and `__builtin_sponentry` on AArch64 alone,
+    /// which mingw-w64's `<setjmp.h>` asks about before passing it to `_setjmp`. The rows say
+    /// where, and this says where we are. Set by [`Preprocessor::predefine`], which is where the
+    /// target arrives, and a target that is none of those places until then.
+    places: rucc_gnu::Target,
+    /// The GCC release the `__has_*` operators answer for, which is the one `-fgnuc-version=`
+    /// claims, so a name that came in a later release is one they have not heard of. Set by
+    /// [`Preprocessor::predefine`], and every release until then.
+    gnuc: Option<u32>,
+    /// What `__has_feature` and `__has_extension` read from the command line: the standard, the
+    /// sanitizers and `-pedantic-errors`. Set by [`Preprocessor::predefine`], and C99 with none
+    /// of the others until then.
+    features: rucc_gnu::Mode,
+    /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
+    /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
+    /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
+    /// [`Preprocessor::predefine`].
+    ms_pragma: bool,
+    macros: MacroTable,
+    /// What a character constant in `#if` comes to, which the target decides and
+    /// [`Preprocessor::predefine`] learns.
+    chars: cond::Chars,
+    expander: Expander,
+    diagnostics: Vec<Diagnostic>,
+    conds: Vec<Cond>,
+    lines: Vec<LineDirective>,
+    /// The files currently open, innermost last. Empty between runs.
+    stack: Vec<Frame>,
+    /// The files a line marker said were entered, innermost last, by the name in force when it
+    /// said so. This is the nesting a `2` flag claims to be leaving, and it is kept apart from
+    /// `stack` because a marker set describes a nesting the real files never had.
+    markers: Vec<String>,
+    /// Files that do not need reading again, and why. Keyed by what the file system calls the
+    /// file rather than by the name an include used, so that a header reached two ways is one
+    /// entry here.
+    seen: Map<PathBuf, Guard>,
+    /// Every file an `#include` found, in the order they were first reached.
+    ///
+    /// This is what the `-M` family reports. It is collected here rather than read off the
+    /// source map afterwards because the map holds the built in and command line macros as
+    /// files too, and because whether a header came from a system directory is something only
+    /// the search knew and the map never learns.
+    deps: Vec<Dependency>,
+    /// What is already in `deps`, by the name the file system gives the file.
+    ///
+    /// A header reached through one spelling of its path two times is one dependency, and a
+    /// header included a hundred times through the same spelling is one name in the rule.
+    ///
+    /// The key is the path as the search spelled it, which is what GCC keys its list on, and not
+    /// the file. So `"x.h"` and `"./x.h"`, or `d/a.h` and `d/e/../a.h`, are two prerequisites, as
+    /// they are in GCC. A duplicate means nothing to `make`, but kbuild's modpost makes the
+    /// `srcversion` of each module from a hash of the files the rule names, and a header named
+    /// two times is hashed two times. The kernel's trace headers reach a header a second time
+    /// through `TRACE_INCLUDE_PATH`, so with one name for each file every module that uses them
+    /// had another `srcversion` than GCC gives it. tamnd/rucc#4018.
+    ///
+    /// The key is the path as bytes and not a `PathBuf`, which compares by components and so
+    /// would make `d//a.h` and `d/./a.h` the same as `d/a.h`.
+    dep_ids: Set<OsString>,
+    /// The names `#pragma GCC poison` took away. Any later appearance of one in the file is an
+    /// error, while one a macro defined earlier writes is not, which is why this is checked
+    /// on the lines as they are read rather than on what the expander produces.
+    poisoned: Set<Symbol>,
+    /// What `#pragma GCC target` lines are in effect, which the extension macros follow. Set up
+    /// by [`Preprocessor::predefine`], which is where the unit's extensions arrive.
+    targets: TargetLines,
+    /// Where `<built-in>` is in the source map, once [`Preprocessor::predefine`] has read it.
+    ///
+    /// `-dM` asks for it, because GCC does not list `__DATE__` and `__TIME__` there, and they are
+    /// defined in that file. A program that defines one of them itself gets it listed.
+    generated: Option<Span>,
+}
+
+impl Preprocessor {
+    /// A preprocessor with an empty macro table.
+    pub fn new() -> Preprocessor {
+        Preprocessor::default()
+    }
+
+    /// The same, with `__FILE__` and `__BASE_FILE__` rewritten by `map`.
+    ///
+    /// Handed in at construction rather than set afterwards because it is fixed for the whole
+    /// translation unit: the command line cannot change its mind halfway through a file, and a
+    /// `__FILE__` that answered differently at the top of a header than at the bottom would be a
+    /// worse bug than not having the flag.
+    pub fn with_prefix_map(map: PrefixMap) -> Preprocessor {
+        Preprocessor { expander: Expander::with_prefix_map(map), ..Preprocessor::default() }
+    }
+
+    /// The macros defined so far.
+    pub fn macros(&self) -> &MacroTable {
+        &self.macros
+    }
+
+    /// The macros defined so far as `-dM` lists them. See [`crate::dump_macros`].
+    pub fn dumped(&self, interner: &Interner) -> String {
+        crate::dump::macros(&self.macros, interner, self.generated)
+    }
+
+    /// The macro table, for the driver to seed with `-D` and the predefined set.
+    pub fn macros_mut(&mut self) -> &mut MacroTable {
+        &mut self.macros
+    }
+
+    /// Everything reported so far.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Takes the diagnostics, leaving the preprocessor able to carry on.
+    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Every file an `#include` found, in the order they were first reached.
+    ///
+    /// What the `-M` family writes into a make rule. The source file itself is not in here,
+    /// since nothing included it, and the caller that knows its name puts it first.
+    pub fn dependencies(&self) -> &[Dependency] {
+        &self.deps
+    }
+
+    /// The `#line` directives seen, in the order they appeared.
+    ///
+    /// Each one is also applied, to the source map, as it is read. This is the record of them
+    /// rather than the mechanism: what a caller wants it for is reporting on the directives
+    /// themselves, and asking the map is how to find out where anything is.
+    pub fn line_directives(&self) -> &[LineDirective] {
+        &self.lines
+    }
+
+    /// Defines the predefined macro set, and then `-D` and `-U` from the command line.
+    ///
+    /// Called before [`Preprocessor::run`], because a predefined macro is a macro like any
+    /// other by the time the source file is read. The set arrives as two synthetic files
+    /// rather than as a list of definitions, so a diagnostic about one of them points at
+    /// `<built-in>` or `<command-line>` the way GCC's does, and so that `-dM` has something
+    /// to print. The reasoning is in `crate::predef`.
+    ///
+    /// # Errors
+    ///
+    /// When the source map has no room left for the two synthetic files.
+    pub fn predefine(
+        &mut self,
+        target: &TargetInfo,
+        opts: &Predef,
+        cx: &mut Context<'_>,
+    ) -> Result<(), SourceMapFull> {
+        self.places =
+            rucc_gnu::Target::new(target.tuple.arch().as_str(), target.tuple.os().as_str());
+        self.gnuc = Some(opts.gnuc.major);
+        self.features = rucc_gnu::Mode {
+            c11: opts.std.has_c11(),
+            c23: matches!(opts.std, rucc_session::Std::C23 | rucc_session::Std::C2y),
+            pedantic_errors: opts.pedantic_errors,
+            address: opts.address,
+            undefined: opts.undefined,
+        };
+        let msvc = Triple::from_tuple(target.tuple)
+            .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
+        self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
+        let x86 = target.tuple.arch().as_str() == "x86_64";
+        self.targets = TargetLines::new(x86.then_some(opts.isa));
+        let names = Names::new(cx.interner, self.gnuc);
+        self.chars = cond::Chars::of(target);
+        let text = match (opts.kencc, opts.kencc_cpp) {
+            (true, true) => kencc_cpp(opts),
+            (true, false) => String::new(),
+            (false, _) => built_in(target, opts),
+        };
+        let file = self.synthetic(BUILT_IN, text, cx, &names)?;
+        // The macros that cannot be written as a `#define` line, because what they stand for
+        // depends on where they are used. They go in after the generated file and before the
+        // command line, so that `-U__FILE__` takes one away the way it takes any other away.
+        // The origin is the start of `<built-in>`, which is where a warning about redefining
+        // one points, and which is the truthful answer to where they came from.
+        let start = cx.sources.file(file).start;
+        self.generated = Some(Span::new(start, cx.sources.file(file).end));
+        for (spelling, builtin) in Builtin::ALL {
+            let name = cx.interner.intern(spelling);
+            self.macros.define_builtin(name, builtin, Span::new(start, start));
+        }
+        let text = command_line(opts);
+        if !text.is_empty() {
+            self.synthetic(COMMAND_LINE, text, cx, &names)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a file the compiler wrote rather than one the user did.
+    fn synthetic(
+        &mut self,
+        name: &str,
+        text: String,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) -> Result<FileId, SourceMapFull> {
+        let file = cx.sources.add(name, text.into_bytes())?;
+        let mut out = Vec::new();
+        // A frame, so that the guard scan and the include depth see the same shape they see
+        // for a real file. There is no directory, because `#include "x.h"` written in a
+        // synthetic file has nowhere of its own to look.
+        let path = PathBuf::from(name);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir: None, next: 0 });
+        self.process(file, &mut out, cx, names);
+        self.stack.clear();
+        debug_assert!(out.is_empty(), "{name} is directives only and produces no tokens");
+        Ok(file)
+    }
+
+    /// Reads the files `-imacros` and `-include` named, before the source file is opened.
+    ///
+    /// Called between [`Preprocessor::predefine`] and [`Preprocessor::run`], with the tokens the
+    /// `-include` files produce going in front of the ones the source file produces. That is what
+    /// the flags mean: the definitions arrive before the first line of the source, so a header
+    /// the source has no `#include` for is nevertheless in scope throughout it.
+    ///
+    /// Every `-imacros` file is read before every `-include` file, whatever order the command line
+    /// wrote them in, which is GCC's behaviour and is measured rather than read: two command lines
+    /// with the two flags the other way round produce the same output byte for byte. The text an
+    /// `-imacros` file produces is thrown away and only its definitions are kept, which is the
+    /// whole difference between the two flags.
+    ///
+    /// Each name is looked for the way a quoted include is looked for, starting from the working
+    /// directory rather than from the directory of the source file. A source in `sub/` and a
+    /// `-include` of a header sitting beside it is an error, not a file found, because the command
+    /// line is not written in `sub/`.
+    ///
+    /// # Errors
+    ///
+    /// When the source map has no room left for the record of the flags.
+    pub fn preinclude(
+        &mut self,
+        files: &[Preinclude],
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+    ) -> Result<(), SourceMapFull> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let names = Names::new(cx.interner, self.gnuc);
+        // The flags as a file, so that a name that is not found has somewhere to point. The two
+        // spellings are the same length, which is what makes the offset of the name the length of
+        // the line so far and keeps this from needing a second pass.
+        let mut text = String::new();
+        let mut order: Vec<(usize, &Preinclude)> = Vec::new();
+        for macros_only in [true, false] {
+            for file in files.iter().filter(|f| f.macros_only == macros_only) {
+                text.push_str(if macros_only { "-imacros " } else { "-include " });
+                order.push((text.len(), file));
+                text.push_str(&file.name);
+                text.push('\n');
+            }
+        }
+        let record = cx.sources.add(COMMAND_LINE, text.into_bytes())?;
+        let start = cx.sources.file(record).start;
+        // A frame for the command line itself, so that the files below it are at the depth they
+        // would be at had the source file included them, and a `#pragma once` in one of them is
+        // not reported as a `#pragma once` in a main file.
+        let path = PathBuf::from(COMMAND_LINE);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir: None, next: 0 });
+        let here = Path::new(".");
+        for (offset, file) in order {
+            let at = Span::new(start + offset as u32, start + (offset + file.name.len()) as u32);
+            let form = IncludeForm::Quoted;
+            let found = cx.search.resolve(cx.fs, &file.name, form, Some(here), 0);
+            let Some(found) = found else {
+                let tried = cx.search.tried(&file.name, form, Some(here), 0);
+                self.not_found(&file.name, at, &tried, cx.search.missing_system());
+                continue;
+            };
+            let mut discarded = Vec::new();
+            let sink = if file.macros_only { &mut discarded } else { &mut *out };
+            self.read(found, at, sink, cx, &names);
+        }
+        self.stack.clear();
+        Ok(())
+    }
+
+    /// Runs phase 4 over `file` and everything it includes.
+    ///
+    /// The result is the tokens that survived the conditionals, with macros expanded. Nothing
+    /// is thrown away silently: an unterminated `#if` and a stray `#endif` are both reported.
+    pub fn run(&mut self, file: FileId, cx: &mut Context<'_>) -> Vec<Tok> {
+        let names = Names::new(cx.interner, self.gnuc);
+        let mut out = Vec::new();
+        let name = cx.sources.file(file).name.clone();
+        let dir = directory_of(&name);
+        // The file named on the command line was not found through the search path, so an
+        // `#include_next` written in it starts at the top rather than partway down.
+        let path = PathBuf::from(name);
+        let id = cx.fs.identity(&path);
+        self.stack.push(Frame { at: Span::DUMMY, path, id, dir, next: 0 });
+        self.process(file, &mut out, cx, &names);
+        self.stack.clear();
+        out
+    }
+
+    /// Reads one file, appending what survives to `out`.
+    fn process(&mut self, file: FileId, out: &mut Vec<Tok>, cx: &mut Context<'_>, names: &Names) {
+        // The bytes are taken out of the map by sharing rather than by borrowing, because the
+        // rest of this function needs the map back to add an included file to it.
+        let bytes = cx.sources.file(file).shared_bytes();
+        let start = cx.sources.file(file).start;
+        let mut reader = Reader::new(bytes.as_slice(), start, cx.lex);
+        let depth_on_entry = self.conds.len();
+        // Consecutive text lines are expanded as one run rather than line by line, because a
+        // function-like macro invocation may span lines. A directive is where the run ends,
+        // except one in the middle of an invocation's arguments: that is undefined behaviour,
+        // but GCC runs the directive and carries on collecting. toybox counts on it for a
+        // conditional, and the kernel for a `#define`, as nouveau's `struct_group_tagged` does
+        // with the values of the fields it holds. A definition changes what the text before
+        // the invocation means, so that much is expanded first.
+        let mut text: Vec<Tok> = Vec::new();
+        let mut body: Vec<PpToken> = Vec::new();
+        let mut scan = Scan::Start;
+
+        loop {
+            let was_live = self.live();
+            // A line in a skipped group is asked only whether it starts with `#`, so its first
+            // token is not interned.
+            let first =
+                if was_live { reader.next(cx.interner) } else { reader.next_skipped(cx.interner) };
+            if first.is_eof() {
+                break;
+            }
+            // In assembly a `#` at the start of a line also starts a comment, and a number
+            // after it is not a line marker. So a live line whose word after the `#` is not a
+            // directive this phase knows goes out as text and is expanded like any other, which
+            // is what gcc does with it. Only the word is looked at here, and it is put back for
+            // whichever branch reads the line.
+            let directive = is_directive(first)
+                && !(cx.lex.assembly && was_live && {
+                    let word = reader.next(cx.interner);
+                    reader.put_back(word);
+                    !word.is_eof()
+                        && !word.flags.has(TokenFlags::START_OF_LINE)
+                        && !is_known(ident_of(&word), names)
+                });
+            if directive {
+                body.clear();
+                let name_tok = reader.next(cx.interner);
+                let name = ident_of(&name_tok);
+                match open_invocation(&text, &self.macros) {
+                    Some(_) if is_conditional(name, names) => {}
+                    Some(at) if name == Some(names.define) || name == Some(names.undef) => {
+                        let open = text.split_off(at);
+                        self.flush(&mut text, out, cx, names);
+                        text = open;
+                    }
+                    _ => self.flush(&mut text, out, cx, names),
+                }
+                // The null directive. A line of just `#` is legal and does nothing, and there
+                // is a surprising amount of it in real headers as a visual separator.
+                if name_tok.is_eof() || name_tok.flags.has(TokenFlags::START_OF_LINE) {
+                    reader.put_back(name_tok);
+                    continue;
+                }
+                body.push(name_tok);
+                // The header name has to be scanned here or not at all: `<stdio.h>` and a run
+                // of comparisons are the same bytes, and once the line has been scanned the
+                // other way the difference is gone. Not in a skipped region, because scanning
+                // one there can report an unterminated name that nobody asked about.
+                if was_live && is_include(ident_of(&name_tok), names) {
+                    if let Some(header) = reader.header_name(cx.interner) {
+                        body.push(header);
+                    }
+                }
+                // In a skipped group only a directive that can end the group reads its line,
+                // since `#elif` may have an expression to evaluate and `#else` and `#endif` may
+                // have extra tokens to warn about. Every other one is dropped by `directive`
+                // before it looks past its name.
+                if was_live || is_alternative(name, names) || name == Some(names.endif) {
+                    reader.line(cx.interner, &mut body);
+                } else {
+                    reader.skip_line(cx.interner);
+                }
+                // The poison line itself is exempt, since naming a poisoned name again is how
+                // a second header says the same thing and gcc lets it.
+                if was_live && !self.is_poison(&body, cx.interner, names) {
+                    self.check_poisoned(&body[1..], None, cx.interner);
+                }
+                let opens =
+                    matches!(scan, Scan::Start).then(|| guard_opener(&body, names)).flatten();
+                let alternative = is_alternative(body.first().and_then(ident_of), names);
+                self.directive(&body, first.span, out, cx, names);
+                scan = match scan {
+                    // The guard has to be the first line of the file and it has to open a
+                    // conditional, which is why the depth is checked after the dispatch
+                    // rather than the directive name being trusted on its own.
+                    Scan::Start => match opens {
+                        Some(name) if self.conds.len() == depth_on_entry + 1 => Scan::Inside(name),
+                        _ => Scan::No,
+                    },
+                    Scan::Inside(name) if self.conds.len() == depth_on_entry => Scan::Closed(name),
+                    // A second branch of the guard's own conditional is a branch that has
+                    // something in it for the reader who comes back, so the file does not
+                    // produce nothing the second time and the optimization does not apply.
+                    // The depth is what tells the guard's own `#else` from one belonging to a
+                    // conditional nested inside it, which says nothing about the file.
+                    Scan::Inside(_) if alternative && self.conds.len() == depth_on_entry + 1 => {
+                        Scan::No
+                    }
+                    Scan::Inside(name) => Scan::Inside(name),
+                    Scan::Closed(_) | Scan::No => Scan::No,
+                };
+            } else {
+                body.clear();
+                if self.live() {
+                    reader.line(cx.interner, &mut body);
+                    // A run of text lines is expanded in one go, and a `_Pragma` is a directive
+                    // wearing an operator's clothes: `pop_macro` changes what the names after it
+                    // mean. So a line that spells one is expanded on its own, or the line after a
+                    // pop would go through the expander in the same batch as the line before it
+                    // and would still see the definition the pop was there to undo.
+                    let operator = self.is_pragma_operator(ident_of(&first), names)
+                        || body.iter().any(|t| self.is_pragma_operator(ident_of(t), names));
+                    if operator {
+                        self.flush(&mut text, out, cx, names);
+                    }
+                    self.check_poisoned(std::slice::from_ref(&first), None, cx.interner);
+                    self.check_poisoned(&body, None, cx.interner);
+                    text.push(Tok::new(first));
+                    text.extend(body.iter().copied().map(Tok::new));
+                    if operator {
+                        // A `_Pragma("GCC poison x")` poisons the rest of its own line too,
+                        // which was checked before the pragma had done anything.
+                        let before = self.poisoned.clone();
+                        self.flush(&mut text, out, cx, names);
+                        if self.poisoned.len() > before.len() {
+                            let line: Vec<PpToken> =
+                                std::iter::once(first).chain(body.iter().copied()).collect();
+                            let after = line
+                                .iter()
+                                .position(|t| self.is_pragma_operator(ident_of(t), names))
+                                .map_or(line.len(), |at| at + 4);
+                            self.check_poisoned(
+                                &line[after.min(line.len())..],
+                                Some(&before),
+                                cx.interner,
+                            );
+                        }
+                    }
+                } else {
+                    // A line of text in a skipped group, which nothing reads.
+                    reader.skip_line(cx.interner);
+                }
+                // A token outside the guard is a token that would be produced twice.
+                if !matches!(scan, Scan::Inside(_)) {
+                    scan = Scan::No;
+                }
+            }
+            // What the lexer complained about while reading that line. A skipped region keeps
+            // its complaints to itself, for the same reason it keeps its directives to itself.
+            let complaints = reader.take_diagnostics();
+            if was_live || self.live() {
+                self.diagnostics.extend(complaints);
+            }
+        }
+        self.flush(&mut text, out, cx, names);
+        self.diagnostics.extend(reader.take_diagnostics());
+
+        // The guard only counts if the macro really did get defined. A file that opens with
+        // `#ifndef X` and never defines `X` is a file that has to be read again.
+        if let Scan::Closed(name) = scan {
+            if self.macros.is_defined(name) {
+                if let Some(frame) = self.stack.last() {
+                    self.seen.entry(frame.id.clone()).or_insert(Guard::Macro(name));
+                }
+            }
+        }
+
+        // A file may not close a conditional it did not open. GCC reports this at the `#if`,
+        // which is the line the user has to go and look at.
+        for cond in self.conds.drain(depth_on_entry..) {
+            self.diagnostics
+                .push(Diagnostic::error("unterminated `#if`", cond.span).with_code("E0330"));
+        }
+    }
+
+    /// Whether tokens are currently being kept.
+    fn live(&self) -> bool {
+        self.conds.last().is_none_or(|c| c.live)
+    }
+
+    /// Expands a run of text lines and appends it to the output.
+    fn flush(
+        &mut self,
+        text: &mut Vec<Tok>,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.expander.set_assembly(cx.lex.assembly);
+        self.expander.set_kencc(cx.kencc);
+        let mark = out.len();
+        self.expander.expand_toks_into(text, out, &self.macros, cx.interner, cx.sources);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        // To GCC and clang the `__has_*` family are builtin macros rather than something the
+        // conditional parser knows about, so they answer in ordinary text too. After expansion
+        // and not before it, because a macro is allowed to expand to a call of one and because
+        // the operand is expanded first, which is what happens on a `#if` line as well. Nearly
+        // every run has neither that nor a pragma operator in it, and it stays where it is.
+        let special = out[mark..].iter().any(|t| {
+            t.ident().is_some_and(|n| names.has.op(n).is_some())
+                || self.is_pragma_operator(t.ident(), names)
+        });
+        if special {
+            let expanded = out.split_off(mark);
+            let expanded = self.resolve_has(expanded, cx, names, Pass::Text);
+            self.pragma_operator(expanded, out, cx.interner, names);
+        }
+    }
+
+    /// Dispatches one directive. `body` is the line after the `#`.
+    fn directive(
+        &mut self,
+        body: &[PpToken],
+        hash: Span,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        let Some(first) = body.first().copied() else {
+            return;
+        };
+        let name = ident_of(&first);
+        let rest = &body[1..];
+
+        if cx.kencc {
+            if let Some(name) = name {
+                if !self.kencc_directive(name, first.span, cx, names) {
+                    return;
+                }
+            }
+        }
+
+        // Conditionals are handled whether or not the region is live, because the nesting has
+        // to stay balanced through a skipped block.
+        if name == Some(names.r#if) {
+            let value = self.live() && self.eval(rest, hash, cx, names);
+            self.open(hash, value);
+            return;
+        }
+        if name == Some(names.ifdef) || name == Some(names.ifndef) {
+            let want = name == Some(names.ifdef);
+            let value = self.live() && self.defined_check(rest, hash, want, names);
+            self.open(hash, value);
+            return;
+        }
+        if name == Some(names.elif) || name == Some(names.elifdef) || name == Some(names.elifndef) {
+            self.elif(name, rest, hash, cx, names);
+            return;
+        }
+        if name == Some(names.r#else) {
+            self.branch_else(rest, hash);
+            return;
+        }
+        if name == Some(names.endif) {
+            self.endif(rest, hash);
+            return;
+        }
+        if !self.live() {
+            // Everything else inside a skipped region is text, not a directive. `#error` in
+            // the branch that was not taken must not fire, and `# 42 "f.c"` from another
+            // preprocessor must not be diagnosed.
+            return;
+        }
+
+        // A `#` and a number is a GNU line marker rather than a directive whose name happens to
+        // be missing, and it is what `-E` output is full of, so it is answered before anything
+        // asks what the directive is called.
+        if name.is_none() && decimal(&first, cx.interner).is_some() {
+            self.line_marker(body, hash, out.len(), cx);
+            return;
+        }
+
+        let interner = &mut *cx.interner;
+        if name == Some(names.define) {
+            // kencc has no `#` and no `##` operator. They stay in the body as text, and the
+            // parser gives an error where an expansion leaves one in the program.
+            let plain;
+            let rest = if cx.kencc {
+                plain = kencc_body(rest, interner);
+                &plain[..]
+            } else {
+                rest
+            };
+            let (def, diagnostics) = parse_define_in(rest, interner, cx.lex.assembly);
+            self.diagnostics.extend(diagnostics);
+            if let Some(def) = def {
+                if let Some(problem) = self.macros.define(def, interner) {
+                    self.diagnostics.push(problem);
+                }
+            }
+        } else if name == Some(names.undef) {
+            self.undef(rest, hash, interner);
+        } else if name == Some(names.error) || name == Some(names.warning) {
+            self.message(rest, hash, name == Some(names.error), interner);
+        } else if name == Some(names.line) {
+            self.line(rest, hash, out.len(), cx);
+        } else if name == Some(names.pragma) {
+            // `#pragma once` is answered here and does not reach the output, because it is a
+            // question about the file rather than something a later phase can act on.
+            // Everything else is passed through unchanged, which is what `-E` has to print
+            // and what a later phase looking for `#pragma pack` will read. Inventing an
+            // internal representation now, with no consumer, would only be a thing to
+            // migrate later.
+            if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
+                self.pragma_once(rest[0].span);
+            } else if !self.system_header_pragma(rest, hash, cx.sources, interner)
+                && !self.macro_stack_pragma(rest, hash, interner, names)
+                && !self.message_pragma(rest, None, interner, names)
+                && !self.poison_pragma(rest, None, interner)
+            {
+                self.options_pragma(rest, hash, interner);
+                // gcc prints a pragma it does not know only for C. For assembly it drops the
+                // line, which is what keeps `-include hidden.h` in x86's boot/compressed from
+                // putting a `#pragma GCC visibility` in front of the assembler.
+                if !cx.lex.assembly {
+                    self.pass_through(body, hash, out);
+                }
+            }
+        } else if name == Some(names.include) || name == Some(names.include_next) {
+            self.include(rest, hash, name == Some(names.include_next), out, cx, names);
+        } else if name == Some(names.embed) {
+            self.embed(rest, hash, out, cx);
+        } else if name == Some(names.ident) || name == Some(names.sccs) {
+            self.ident(&first, rest, hash, cx);
+        } else {
+            self.diagnostics.push(
+                Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
+            );
+        }
+    }
+
+    /// Checks a directive against the nine that kencc knows, which are the `mactab` of
+    /// `cc/macbody`, and says whether the directive is to be done as C does it.
+    ///
+    /// kencc has no `#if` and no `#elif`, as it leaves those to `/bin/cpp` under `-p`. A live
+    /// directive that kencc does not know gives the kencc error `unknown #: if`. A live `#if`
+    /// still opens a group, so that its `#endif` does not give a second error. While kencc skips
+    /// a group it reads only `#ifdef`, `#ifndef`, `#else` and `#endif`, so there an `#elif` does
+    /// nothing and the group stays skipped up to its `#else` or its `#endif`.
+    fn kencc_directive(&mut self, name: Symbol, at: Span, cx: &Context<'_>, names: &Names) -> bool {
+        let known = [
+            names.ifdef,
+            names.ifndef,
+            names.r#else,
+            names.line,
+            names.define,
+            names.include,
+            names.undef,
+            names.pragma,
+            names.endif,
+        ];
+        if known.contains(&name) {
+            return true;
+        }
+        let elif = name == names.elif || name == names.elifdef || name == names.elifndef;
+        if !self.live() {
+            return !elif;
+        }
+        let text = cx.interner.resolve(name);
+        self.diagnostics
+            .push(Diagnostic::error(format!("unknown #: {text}"), at).with_code("E0332"));
+        name == names.r#if
+    }
+
+    /// Answers `#pragma push_macro("X")` and `#pragma pop_macro("X")`, or says it is not one.
+    ///
+    /// These are the two pragmas that act on the macro table, so this phase is the only one that
+    /// can answer them, and like `#pragma once` they do not reach the output: gcc consumes them
+    /// and a later phase given one could not do anything with it. That is what clang's
+    /// `__clang_cuda_complex_builtins.h` needs, which pushes `__DEVICE__`, redefines it for the
+    /// file and pops it at the end.
+    ///
+    /// The `GCC` namespaced spelling is deliberately not accepted, because gcc does not accept
+    /// it either: `#pragma GCC push_macro("X")` is passed through and does nothing, and matching
+    /// that matters more than the spelling looking symmetric with the pragmas that do take it.
+    fn macro_stack_pragma(
+        &mut self,
+        rest: &[PpToken],
+        at: Span,
+        interner: &mut Interner,
+        names: &Names,
+    ) -> bool {
+        let which = match rest.first().and_then(ident_of) {
+            Some(name) if name == names.push_macro => names.push_macro,
+            Some(name) if name == names.pop_macro => names.pop_macro,
+            _ => return false,
+        };
+        let word = if which == names.push_macro { "push_macro" } else { "pop_macro" };
+        // Once the word is recognised the line is one of these whatever follows it, so a line
+        // that is not the shape is an error rather than something to pass through. gcc says the
+        // same thing, and warns about anything after the closing parenthesis the way it warns
+        // about anything after any other directive.
+        let [_, open, text, close, extra @ ..] = rest else {
+            self.invalid_pragma(word, at);
+            return true;
+        };
+        if open.punct() != Some(Punct::LParen)
+            || text.kind != PpTokenKind::StringLit
+            || close.punct() != Some(Punct::RParen)
+        {
+            self.invalid_pragma(word, at);
+            return true;
+        }
+        self.extra_tokens(extra, "#pragma");
+        // A string that does not spell one identifier names no macro, and gcc neither complains
+        // about it nor does anything with it. `push_macro("a b")` is quietly nothing, which is
+        // worth matching rather than improving on: a header that has one is a header that has
+        // been building against gcc for years.
+        let Some(name) = identifier_in(*text, interner) else {
+            return true;
+        };
+        if which == names.push_macro {
+            self.macros.push_macro(name);
+        } else {
+            self.macros.pop_macro(name);
+        }
+        true
+    }
+
+    /// Answers `#pragma GCC warning "text"` and `#pragma GCC error "text"`, or says it is not one.
+    ///
+    /// They are `#warning` and `#error` that a macro can write through `_Pragma`, which is how
+    /// glibc's `__glibc_macro_warning` warns about a deprecated macro, and like gcc this phase
+    /// says them and keeps them out of the output. The text is the string with its escapes read,
+    /// and anything after it is ignored, as gcc ignores it. Anything but a plain string literal
+    /// where the text goes is an error. The warning answers to no option, so `-Wno-cpp` leaves
+    /// it, as in gcc, while `-w` and `-Werror` do to it what they do to any warning.
+    ///
+    /// `at` is where to report a line that came out of a `_Pragma`, whose tokens point into the
+    /// string rather than at anything in the file.
+    fn message_pragma(
+        &mut self,
+        rest: &[PpToken],
+        at: Option<Span>,
+        interner: &Interner,
+        names: &Names,
+    ) -> bool {
+        let [gcc, word, after @ ..] = rest else { return false };
+        if ident_of(gcc).map(|name| interner.resolve(name)) != Some("GCC") {
+            return false;
+        }
+        let fatal = match ident_of(word) {
+            Some(name) if name == names.error => true,
+            Some(name) if name == names.warning => false,
+            _ => return false,
+        };
+        let text = after
+            .first()
+            .filter(|token| token.kind == PpTokenKind::StringLit)
+            .and_then(|token| plain_text(interner.resolve(token.value?)));
+        let span = at.unwrap_or_else(|| {
+            after.first().map_or(Span::empty_at(word.span.hi), |token| token.span)
+        });
+        let Some(text) = text else {
+            self.invalid_pragma(if fatal { "GCC error" } else { "GCC warning" }, span);
+            return true;
+        };
+        self.diagnostics.push(if fatal {
+            Diagnostic::error(text, span).with_code("E0810")
+        } else {
+            Diagnostic::warning(text, span).with_code("W0335")
+        });
+        true
+    }
+
+    /// Moves the extension macros for a `#pragma GCC target`, `push_options`, `pop_options` or
+    /// `reset_options` line, which still goes on to the parser. See `crate::options`.
+    ///
+    /// Only a line gcc reads cleanly is applied, and the parser says what is wrong with the
+    /// others, so a line that is not one is passed over without a word here. A macro the line
+    /// adds is `1`, as on the command line, and is said to have been defined at the line.
+    fn options_pragma(&mut self, rest: &[PpToken], at: Span, interner: &mut Interner) {
+        let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+        let [gcc, word, after @ ..] = rest else { return };
+        if spelled(gcc) != Some("GCC") {
+            return;
+        }
+        let line = match spelled(word) {
+            Some("push_options") if after.is_empty() => OptionsLine::Push,
+            Some("pop_options") if after.is_empty() => OptionsLine::Pop,
+            Some("reset_options") if after.is_empty() => OptionsLine::Reset,
+            Some("target") => match target_strings(after, interner) {
+                Some(strings) => OptionsLine::Target(strings),
+                None => return,
+            },
+            _ => return,
+        };
+        let Some((before, now)) = self.targets.apply(line) else { return };
+        let (was, is): (Set<String>, Set<String>) =
+            (before.macros().collect(), now.macros().collect());
+        for gone in was.difference(&is) {
+            self.macros.undef(interner.intern(gone));
+        }
+        let one = interner.intern("1");
+        for added in is.difference(&was) {
+            let body = PpToken {
+                kind: PpTokenKind::Number,
+                flags: TokenFlags::EMPTY,
+                value: Some(one),
+                span: at,
+            };
+            let def = MacroDef {
+                name: interner.intern(added),
+                function_like: false,
+                params: Vec::new(),
+                variadic: None,
+                body: vec![body],
+                span: at,
+                builtin: None,
+            };
+            // A program that defined the name itself already has something else for it, and
+            // the line's `1` replaces it the way gcc's does, without a word.
+            self.macros.undef(def.name);
+            self.macros.define(def, interner);
+        }
+    }
+
+    /// Answers `#pragma GCC system_header`, or says it is not one.
+    ///
+    /// The rest of the header it is in, from the line of the pragma, is a system header from
+    /// then on: its warnings go unsaid, a header it includes is one too, and a macro it defines
+    /// is quiet where it is used, as for a header found in a system directory. In the main file
+    /// gcc ignores it with a warning that answers to no option. Either way the line is consumed,
+    /// as gcc consumes it. What follows the word is not looked at, as there.
+    fn system_header_pragma(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        sources: &mut SourceMap,
+        interner: &Interner,
+    ) -> bool {
+        let [gcc, word, ..] = rest else { return false };
+        let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+        if spelled(gcc) != Some("GCC") || spelled(word) != Some("system_header") {
+            return false;
+        }
+        if self.stack.len() <= 1 {
+            self.diagnostics.push(
+                Diagnostic::warning(
+                    "`#pragma system_header` ignored outside include file",
+                    word.span,
+                )
+                .with_code("W0337"),
+            );
+        } else if let Some(file) = sources.lookup_file(hash.lo) {
+            sources.mark_system_from(file, hash.lo);
+        }
+        true
+    }
+
+    /// Whether a directive line is `#pragma GCC poison`.
+    fn is_poison(&self, body: &[PpToken], interner: &Interner, names: &Names) -> bool {
+        let [pragma, gcc, word, ..] = body else { return false };
+        ident_of(pragma) == Some(names.pragma) && is_poison_words(gcc, word, interner)
+    }
+
+    /// Carries out `#pragma GCC poison a b c`, or says it is not one.
+    ///
+    /// Like gcc this phase consumes the line, so it is not in what `-E` prints.
+    ///
+    /// Each name is added to the set every later line is checked against. A name that is a
+    /// macro loses its definition, with a warning, because gcc does both: a macro defined
+    /// before the poison and expanding to the name still works, and one that is the name does
+    /// not. Anything but an identifier is an error that ends the line, and the names before it
+    /// stay poisoned.
+    fn poison_pragma(&mut self, rest: &[PpToken], at: Option<Span>, interner: &Interner) -> bool {
+        let [gcc, word, names @ ..] = rest else { return false };
+        if !is_poison_words(gcc, word, interner) {
+            return false;
+        }
+        for token in names {
+            let Some(name) = ident_of(token) else {
+                self.invalid_pragma("GCC poison", at.unwrap_or(token.span));
+                return true;
+            };
+            if !self.poisoned.insert(name) {
+                continue;
+            }
+            if self.macros.undef(name).is_some() {
+                self.diagnostics.push(
+                    Diagnostic::warning(
+                        format!("poisoning existing macro `{}`", interner.resolve(name)),
+                        at.unwrap_or(token.span),
+                    )
+                    .with_code("W0336"),
+                );
+            }
+        }
+        true
+    }
+
+    /// Reports every poisoned identifier among `tokens`, leaving out names that were already
+    /// poisoned in `old` when that is given.
+    fn check_poisoned(
+        &mut self,
+        tokens: &[PpToken],
+        old: Option<&Set<Symbol>>,
+        interner: &Interner,
+    ) {
+        if self.poisoned.is_empty() {
+            return;
+        }
+        for token in tokens {
+            let Some(name) = ident_of(token) else { continue };
+            if self.poisoned.contains(&name) && !old.is_some_and(|old| old.contains(&name)) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!("attempt to use poisoned `{}`", interner.resolve(name)),
+                        token.span,
+                    )
+                    .with_code("E0811"),
+                );
+            }
+        }
+    }
+
+    fn invalid_pragma(&mut self, word: &str, at: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("invalid `#pragma {word}` directive"), at).with_code("E0672"),
+        );
+    }
+
+    /// Records that the file currently being read asked to be read only once.
+    fn pragma_once(&mut self, at: Span) {
+        // In the main file this is worth saying something about, since the file the user named
+        // is not one anything includes and the line usually means the user thought it was a
+        // header. It is still applied, because a file that includes itself is exactly where the
+        // line does work in a main file, and GCC both warns and applies it.
+        if self.stack.len() <= 1 {
+            self.diagnostics.push(
+                Diagnostic::warning("`#pragma once` in the main file", at).with_code("W0332"),
+            );
+        }
+        if let Some(frame) = self.stack.last() {
+            self.seen.insert(frame.id.clone(), Guard::Once);
+        }
+    }
+
+    /// Whether a file has already given everything it has to give.
+    fn skip(&self, id: &Path) -> bool {
+        match self.seen.get(id) {
+            Some(Guard::Once) => true,
+            Some(Guard::Macro(name)) => self.macros.is_defined(*name),
+            None => false,
+        }
+    }
+
+    /// Copies a directive line into the output, `#` included.
+    fn pass_through(&mut self, body: &[PpToken], hash: Span, out: &mut Vec<Tok>) {
+        let _ = self;
+        out.push(Tok::synthetic(
+            PpTokenKind::Punct(Punct::Hash),
+            None,
+            TokenFlags::START_OF_LINE,
+            hash,
+        ));
+        // The space between the hash and the word comes off, so that a directive written
+        // `#  pragma` inside a nest of conditionals, which is how glibc indents them, prints
+        // back as `#pragma`. gcc does the same, and the rest of the line keeps the spacing it
+        // was written with.
+        for (at, token) in body.iter().copied().enumerate() {
+            let mut token = Tok::new(token);
+            if at == 0 {
+                token.flags = token.flags.without(TokenFlags::LEADING_SPACE);
+            }
+            out.push(token);
+        }
+    }
+
+    /// Resolves an `#include` or `#include_next` and reads what it names.
+    fn include(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        is_next: bool,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        let Some(header) = self.header_of(rest, hash, cx) else {
+            return;
+        };
+        let (form, relative_to, from) = self.where_to_look(&header, is_next, cx);
+        let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
+        let Some(found) = found else {
+            if cx.generated_headers {
+                self.generated(&header.name, header.angled);
+                return;
+            }
+            let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
+            self.not_found(&header.name, hash, &tried, cx.search.missing_system());
+            return;
+        };
+        self.read(found, hash, out, cx, names);
+    }
+
+    /// Records a header that `-MG` says the build makes later.
+    ///
+    /// The name is the one the `#include` wrote, with no directory in front, as GCC writes it. An
+    /// angled name counts as a system header, so `-MM` leaves it out, as it does in GCC.
+    fn generated(&mut self, name: &str, angled: bool) {
+        if self.dep_ids.insert(OsString::from(name)) {
+            self.deps.push(Dependency { path: PathBuf::from(name), is_system: angled });
+        }
+    }
+
+    /// Reports an include of a file that is not anywhere the search looked.
+    ///
+    /// `why` is whatever the driver left on the search path about the target's own directories being
+    /// absent, which is the other half of the answer when the path is empty. It is a note rather
+    /// than the message because the message is about this include and the reason is about the
+    /// machine, and a program that includes nothing never asks.
+    fn not_found(&mut self, name: &str, at: Span, tried: &[PathBuf], why: Option<&str>) {
+        // Two ways to have looked nowhere. An absolute name is opened and not searched for,
+        // and a search path with nothing on it has nowhere to look. Saying the first when it
+        // was the second sends the reader after a path that is not there.
+        let where_looked = if tried.is_empty() && Path::new(name).is_absolute() {
+            "the name is an absolute path, so the search path was not used".to_owned()
+        } else if tried.is_empty() {
+            "the include search path is empty".to_owned()
+        } else {
+            let list: Vec<String> =
+                tried.iter().map(|d| d.to_string_lossy().into_owned()).collect();
+            format!("searched: {}", list.join(", "))
+        };
+        let mut said = Diagnostic::error(format!("`{name}` file not found"), at)
+            .with_code("E0341")
+            .note(where_looked, at);
+        if let Some(why) = why {
+            said = said.note(why, at);
+        }
+        self.diagnostics.push(said);
+    }
+
+    /// Reads the file a finished search named, appending what it produces to `out`.
+    ///
+    /// The half of an include that is about the file rather than about the directive, so that the
+    /// files `-include` and `-imacros` name go through it as well. They are includes with no
+    /// directive to parse, and everything from here down is what makes one an include: the
+    /// dependency record, the guard optimization, the depth limit and the frame.
+    fn read(
+        &mut self,
+        found: Found,
+        at: Span,
+        out: &mut Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        let id = cx.fs.identity(&found.path);
+        // Recorded before anything below can turn the include away, because every one of those
+        // refusals is about reading the file again rather than about whether the file is one
+        // this translation unit was built from. A header the guard optimization skips is still
+        // a header that, if it changed, would change the output.
+        if self.dep_ids.insert(found.path.clone().into_os_string()) {
+            let path = prerequisite(&found.path);
+            self.deps.push(Dependency { path, is_system: found.is_system });
+        }
+        // The multiple-include optimization. A file wrapped in an include guard whose macro
+        // is now defined, or one that asked for `#pragma once`, would produce nothing, so it
+        // is not opened at all. On a real code base this is the difference between reading a
+        // header once and reading it a few hundred times.
+        if self.skip(&id) {
+            return;
+        }
+        if self.stack.len() >= cx.max_include_depth as usize {
+            let mut diagnostic = Diagnostic::error("`#include` nested too deeply", at)
+                .with_code("E0342")
+                .note("a header that includes itself with no include guard is the usual cause", at);
+            if let Some(outer) = self.stack.first().filter(|f| !f.at.is_dummy()) {
+                diagnostic = diagnostic.note("the outermost include is here", outer.at);
+            }
+            self.diagnostics.push(diagnostic);
+            return;
+        }
+        let added = cx.sources.add_shared(found.name.clone(), found.bytes.clone(), Some(at));
+        let file = match added {
+            Ok(file) => file,
+            Err(full) => {
+                self.diagnostics.push(Diagnostic::error(full.to_string(), at).with_code("E0344"));
+                return;
+            }
+        };
+        // A header found in a system directory came with the machine, and so did everything it
+        // includes, however that one was found: glibc's `stdio.h` includes `bits/types.h` through
+        // a quoted include that the search answers out of the same directory it was itself found
+        // in, and a warning about the inner one is no more the project's business than one about
+        // the outer. The includer is asked about through the span of the directive rather than
+        // through a flag carried down the stack, because the map already knows which file that
+        // span is in and two answers to one question is one too many.
+        if found.is_system || cx.sources.is_system(at.lo) {
+            cx.sources.mark_system(file);
+        }
+        self.stack.push(Frame {
+            at,
+            dir: found.path.parent().map(Path::to_path_buf),
+            id,
+            path: found.path,
+            next: found.next,
+        });
+        self.process(file, out, cx, names);
+        self.stack.pop();
+    }
+
+    /// Reads an `#embed` and puts the bytes of what it names into the output.
+    fn embed(&mut self, rest: &[PpToken], hash: Span, out: &mut Vec<Tok>, cx: &mut Context<'_>) {
+        let Some((header, params)) = self.embed_line(rest, hash, cx) else {
+            return;
+        };
+        let Some(found) = self.find(&header, false, cx) else {
+            self.diagnostics.push(
+                Diagnostic::error(format!("`{}` resource not found", header.name), hash)
+                    .with_code("E0341")
+                    .note("an `#embed` resource is looked for on the include path", hash),
+            );
+            return;
+        };
+        // The bytes are not added to the source map. Nothing will ever point a diagnostic
+        // into the middle of a PNG, and adding a few megabytes of binary to the map so that
+        // it can be sliced for a caret line nobody will print is the kind of cost that only
+        // shows up on the projects this directive exists for.
+        embed::tokens(found.bytes.as_slice(), &params, hash, cx.interner, out);
+    }
+
+    /// Splits an `#embed` line into the resource it names and the parameters after it.
+    fn embed_line(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        cx: &mut Context<'_>,
+    ) -> Option<(Header, embed::Params)> {
+        if rest.is_empty() {
+            self.bad_header(hash);
+            return None;
+        }
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        // A name the lexer already made a header name of is not expanded, exactly as with
+        // `#include`. A computed one has the whole line expanded, parameters included, which
+        // is a compromise: the end of the name cannot be found without expanding, and the
+        // parameter names would have to be found before expanding to protect them. A macro
+        // called `limit` in scope at an `#embed` is not a thing worth splitting the pass for.
+        let line = if line[0].kind == PpTokenKind::HeaderName {
+            line
+        } else {
+            let expanded = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+            self.diagnostics.append(&mut self.expander.take_diagnostics());
+            expanded
+        };
+        let Some(used) = embed::header_length(&line) else {
+            self.bad_header(line.first().map_or(hash, |t| t.report_span()));
+            return None;
+        };
+        let header = if line[0].kind == PpTokenKind::HeaderName {
+            header_from_token(spelling(line[0], cx.interner))
+        } else {
+            let spellings: Vec<&str> =
+                line[..used].iter().map(|t| spelling(*t, cx.interner)).collect();
+            header_from_tokens(&spellings)
+        };
+        let Some(header) = header else {
+            self.bad_header(line[0].report_span());
+            return None;
+        };
+        let params = self.embed_params(&line[used..], hash, cx)?;
+        Some((header, params))
+    }
+
+    /// The parameter list of an `#embed`, or of the `__has_embed` that asks the same question.
+    fn embed_params(
+        &mut self,
+        line: &[Tok],
+        at: Span,
+        cx: &mut Context<'_>,
+    ) -> Option<embed::Params> {
+        let Preprocessor { expander, macros, diagnostics, chars, .. } = self;
+        let sources = &mut *cx.sources;
+        let mut expand = |toks: Vec<Tok>, interner: &mut Interner| {
+            expander.expand_toks(toks, macros, interner, sources)
+        };
+        let params = embed::parse(line, at, cx.interner, diagnostics, &mut expand, *chars);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        params
+    }
+
+    /// Where a header written in the file being read is looked for.
+    ///
+    /// `#include_next` continues from the directory after the one the current file came from,
+    /// which is what glibc and the kernel use to wrap a system header with one of the same
+    /// name. It never looks next to the current file, because that directory is not on the
+    /// path and there would be nothing to continue past.
+    ///
+    /// `__has_include` has to ask the same question the directive would, so both go through
+    /// here. A header that answers yes and then fails to be found is the one outcome that
+    /// would make the operator useless.
+    fn where_to_look(
+        &self,
+        header: &Header,
+        is_next: bool,
+        cx: &Context<'_>,
+    ) -> (IncludeForm, Option<PathBuf>, usize) {
+        let form = if header.angled { IncludeForm::Angled } else { IncludeForm::Quoted };
+        let frame = self.stack.last();
+        let from = if is_next {
+            frame.map_or(0, |f| f.next).max(cx.search.start(form))
+        } else {
+            cx.search.start(form)
+        };
+        let relative_to = if is_next { None } else { frame.and_then(|f| f.dir.clone()) };
+        (form, relative_to, from)
+    }
+
+    /// Whether a header is there, which is all `__has_include` asks.
+    fn find(&self, header: &Header, is_next: bool, cx: &Context<'_>) -> Option<Found> {
+        let (form, relative_to, from) = self.where_to_look(header, is_next, cx);
+        cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from)
+    }
+
+    /// The header name an include directive names, however it spelled it.
+    fn header_of(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) -> Option<Header> {
+        if let Some(first) = rest.first().copied() {
+            if first.kind == PpTokenKind::HeaderName {
+                let text = first.value.map_or("", |v| cx.interner.resolve(v));
+                let header = header_from_token(text);
+                if header.is_none() {
+                    self.bad_header(first.span);
+                }
+                self.extra_tokens(&rest[1..], "#include");
+                return header;
+            }
+        }
+        // kencc reads the name as it is written and does not expand a macro there.
+        if cx.kencc {
+            self.bad_header(rest.first().map_or(hash, |t| t.span));
+            return None;
+        }
+        // The computed include, `#include MACRO`. The line is macro expanded and then has to
+        // look like a header name, which is the one place in the language where the spelling
+        // of a token matters after expansion.
+        if rest.is_empty() {
+            self.bad_header(hash);
+            return None;
+        }
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        let expanded = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let spellings: Vec<&str> = expanded.iter().map(|t| spelling(*t, cx.interner)).collect();
+        let header = header_from_tokens(&spellings);
+        if header.is_none() {
+            let at = expanded.first().map_or(hash, |t| t.report_span());
+            self.bad_header(at);
+        }
+        header
+    }
+
+    /// The diagnostic for a `__has_*` operator whose operand is not an identifier.
+    fn bad_operand(&mut self, tok: Tok, at: Span, interner: &Interner) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                format!("expected an identifier as the operand of `{}`", spelling(tok, interner)),
+                at,
+            )
+            .with_code("E0345"),
+        );
+    }
+
+    fn bad_header(&mut self, at: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("expected a file name in `<>` or `\"\"`", at).with_code("E0343"),
+        );
+    }
+
+    /// Pushes a conditional whose first branch is or is not taken.
+    fn open(&mut self, span: Span, value: bool) {
+        let enclosing_live = self.live();
+        self.conds.push(Cond {
+            span,
+            live: enclosing_live && value,
+            taken: value,
+            enclosing_live,
+            seen_else: false,
+        });
+    }
+
+    fn elif(
+        &mut self,
+        name: Option<Symbol>,
+        rest: &[PpToken],
+        hash: Span,
+        cx: &mut Context<'_>,
+        names: &Names,
+    ) {
+        let Some(top) = self.conds.last() else {
+            self.stray("elif", hash);
+            return;
+        };
+        if top.seen_else {
+            self.diagnostics
+                .push(Diagnostic::error("`#elif` after `#else`", hash).with_code("E0333"));
+            return;
+        }
+        // Read what is needed before evaluating, because evaluation borrows the whole
+        // preprocessor to report into.
+        let (enclosing_live, already_taken) = (top.enclosing_live, top.taken);
+        let consider = enclosing_live && !already_taken;
+        let value = if !consider {
+            false
+        } else if name == Some(names.elif) {
+            self.eval(rest, hash, cx, names)
+        } else {
+            self.defined_check(rest, hash, name == Some(names.elifdef), names)
+        };
+        let top = self.conds.last_mut().expect("checked above and nothing popped");
+        top.live = consider && value;
+        top.taken = already_taken || value;
+    }
+
+    fn branch_else(&mut self, rest: &[PpToken], hash: Span) {
+        let Some(top) = self.conds.last_mut() else {
+            self.stray("else", hash);
+            return;
+        };
+        if top.seen_else {
+            self.diagnostics.push(Diagnostic::error("a second `#else`", hash).with_code("E0333"));
+            return;
+        }
+        top.live = top.enclosing_live && !top.taken;
+        top.taken = true;
+        top.seen_else = true;
+        let enclosing_live = top.enclosing_live;
+        if enclosing_live {
+            self.extra_tokens(rest, "#else");
+        }
+    }
+
+    fn endif(&mut self, rest: &[PpToken], hash: Span) {
+        if self.conds.pop().is_none() {
+            self.stray("endif", hash);
+            return;
+        }
+        if self.live() {
+            self.extra_tokens(rest, "#endif");
+        }
+    }
+
+    fn stray(&mut self, what: &str, hash: Span) {
+        self.diagnostics
+            .push(Diagnostic::error(format!("`#{what}` without `#if`"), hash).with_code("E0334"));
+    }
+
+    /// Warns about tokens after a directive that takes none.
+    ///
+    /// A warning rather than an error, because `#endif FOO` as a hand written comment is
+    /// everywhere in code written before `//` was portable.
+    fn extra_tokens(&mut self, rest: &[PpToken], what: &str) {
+        if let Some(first) = rest.first() {
+            self.diagnostics.push(
+                Diagnostic::warning(format!("extra tokens after `{what}`"), first.span)
+                    .with_code("W0330"),
+            );
+        }
+    }
+
+    /// Evaluates a `#if` or `#elif` expression.
+    fn eval(&mut self, rest: &[PpToken], hash: Span, cx: &mut Context<'_>, names: &Names) -> bool {
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        // `defined X` is resolved before expansion, so that `#if defined FOO` does not depend
+        // on what `FOO` expands to. It is resolved again afterwards because a macro that
+        // expands to `defined(X)` is undefined behaviour that GCC supports and headers use,
+        // and the expansion below leaves such a one alone for this second pass to answer. It
+        // goes first of all because `defined(__has_include)` is a question about the operator
+        // rather than a use of it.
+        let line = self.resolve_defined(line, names);
+        // `__has_include` is resolved before expansion too, and for a stronger reason: its
+        // operand is a header name, so expanding `<linux/version.h>` would turn `linux` into
+        // `1` on a target where that macro is predefined. The rest of the family take an
+        // identifier that GCC does expand, so they wait until afterwards.
+        let line = self.resolve_has(line, cx, names, Pass::Headers);
+        let condition = Condition { defined: names.defined, report: cx.pedantic };
+        let line =
+            self.expander.expand_condition(line, &self.macros, cx.interner, cx.sources, condition);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let line = self.resolve_defined(line, names);
+        let line = self.resolve_has(line, cx, names, Pass::Rest);
+        cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash, self.chars)
+    }
+
+    /// Replaces `__has_include(<x.h>)` and the rest of the family with what they answer.
+    ///
+    /// `pass` says which of the three positions is asking, and each of them answers a
+    /// different part of the family. See [`Pass`].
+    fn resolve_has(
+        &mut self,
+        line: Vec<Tok>,
+        cx: &mut Context<'_>,
+        names: &Names,
+        pass: Pass,
+    ) -> Vec<Tok> {
+        if !line.iter().any(|t| t.ident().is_some_and(|n| names.has.op(n).is_some())) {
+            return line;
+        }
+        let mut out = Vec::with_capacity(line.len());
+        let mut at = 0;
+        while at < line.len() {
+            let tok = line[at];
+            let op = tok.ident().and_then(|n| names.has.op(n));
+            let Some(op) = op.filter(|op| pass.answers(*op)) else {
+                if pass == Pass::Text && op.is_some_and(Op::is_header) {
+                    self.outside_a_directive(tok, cx);
+                }
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            let Some((operand, after)) = arguments(&line, at + 1) else {
+                // Reported in the pass after expansion and not in the one before it, because
+                // the operator is still there for that pass to find and one mistake is one
+                // diagnostic.
+                if pass != Pass::Headers {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!("expected `(` after `{}`", spelling(tok, cx.interner)),
+                            tok.report_span(),
+                        )
+                        .with_code("E0345"),
+                    );
+                }
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            at = after;
+            // A number rather than a flag, because `__has_c_attribute` answers with the value
+            // the standard gives the attribute and a header compares that against a date.
+            let value = self.ask(op, operand, tok, cx);
+            let sym = cx.interner.intern(&value.to_string());
+            out.push(Tok::synthetic(PpTokenKind::Number, Some(sym), tok.flags, tok.report_span()));
+        }
+        out
+    }
+
+    /// Refuses one of the header operators used in ordinary text.
+    ///
+    /// Their operand is a header name, and outside a directive the line was scanned as
+    /// ordinary tokens, so `<stdio.h>` arrived as a chain of comparisons that no longer says
+    /// which of the two it was meant to be. GCC and clang both refuse it for that reason, and
+    /// a program that wants the answer in text can put the operator in a `#if` and define a
+    /// macro from it, which is what every header that needs one does anyway.
+    fn outside_a_directive(&mut self, tok: Tok, cx: &Context<'_>) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                format!(
+                    "`{}` used outside of a preprocessing directive",
+                    spelling(tok, cx.interner)
+                ),
+                tok.report_span(),
+            )
+            .with_code("E0350"),
+        );
+    }
+
+    /// What one `__has_*` operator answers for one operand.
+    fn ask(&mut self, op: Op, operand: &[Tok], tok: Tok, cx: &mut Context<'_>) -> u32 {
+        let at = operand.first().map_or(tok.report_span(), |t| t.report_span());
+        match op {
+            Op::Include | Op::IncludeNext => {
+                let spellings: Vec<&str> =
+                    operand.iter().map(|t| spelling(*t, cx.interner)).collect();
+                let Some(header) = header_from_tokens(&spellings) else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                u32::from(self.find(&header, op == Op::IncludeNext, cx).is_some())
+            }
+            Op::Embed => {
+                // Three answers, and the third one is the reason the operator exists. A
+                // resource that is present but empty cannot be told from one that is missing
+                // by a yes or no, and the two need different code: the empty one still needs
+                // its `if_empty` written, the missing one needs a fallback.
+                let Some(used) = embed::header_length(operand) else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                let header = if operand[0].kind == PpTokenKind::HeaderName {
+                    header_from_token(spelling(operand[0], cx.interner))
+                } else {
+                    let spellings: Vec<&str> =
+                        operand[..used].iter().map(|t| spelling(*t, cx.interner)).collect();
+                    header_from_tokens(&spellings)
+                };
+                let Some(header) = header else {
+                    self.bad_header(at);
+                    return 0;
+                };
+                // The parameters are read even though only `limit` and `gnu::offset` can
+                // change the answer, because a misspelled parameter is the same mistake here
+                // as it is on the directive and finding it only on the directive would mean
+                // the guard passes and the embed it guards fails.
+                let Some(params) = self.embed_params(&operand[used..], at, cx) else {
+                    return 0;
+                };
+                match self.find(&header, false, cx) {
+                    None => 0,
+                    Some(found) => {
+                        let taken = params.taken(found.bytes.as_slice().len() as u64);
+                        if taken == 0 { 2 } else { 1 }
+                    }
+                }
+            }
+            Op::BuildingModule => {
+                if attribute_name(operand, cx.interner).is_none() {
+                    self.bad_operand(tok, at, cx.interner);
+                }
+                // Clang answers this with one only while it is compiling the module named
+                // here, and we do not have modules, so the answer is always no. It is
+                // recognised rather than left alone because clang's own `stddef.h` asks it
+                // inside an `#if`, and an unknown identifier there leaves the parenthesised
+                // operand behind as extra tokens, which fails the whole line rather than the
+                // one operator.
+                0
+            }
+            Op::Table(kind) => {
+                let Some(Named { scope, name }) = attribute_name(operand, cx.interner) else {
+                    self.bad_operand(tok, at, cx.interner);
+                    return 0;
+                };
+                // A scoped attribute is asked of the vendor the scope names, whichever of the
+                // two operators asks. GCC is the only vendor here, so `gnu::packed` and
+                // `__gnu__::packed` answer one when `packed` is a GNU attribute rucc has, and
+                // `clang::packed` answers zero. That is one and not the standard's number even
+                // for a name the standard also has, so `gnu::fallthrough` is one and
+                // `gnu::nodiscard`, which is only a standard attribute, is zero, as in gcc 16.
+                let scoped = matches!(kind, Kind::Attribute | Kind::CAttribute);
+                let gnu = match scope {
+                    Some(scope) if scoped => rucc_gnu::unarmour(scope) == "gnu",
+                    _ => false,
+                };
+                if scoped && scope.is_some() && !gnu {
+                    return 0;
+                }
+                let places = self.places;
+                let gnuc = self.gnuc.unwrap_or(u32::MAX);
+                match kind {
+                    Kind::Attribute | Kind::CAttribute if gnu => {
+                        rucc_gnu::has_gnu_attribute(name, places, gnuc)
+                    }
+                    Kind::Attribute => rucc_gnu::has_attribute(name, places, gnuc),
+                    Kind::CAttribute => rucc_gnu::has_c_attribute(name, places, gnuc),
+                    Kind::Builtin => rucc_gnu::has_builtin(name, places, gnuc),
+                    Kind::Feature => rucc_gnu::has_feature(name, places, gnuc, self.features),
+                    Kind::Extension => rucc_gnu::has_extension(name, places, gnuc, self.features),
+                }
+            }
+        }
+    }
+
+    /// Replaces `defined X` and `defined(X)` with `1` or `0`.
+    fn resolve_defined(&mut self, line: Vec<Tok>, names: &Names) -> Vec<Tok> {
+        if !line.iter().any(|t| t.ident() == Some(names.defined)) {
+            return line;
+        }
+        let mut out = Vec::with_capacity(line.len());
+        let mut at = 0;
+        while at < line.len() {
+            let tok = line[at];
+            if tok.ident() != Some(names.defined) {
+                out.push(tok);
+                at += 1;
+                continue;
+            }
+            let parenthesised = line.get(at + 1).is_some_and(|t| t.is(Punct::LParen));
+            let name_at = if parenthesised { at + 2 } else { at + 1 };
+            let name = line.get(name_at).and_then(|t| t.ident());
+            let Some(name) = name else {
+                self.diagnostics.push(
+                    Diagnostic::error("`defined` without a macro name", tok.report_span())
+                        .with_code("E0335"),
+                );
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            at = name_at + 1;
+            if parenthesised {
+                if line.get(at).is_some_and(|t| t.is(Punct::RParen)) {
+                    at += 1;
+                } else {
+                    self.diagnostics.push(
+                        Diagnostic::error("expected `)` after `defined`", tok.report_span())
+                            .with_code("E0335"),
+                    );
+                }
+            }
+            // A header asks `#ifdef __has_include` before using it, because the operator is
+            // newer than some of the compilers it has to build under. It is not a macro, but
+            // the question being asked is whether the name means something, and it does.
+            let value = self.macros.is_defined(name) || names.has.op(name).is_some();
+            out.push(number(value, tok.flags, tok.report_span()));
+        }
+        out
+    }
+
+    /// The body of `#ifdef`, `#ifndef`, `#elifdef` and `#elifndef`.
+    fn defined_check(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        want_defined: bool,
+        names: &Names,
+    ) -> bool {
+        let Some(name) = rest.first().and_then(ident_of) else {
+            self.diagnostics.push(
+                Diagnostic::error("expected a macro name", rest.first().map_or(hash, |t| t.span))
+                    .with_code("E0336"),
+            );
+            return false;
+        };
+        self.extra_tokens(&rest[1..], if want_defined { "#ifdef" } else { "#ifndef" });
+        let defined = self.macros.is_defined(name) || names.has.op(name).is_some();
+        defined == want_defined
+    }
+
+    fn undef(&mut self, rest: &[PpToken], hash: Span, interner: &Interner) {
+        let Some(name) = rest.first().and_then(ident_of) else {
+            self.diagnostics.push(
+                Diagnostic::error("expected a macro name", rest.first().map_or(hash, |t| t.span))
+                    .with_code("E0336"),
+            );
+            return;
+        };
+        // `defined` is the one name gcc refuses. A predefined name such as `__STDC_VERSION__` or
+        // `__FILE__` gets a warning there and goes all the same, and a name that only looks like
+        // one of them is an ordinary macro: gnulib's config.h undefines `__STDC_WANT_LIB_EXT1__`,
+        // which Annex K leaves to the program to define.
+        let text = interner.resolve(name);
+        if text == "defined" {
+            self.diagnostics.push(
+                Diagnostic::error(format!("`{text}` cannot be undefined"), rest[0].span)
+                    .with_code("E0337"),
+            );
+            return;
+        }
+        self.macros.undef(name);
+        self.extra_tokens(&rest[1..], "#undef");
+    }
+
+    /// `#error` and `#warning`. The message is the rest of the line, spelled back.
+    fn message(&mut self, rest: &[PpToken], hash: Span, fatal: bool, interner: &Interner) {
+        let text = spell_line(rest, interner);
+        let span = rest.first().map_or(hash, |t| t.span.to(last_span(rest)));
+        let diag = if fatal {
+            Diagnostic::error(text, span).with_code("E0338")
+        } else {
+            Diagnostic::warning(text, span).with_code("W0331")
+        };
+        self.diagnostics.push(diag);
+    }
+
+    /// `#ident "text"` and `#sccs "text"`, the old way to put a version string in the object.
+    ///
+    /// gcc writes the string to the assembly as an `.ident`, and that is all it does with it. The
+    /// line is taken here and the string is dropped, which is what keeps the old System V sources
+    /// that NetBSD keeps, such as `rpcbind/warmstart.c`, from failing on a directive gcc knows. The
+    /// argument is macro expanded first, as gcc's `do_ident` reads it, and anything that is not a
+    /// string then is the error gcc gives.
+    fn ident(&mut self, name: &PpToken, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) {
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let narrow = |t: &Tok| {
+            t.kind == PpTokenKind::StringLit
+                && t.value.is_some_and(|v| cx.interner.resolve(v).starts_with('"'))
+        };
+        if !line.first().is_some_and(narrow) {
+            let spelled = ident_of(name).map_or("ident", |n| cx.interner.resolve(n));
+            let at = line.first().map_or(hash, |t| t.report_span());
+            self.diagnostics.push(
+                Diagnostic::error(format!("invalid #{spelled} directive"), at).with_code("E0332"),
+            );
+        }
+    }
+
+    /// `#line 42` and `#line 42 "file.c"`.
+    ///
+    /// The argument is macro expanded first, which is the one place a directive other than
+    /// `#if` does that, and which exists because `#line __LINE__ + 1` is real code.
+    fn line(&mut self, rest: &[PpToken], hash: Span, at: usize, cx: &mut Context<'_>) {
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let interner = &mut *cx.interner;
+
+        let number_text = line
+            .first()
+            .filter(|t| t.kind == PpTokenKind::Number)
+            .and_then(|t| t.value)
+            .map(|v| interner.resolve(v));
+        let Some(parsed) = number_text.and_then(|t| t.parse::<u64>().ok()) else {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "`#line` needs a decimal line number",
+                    line.first().map_or(hash, |t| t.report_span()),
+                )
+                .with_code("E0339"),
+            );
+            return;
+        };
+        // 2147483647 is the largest line number the standard requires support for, and it is
+        // also where every other compiler stops, so matching that keeps diagnostics comparable.
+        if parsed == 0 || parsed > 2_147_483_647 {
+            self.diagnostics.push(
+                Diagnostic::error("`#line` number is out of range", line[0].report_span())
+                    .with_code("E0339"),
+            );
+            return;
+        }
+
+        let mut file = None;
+        if let Some(second) = line.get(1) {
+            if second.kind == PpTokenKind::StringLit {
+                file = second.value;
+            } else {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "`#line` file name must be a string literal",
+                        second.report_span(),
+                    )
+                    .with_code("E0339"),
+                );
+                return;
+            }
+        }
+        if let Some(extra) = line.get(2) {
+            self.diagnostics.push(
+                Diagnostic::warning("extra tokens after `#line`", extra.report_span())
+                    .with_code("W0330"),
+            );
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the range check above keeps this inside i32, let alone u32"
+        )]
+        let number = parsed as u32;
+        self.lines.push(LineDirective { span: hash, line: number, file, at });
+        let name = file.map(|v| destringize(cx.interner.resolve(v)));
+        cx.sources.set_presumed(hash.lo, number, name);
+    }
+
+    /// A GNU line marker: `# 42`, `# 42 "file.c"`, and either of those with flags after it.
+    ///
+    /// This is the form `-E` writes, so a preprocessed file handed back to the compiler is full
+    /// of them, and a compiler that cannot read its own output is not much of a compiler. The
+    /// directive is a `#` and a number rather than a `#` and a name, which is why it arrives
+    /// here having failed to be anything else.
+    ///
+    /// It is `#line` with three differences. Nothing is macro expanded, because the tokens came
+    /// from a preprocessor rather than from a person. Zero is a line number, since a generator
+    /// counting from zero is allowed to say so and `#line 0` is an error only because somebody
+    /// wrote it. And there may be flags: `1` for entering a file, `2` for returning from one,
+    /// `3` for a system header and `4` for one whose contents are `extern "C"`. The last two
+    /// say nothing this phase acts on. The first two are the nesting, and a `2` that does not
+    /// name the file it claims to be returning to is ignored with a warning rather than
+    /// applied, which is what gcc does and is the only honest answer to a marker set that does
+    /// not describe a nesting anything was ever in.
+    fn line_marker(&mut self, body: &[PpToken], hash: Span, at: usize, cx: &mut Context<'_>) {
+        let Some(number) = decimal(&body[0], cx.interner) else { return };
+        let mut rest = &body[1..];
+        let mut file = None;
+        if let Some(first) = rest.first().filter(|t| t.kind == PpTokenKind::StringLit) {
+            file = first.value;
+            rest = &rest[1..];
+        }
+
+        let (mut entering, mut leaving) = (false, false);
+        for flag in rest {
+            match decimal(flag, cx.interner) {
+                Some(1) => entering = true,
+                Some(2) => leaving = true,
+                Some(3 | 4) => {}
+                _ => {
+                    let text = spell_line(std::slice::from_ref(flag), cx.interner);
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!("invalid flag `{text}` in line directive"),
+                            flag.span,
+                        )
+                        .with_code("E0339"),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let name = file.map(|v| destringize(cx.interner.resolve(v)));
+        if leaving {
+            if let Some(name) = &name {
+                if !self.leave_marker(name) {
+                    self.diagnostics.push(
+                        Diagnostic::warning(
+                            format!("file `{name}` linemarker ignored due to incorrect nesting"),
+                            last_span(body),
+                        )
+                        .with_code("W0330"),
+                    );
+                    return;
+                }
+            } else {
+                self.markers.pop();
+            }
+        }
+        if entering {
+            let here = cx.sources.presumed(hash.lo).map(|loc| loc.name.to_owned());
+            self.markers.push(here.unwrap_or_default());
+        }
+
+        self.lines.push(LineDirective { span: hash, line: number, file, at });
+        cx.sources.set_presumed(hash.lo, number, name);
+    }
+
+    /// Unwinds the marker nesting to `name`, saying whether it was in it at all.
+    ///
+    /// GCC asks whether the file being returned to is the one directly outside, and this asks
+    /// whether it is anywhere outside, because a marker set is generated and a generator that
+    /// leaves out a return marker is common. Every `-E` that writes markers where its tokens
+    /// are rather than where its files change writes such a set, this compiler's own included,
+    /// since a header that contributes no tokens between two `#include` lines never gets a
+    /// marker of its own. Answering that with a warning on every file would make the warning
+    /// noise, and the nesting it describes is still enough to say what a `2` means.
+    ///
+    /// A name in neither the markers nor the real include stack is the one that is refused.
+    /// That is the marker set that describes a nesting nothing was ever in, and gcc refuses it
+    /// too, so `# 200 "xyz" 2` written at the top of a file is a warning in both compilers.
+    fn leave_marker(&mut self, name: &str) -> bool {
+        if let Some(at) = self.markers.iter().rposition(|outer| outer == name) {
+            self.markers.truncate(at);
+            return true;
+        }
+        // A marker set may begin partway down a real nesting it did not open, which is what a
+        // header full of them looks like when it is included rather than compiled on its own.
+        let found = self.stack.iter().rev().skip(1).any(|f| f.path.as_os_str() == name);
+        if found {
+            self.markers.clear();
+        }
+        found
+    }
+
+    /// Whether `name` is `_Pragma`, or `__pragma` where that is an operator too.
+    fn is_pragma_operator(&self, name: Option<Symbol>, names: &Names) -> bool {
+        name.is_some_and(|name| {
+            name == names.pragma_op || (self.ms_pragma && name == names.ms_pragma_op)
+        })
+    }
+
+    /// Applies the `_Pragma` operator to an expanded run and appends the result.
+    ///
+    /// `_Pragma("x")` is a pragma written as an expression, which is what makes a pragma
+    /// usable from inside a macro. It is handled after expansion because the string it takes
+    /// is very often produced by one.
+    ///
+    /// `__pragma(x)` is Microsoft's spelling of the same thing, with the pragma written as tokens
+    /// in parentheses rather than as a string, and the SDK's headers are full of it:
+    /// `vcruntime.h` opens every C header with `__pragma(pack(push, _CRT_PACKING))`. The tokens
+    /// have been expanded by the time they get here, as they are for clang, which is what turns
+    /// `_CRT_PACKING` into the 8 the pragma needs.
+    fn pragma_operator(
+        &mut self,
+        expanded: Vec<Tok>,
+        out: &mut Vec<Tok>,
+        interner: &mut Interner,
+        names: &Names,
+    ) {
+        if !expanded.iter().any(|t| self.is_pragma_operator(t.ident(), names)) {
+            out.extend(expanded);
+            return;
+        }
+        let mut at = 0;
+        // A pragma is a line, so whatever comes after one has to start a line, even when the
+        // source wrote `_Pragma("x") int y;` all on one. Without this the `int` would read as
+        // part of the pragma to anything that takes the line as the unit, which is what the
+        // phase that turns these into tokens does.
+        let mut ends_a_line = false;
+        while at < expanded.len() {
+            let mut tok = expanded[at];
+            if self.ms_pragma && tok.ident() == Some(names.ms_pragma_op) {
+                let Some(len) = balanced(&expanded[at + 1..]) else {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "`__pragma` takes the pragma in parentheses",
+                            tok.report_span(),
+                        )
+                        .with_code("E0340"),
+                    );
+                    out.push(tok);
+                    at += 1;
+                    continue;
+                };
+                let inside = expanded[at + 2..at + len].iter().map(|t| t.to_pp()).collect();
+                self.emit_pragma_tokens(inside, tok.report_span(), out, interner, names);
+                ends_a_line = true;
+                at += 1 + len;
+                continue;
+            }
+            if tok.ident() != Some(names.pragma_op) {
+                if ends_a_line {
+                    tok.flags = tok.flags.with(TokenFlags::START_OF_LINE);
+                    ends_a_line = false;
+                }
+                out.push(tok);
+                at += 1;
+                continue;
+            }
+            let open = expanded.get(at + 1).is_some_and(|t| t.is(Punct::LParen));
+            let text = expanded.get(at + 2).filter(|t| t.kind == PpTokenKind::StringLit);
+            let close = expanded.get(at + 3).is_some_and(|t| t.is(Punct::RParen));
+            let (Some(text), true, true) = (text, open, close) else {
+                self.diagnostics.push(
+                    Diagnostic::error("`_Pragma` takes a single string literal", tok.report_span())
+                        .with_code("E0340"),
+                );
+                out.push(tok);
+                at += 1;
+                continue;
+            };
+            let literal = text.value.map(|v| interner.resolve(v)).unwrap_or_default();
+            let body = destringize(literal);
+            self.emit_pragma(&body, tok, out, interner, names);
+            ends_a_line = true;
+            at += 4;
+        }
+    }
+
+    /// Turns destringized `_Pragma` text into the `# pragma ...` tokens a later phase reads.
+    fn emit_pragma(
+        &mut self,
+        body: &str,
+        at: Tok,
+        out: &mut Vec<Tok>,
+        interner: &mut Interner,
+        names: &Names,
+    ) {
+        let span = at.report_span();
+        let (tokens, diagnostics) = tokenize(body.as_bytes(), 0, Options::new(), interner);
+        // The text came out of a string literal, so a span into it would point at bytes the
+        // user cannot see. Every token reports at the `_Pragma` instead.
+        self.diagnostics.extend(
+            diagnostics
+                .into_iter()
+                .map(|d| Diagnostic::new(d.severity, d.message, span).with_code("E0340")),
+        );
+        let tokens: Vec<PpToken> = tokens.into_iter().filter(|t| !t.is_eof()).collect();
+        self.emit_pragma_tokens(tokens, span, out, interner, names);
+    }
+
+    /// Writes the `# pragma ...` tokens for a pragma whose words are `tokens`, reporting at
+    /// `span`, or carries it out here for the two that are the preprocessor's own business.
+    fn emit_pragma_tokens(
+        &mut self,
+        tokens: Vec<PpToken>,
+        span: Span,
+        out: &mut Vec<Tok>,
+        interner: &mut Interner,
+        names: &Names,
+    ) {
+        // `_Pragma("push_macro(\"X\")")` is the same pragma written the other way, and the two
+        // spellings have to mean the same thing because a macro that wants to save a name has no
+        // other way to say it: a `#pragma` line cannot come out of a macro body.
+        if self.macro_stack_pragma(&tokens, span, interner, names)
+            || self.message_pragma(&tokens, Some(span), interner, names)
+            || self.poison_pragma(&tokens, Some(span), interner)
+        {
+            return;
+        }
+        self.options_pragma(&tokens, span, interner);
+        if self.expander.assembly() {
+            return;
+        }
+        out.push(Tok::synthetic(
+            PpTokenKind::Punct(Punct::Hash),
+            None,
+            TokenFlags::START_OF_LINE,
+            span,
+        ));
+        out.push(Tok::synthetic(PpTokenKind::Ident, Some(names.pragma), TokenFlags::EMPTY, span));
+        // The tokens keep the spacing they were written with inside the string, so
+        // `_Pragma("pack(push)")` prints back as `pack(push)` rather than `pack ( push )`.
+        // Only the first one is forced apart, from the `pragma` before it.
+        for (at, t) in tokens.into_iter().enumerate() {
+            // Start of line has to come off: the line is the `#pragma` we just emitted, not
+            // the inside of the string these came from.
+            let spaced = at == 0 || t.flags.has(TokenFlags::LEADING_SPACE);
+            let flags = if spaced {
+                TokenFlags::EMPTY.with(TokenFlags::LEADING_SPACE)
+            } else {
+                TokenFlags::EMPTY
+            };
+            out.push(Tok::synthetic(t.kind, t.value, flags, span));
+        }
+    }
+}
+
+/// How many tokens a parenthesised group at the start of `toks` takes, both parentheses
+/// included, or [`None`] when it does not start with one or never closes.
+fn balanced(toks: &[Tok]) -> Option<usize> {
+    if !toks.first()?.is(Punct::LParen) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.is(Punct::LParen) {
+            depth += 1;
+        } else if tok.is(Punct::RParen) {
+            depth -= 1;
+            if depth == 0 {
+                return Some(at + 1);
+            }
+        }
+    }
+    None
+}
+
+/// The macro a file's opening line guards the whole file with, if the line has that shape.
+///
+/// `#ifndef NAME` and both spellings of `#if !defined NAME`, which between them are what
+/// every header in glibc, musl and the kernel is wrapped in.
+fn guard_opener(body: &[PpToken], names: &Names) -> Option<Symbol> {
+    let name = ident_of(body.first()?)?;
+    let rest = &body[1..];
+    if name == names.ifndef {
+        let [only] = rest else {
+            return None;
+        };
+        return ident_of(only);
+    }
+    if name != names.r#if {
+        return None;
+    }
+    let [bang, defined, tail @ ..] = rest else {
+        return None;
+    };
+    if bang.punct() != Some(Punct::Bang) || ident_of(defined) != Some(names.defined) {
+        return None;
+    }
+    match tail {
+        [only] => ident_of(only),
+        [open, only, close]
+            if open.punct() == Some(Punct::LParen) && close.punct() == Some(Punct::RParen) =>
+        {
+            ident_of(only)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a directive name opens another branch of a conditional already open.
+fn is_alternative(name: Option<Symbol>, names: &Names) -> bool {
+    let Some(name) = name else { return false };
+    name == names.r#else || name == names.elif || name == names.elifdef || name == names.elifndef
+}
+
+/// Whether a directive name is one of the conditionals, which change what is read but not
+/// what any name means.
+fn is_conditional(name: Option<Symbol>, names: &Names) -> bool {
+    let Some(name) = name else { return false };
+    name == names.r#if
+        || name == names.ifdef
+        || name == names.ifndef
+        || name == names.endif
+        || is_alternative(Some(name), names)
+}
+
+/// Where `text` is partway through the arguments of a function-like macro, that is with a
+/// parenthesis still open right after the name of one, or after the name of an object-like macro
+/// that ends in the name of one. The kernel's `cpu_to_le64` is `__cpu_to_le64`, and arm64's SMMU
+/// driver has an `#ifdef __BIG_ENDIAN` inside the parentheses after it. The answer is the name
+/// in front of the outermost such parenthesis.
+fn open_invocation(text: &[Tok], macros: &MacroTable) -> Option<usize> {
+    let mut open: Vec<usize> = Vec::new();
+    for (at, tok) in text.iter().enumerate() {
+        if tok.is(Punct::LParen) {
+            open.push(at);
+        } else if tok.is(Punct::RParen) {
+            open.pop();
+        }
+    }
+    open.into_iter()
+        .find(|&at| at > 0 && text[at - 1].ident().is_some_and(|name| calls(name, macros)))
+        .map(|at| at - 1)
+}
+
+/// Whether a parenthesis after `name` is the start of a function-like macro's arguments once
+/// `name` has been expanded as far as an object-like macro goes.
+fn calls(mut name: Symbol, macros: &MacroTable) -> bool {
+    // Deep enough for any real chain and short enough that one naming itself ends.
+    for _ in 0..16 {
+        let Some(def) = macros.lookup(name) else { return false };
+        if def.function_like {
+            return true;
+        }
+        let Some(last) = def.body.last().and_then(ident_of) else { return false };
+        name = last;
+    }
+    false
+}
+
+/// Whether a directive name is one that may be followed by a header name.
+fn is_include(name: Option<Symbol>, names: &Names) -> bool {
+    name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
+}
+
+/// The tokens of a `#define` line in kencc, with each `#` and `##` made a token that is not an
+/// operator.
+fn kencc_body(tokens: &[PpToken], interner: &mut Interner) -> Vec<PpToken> {
+    tokens
+        .iter()
+        .map(|&tok| match tok.punct() {
+            Some(p @ (Punct::Hash | Punct::HashHash)) => PpToken {
+                kind: PpTokenKind::Other,
+                value: Some(interner.intern(p.as_str())),
+                ..tok
+            },
+            _ => tok,
+        })
+        .collect()
+}
+
+/// Whether `name` is a directive this phase answers, which in assembly is what tells a
+/// directive from a comment that starts with `#`.
+fn is_known(name: Option<Symbol>, names: &Names) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    [
+        names.define,
+        names.undef,
+        names.r#if,
+        names.ifdef,
+        names.ifndef,
+        names.elif,
+        names.elifdef,
+        names.elifndef,
+        names.r#else,
+        names.endif,
+        names.line,
+        names.error,
+        names.warning,
+        names.pragma,
+        names.include,
+        names.include_next,
+        names.embed,
+        names.ident,
+        names.sccs,
+    ]
+    .contains(&name)
+}
+
+/// Whether this token opens a directive line.
+/// Whether `gcc` and `word` are the `GCC poison` a poison pragma starts with.
+fn is_poison_words(gcc: &PpToken, word: &PpToken, interner: &Interner) -> bool {
+    let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+    spelled(gcc) == Some("GCC") && spelled(word) == Some("poison")
+}
+
+fn is_directive(tok: PpToken) -> bool {
+    tok.flags.has(TokenFlags::START_OF_LINE) && tok.punct() == Some(Punct::Hash)
+}
+
+fn ident_of(tok: &PpToken) -> Option<Symbol> {
+    match tok.kind {
+        PpTokenKind::Ident => tok.value,
+        _ => None,
+    }
+}
+
+fn last_span(tokens: &[PpToken]) -> Span {
+    tokens.last().map_or(Span::DUMMY, |t| t.span)
+}
+
+/// The value of `tok` when it is a plain decimal number a line can be called.
+///
+/// A preprocessing number is a wider thing than a number: `1.5`, `0x10` and `1f` are all one,
+/// and none of them is a line. Nothing but digits is accepted, so `# 1.5` stays what it was
+/// before this existed, which is a directive nobody recognises.
+fn decimal(tok: &PpToken, interner: &Interner) -> Option<u32> {
+    if tok.kind != PpTokenKind::Number {
+        return None;
+    }
+    let text = interner.resolve(tok.value?);
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // 2147483647 is the largest line number the standard requires support for, and it is also
+    // where every other compiler stops, so matching that keeps diagnostics comparable.
+    text.parse::<u32>().ok().filter(|n| *n <= 2_147_483_647)
+}
+
+/// A synthetic `1` or `0`.
+fn number(value: bool, flags: TokenFlags, span: Span) -> Tok {
+    let number = if value { sym::ONE } else { sym::ZERO };
+    Tok::synthetic(PpTokenKind::Number, Some(number), flags, span)
+}
+
+/// Spells a directive's tokens back for an `#error` message.
+fn spell_line(tokens: &[PpToken], interner: &Interner) -> String {
+    let mut out = String::new();
+    for (index, tok) in tokens.iter().enumerate() {
+        if index > 0 && tok.flags.has(TokenFlags::LEADING_SPACE) {
+            out.push(' ');
+        }
+        match tok.value {
+            Some(sym) => out.push_str(interner.resolve(sym)),
+            None => {
+                if let Some(p) = tok.punct() {
+                    out.push_str(p.as_str());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The single identifier a string literal spells, if that is all it spells.
+///
+/// The name a `push_macro` saves lives inside a string, so it is destringized and lexed rather
+/// than read off a token. Anything that is not exactly one identifier names no macro.
+fn identifier_in(text: PpToken, interner: &mut Interner) -> Option<Symbol> {
+    let literal = interner.resolve(text.value?).to_string();
+    let (tokens, _) = tokenize(destringize(&literal).as_bytes(), 0, Options::new(), interner);
+    let mut real = tokens.into_iter().filter(|t| !t.is_eof());
+    let first = real.next()?;
+    if first.kind != PpTokenKind::Ident || real.next().is_some() {
+        return None;
+    }
+    first.value
+}
+
+/// Undoes what `#` would have done, per C23 6.10.10.
+///
+/// The `L` or `u8` prefix and the quotes come off, then `\"` becomes `"` and `\\` becomes `\`.
+/// No other escape is touched, because no other escape was introduced.
+fn destringize(literal: &str) -> String {
+    let body = literal
+        .trim_start_matches(['L', 'u', 'U', '8'])
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(literal);
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// The strings of a `#pragma GCC target` line after the word, or `None` for a line gcc does not
+/// read: something other than strings, a `(` that does not close, or anything after them.
+fn target_strings(mut rest: &[PpToken], interner: &Interner) -> Option<Vec<String>> {
+    let open = rest.first().and_then(|token| token.punct()) == Some(Punct::LParen);
+    if open {
+        rest = &rest[1..];
+    }
+    let mut strings = Vec::new();
+    while let Some(token) = rest.first().filter(|token| token.kind == PpTokenKind::StringLit) {
+        strings.push(plain_text(interner.resolve(token.value?))?);
+        rest = &rest[1..];
+        while rest.first().and_then(|token| token.punct()) == Some(Punct::Comma) {
+            rest = &rest[1..];
+        }
+    }
+    if open {
+        (rest.first()?.punct() == Some(Punct::RParen)).then_some(())?;
+        rest = &rest[1..];
+    }
+    (!strings.is_empty() && rest.is_empty()).then_some(strings)
+}
+
+/// What a plain string literal says, its escapes read, or `None` for one with a prefix.
+///
+/// A `\x` or octal escape that is not a whole character in UTF-8 comes out as the replacement
+/// character, since this is text for a person to read rather than bytes for the object.
+fn plain_text(literal: &str) -> Option<String> {
+    let body = literal.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        let Some(escape) = chars.next() else { break };
+        let byte = match escape {
+            'n' => b'\n',
+            't' => b'\t',
+            'r' => b'\r',
+            'a' => 0x07,
+            'b' => 0x08,
+            'f' => 0x0c,
+            'v' => 0x0b,
+            'e' | 'E' => 0x1b,
+            'x' => {
+                let mut value = 0u32;
+                while let Some(digit) = chars.peek().and_then(|c| c.to_digit(16)) {
+                    value = value.wrapping_mul(16).wrapping_add(digit);
+                    chars.next();
+                }
+                value as u8
+            }
+            '0'..='7' => {
+                let mut value = escape.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    let Some(digit) = chars.peek().and_then(|c| c.to_digit(8)) else { break };
+                    value = value * 8 + digit;
+                    chars.next();
+                }
+                value as u8
+            }
+            other => {
+                let mut buf = [0; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                continue;
+            }
+        };
+        bytes.push(byte);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The parenthesised operand of a `__has_*` operator, and where the line carries on.
+///
+/// `None` when the next token is not `(`, which is the only shape the operators take. Nesting
+/// is counted rather than stopping at the first `)`, so that `__has_include(HEADER(x))` after
+/// expansion still finds the end of its own operand.
+fn arguments(line: &[Tok], at: usize) -> Option<(&[Tok], usize)> {
+    if !line.get(at)?.is(Punct::LParen) {
+        return None;
+    }
+    let mut depth = 1u32;
+    let mut end = at + 1;
+    while end < line.len() {
+        if line[end].is(Punct::LParen) {
+            depth += 1;
+        } else if line[end].is(Punct::RParen) {
+            depth -= 1;
+            if depth == 0 {
+                return Some((&line[at + 1..end], end + 1));
+            }
+        }
+        end += 1;
+    }
+    None
+}
+
+/// The name `__has_attribute` and its relatives are asked about, and the scope it was written
+/// with, if any.
+struct Named<'i> {
+    /// The vendor before the `::`, such as `gnu` in `gnu::always_inline`, as it was spelled.
+    scope: Option<&'i str>,
+    /// The name itself, as it was spelled.
+    name: &'i str,
+}
+
+/// Reads the operand of `__has_attribute` and its relatives.
+///
+/// A bare identifier, or the scoped form `gnu::always_inline` that C23 gives the attributes
+/// that came from GCC. The scope is kept, because it changes the answer: a scoped name is asked
+/// of that vendor's attributes only, which is what [`Named::scope`] is read for by the caller.
+fn attribute_name<'i>(operand: &[Tok], interner: &'i Interner) -> Option<Named<'i>> {
+    let (scope, name) = match operand {
+        [one] => (None, one),
+        [scope, colons, name] if colons.is(Punct::ColonColon) => (Some(scope), name),
+        _ => return None,
+    };
+    let scope = match scope {
+        None => None,
+        Some(scope) => Some(interner.resolve(scope.ident()?)),
+    };
+    Some(Named { scope, name: interner.resolve(name.ident()?) })
+}
+
+/// Which of the three sweeps over a line is resolving the `__has_*` operators.
+///
+/// A `#if` line is swept twice, once either side of macro expansion, because the two halves of
+/// the family disagree about whether their operand may be expanded. A text line is swept once,
+/// after expansion, and the half whose operand is a header name is refused there rather than
+/// answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Before expansion on a directive line, where only the header operators are answered.
+    Headers,
+    /// After expansion on a directive line, where everything left over is answered. That
+    /// includes a header operator, which reaches here when a macro expanded to one.
+    Rest,
+    /// After expansion on a text line, where everything but the header operators is answered.
+    Text,
+}
+
+impl Pass {
+    /// Whether this sweep is the one that answers `op`.
+    fn answers(self, op: Op) -> bool {
+        match self {
+            Pass::Headers => op.is_header(),
+            Pass::Rest => true,
+            Pass::Text => !op.is_header(),
+        }
+    }
+}
+
+/// Which `__has_*` operator a name is, and what answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    /// `__has_include`, answered by looking for the header.
+    Include,
+    /// `__has_include_next`, the same question from further down the search path.
+    IncludeNext,
+    /// `__has_embed`, which answers with three values rather than two because a resource that
+    /// exists and is empty is a case the program has to be able to tell apart.
+    Embed,
+    /// `__building_module`, which is always no because there are no modules.
+    BuildingModule,
+    /// The rest of the family, answered out of the matrix in `rucc-gnu`.
+    Table(Kind),
+}
+
+impl Op {
+    /// Whether the operand is a header name, which must not be macro expanded.
+    fn is_header(self) -> bool {
+        matches!(self, Op::Include | Op::IncludeNext | Op::Embed)
+    }
+}
+
+/// The `__has_*` operators, interned once per file.
+///
+/// A short array rather than a map: there are nine of them, the comparison is on interned
+/// symbols, and it is only reached for a line that mentions one.
+struct HasOps {
+    ops: [(Symbol, Op); 9],
+    /// The lowest and the highest symbol in `ops`.
+    ///
+    /// Now that text lines are swept too, every identifier in the translation unit is offered
+    /// to [`HasOps::op`], so the answer it almost always gives has to be cheap. These nine are
+    /// interned before any file is read, so a name out of the source sorts above the range and
+    /// one comparison turns it away.
+    range: (Symbol, Symbol),
+    /// The GCC release the persona claims. An operator that came in a later one is a plain name,
+    /// so `#ifdef __has_feature` is false under gcc 13 and a header can define it, as FreeBSD's
+    /// `sys/cdefs.h` does.
+    gnuc: u32,
+}
+
+impl HasOps {
+    /// The gcc release that added an operator. `__has_c_attribute` came in gcc 11,
+    /// `__has_feature` and `__has_extension` in gcc 14, and `__has_embed` in gcc 15 with
+    /// `#embed`. The others are older than any release a persona claims here.
+    const fn since(op: Op) -> u32 {
+        match op {
+            Op::Table(Kind::CAttribute) => 11,
+            Op::Table(Kind::Feature | Kind::Extension) => 14,
+            Op::Embed => 15,
+            _ => 0,
+        }
+    }
+
+    fn new(interner: &mut Interner, gnuc: Option<u32>) -> HasOps {
+        let ops = [
+            (interner.intern("__has_include"), Op::Include),
+            (interner.intern("__has_include_next"), Op::IncludeNext),
+            (interner.intern("__has_embed"), Op::Embed),
+            (interner.intern("__has_attribute"), Op::Table(Kind::Attribute)),
+            (interner.intern("__has_c_attribute"), Op::Table(Kind::CAttribute)),
+            (interner.intern("__has_builtin"), Op::Table(Kind::Builtin)),
+            (interner.intern("__has_feature"), Op::Table(Kind::Feature)),
+            (interner.intern("__has_extension"), Op::Table(Kind::Extension)),
+            (interner.intern("__building_module"), Op::BuildingModule),
+        ];
+        let mut range = (ops[0].0, ops[0].0);
+        for &(sym, _) in &ops {
+            range = (range.0.min(sym), range.1.max(sym));
+        }
+        HasOps { ops, range, gnuc: gnuc.unwrap_or(u32::MAX) }
+    }
+
+    /// The operator a name is, if it is one.
+    #[inline]
+    fn op(&self, name: Symbol) -> Option<Op> {
+        if name < self.range.0 || name > self.range.1 {
+            return None;
+        }
+        let op = self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op);
+        op.filter(|&op| HasOps::since(op) <= self.gnuc)
+    }
+}
+
+/// The directive names and the two operators, interned once per file.
+///
+/// Comparing symbols rather than strings is the point: a directive line is recognised with
+/// integer comparisons, and the identifiers were interned during the scan, so there is no
+/// string work in the hot path.
+struct Names {
+    define: Symbol,
+    undef: Symbol,
+    r#if: Symbol,
+    ifdef: Symbol,
+    ifndef: Symbol,
+    elif: Symbol,
+    elifdef: Symbol,
+    elifndef: Symbol,
+    r#else: Symbol,
+    endif: Symbol,
+    line: Symbol,
+    error: Symbol,
+    warning: Symbol,
+    pragma: Symbol,
+    include: Symbol,
+    include_next: Symbol,
+    embed: Symbol,
+    ident: Symbol,
+    sccs: Symbol,
+    defined: Symbol,
+    once: Symbol,
+    push_macro: Symbol,
+    pop_macro: Symbol,
+    pragma_op: Symbol,
+    ms_pragma_op: Symbol,
+    has: HasOps,
+}
+
+impl Names {
+    fn new(interner: &mut Interner, gnuc: Option<u32>) -> Names {
+        Names {
+            define: interner.intern("define"),
+            undef: interner.intern("undef"),
+            r#if: interner.intern("if"),
+            ifdef: interner.intern("ifdef"),
+            ifndef: interner.intern("ifndef"),
+            elif: interner.intern("elif"),
+            elifdef: interner.intern("elifdef"),
+            elifndef: interner.intern("elifndef"),
+            r#else: interner.intern("else"),
+            endif: interner.intern("endif"),
+            line: interner.intern("line"),
+            error: interner.intern("error"),
+            warning: interner.intern("warning"),
+            pragma: interner.intern("pragma"),
+            include: interner.intern("include"),
+            include_next: interner.intern("include_next"),
+            embed: interner.intern("embed"),
+            ident: interner.intern("ident"),
+            sccs: interner.intern("sccs"),
+            defined: interner.intern("defined"),
+            once: interner.intern("once"),
+            push_macro: interner.intern("push_macro"),
+            pop_macro: interner.intern("pop_macro"),
+            pragma_op: interner.intern("_Pragma"),
+            ms_pragma_op: interner.intern("__pragma"),
+            has: HasOps::new(interner, gnuc),
+        }
+    }
+}
+
+/// The name a prerequisite is written with: the path as the search spelled it, with each `./` at
+/// the front taken off, as GCC's `apply_vpath` does.
+///
+/// `-I./d` gives a prerequisite of `d/f.h` while the line marker and `__FILE__` for the same
+/// header both say `./d/f.h`. A marker names the file the way the search reached it, which is
+/// what a debugger and a `#line` are about, and a prerequisite names a file `make` compares a
+/// timestamp against, which the leading `./` says nothing about. A `.` or a second separator
+/// inside the path stays, as it does in GCC.
+fn prerequisite(path: &Path) -> PathBuf {
+    let Some(mut name) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    while let Some(rest) = name.strip_prefix('.') {
+        let Some(after) = rest.strip_prefix(std::path::is_separator) else {
+            break;
+        };
+        name = after.trim_start_matches(std::path::is_separator);
+    }
+    PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_diag::{Severity, SourceMap};
+    use rucc_session::{MemoryFileSystem, SearchPath};
+
+    use super::*;
+    use rucc_session::Std;
+
+    use crate::predef::Timestamp;
+
+    /// A whole file through phase 4, which is what almost every test here wants.
+    ///
+    /// The main file is always `/main.c`, so a quoted include with no search path set up
+    /// finds a header the test put at `/name.h`.
+    /// Any spelling of a path as forward slashes, doubled backslashes included, since a name this
+    /// compiler built by joining a directory to a header holds the host's own separator and
+    /// `__FILE__` escapes a backslash.
+    fn slashes(text: &str) -> String {
+        text.replace("\\\\", "/").replace('\\', "/")
+    }
+
+    struct Run {
+        interner: Interner,
+        sources: SourceMap,
+        fs: MemoryFileSystem,
+        search: SearchPath,
+        pp: Preprocessor,
+        /// What `-Wpedantic` is set to for every context this run builds.
+        pedantic: bool,
+        /// Whether the file is read as assembly, the way a `.S` is.
+        assembly: bool,
+    }
+
+    impl Run {
+        fn new() -> Run {
+            Run {
+                interner: Interner::new(),
+                sources: SourceMap::new(),
+                fs: MemoryFileSystem::new(),
+                search: SearchPath::new(),
+                pp: Preprocessor::new(),
+                pedantic: false,
+                assembly: false,
+            }
+        }
+
+        /// The same, reading the file as assembly on its way to the assembler.
+        fn assembly() -> Run {
+            Run { assembly: true, ..Run::new() }
+        }
+
+        /// The same, under `-Wpedantic`.
+        fn pedantic() -> Run {
+            Run { pedantic: true, ..Run::new() }
+        }
+
+        /// The same, with the `-fmacro-prefix-map=` rewrites `map` names, oldest first.
+        fn mapping(map: &[(&str, &str)]) -> Run {
+            let mut list = PrefixMap::new();
+            for (old, new) in map {
+                list.push(*old, *new);
+            }
+            Run { pp: Preprocessor::with_prefix_map(list), ..Run::new() }
+        }
+
+        /// Puts a header where an include can find it.
+        fn file(&mut self, path: &str, contents: &str) {
+            self.fs.insert(path, contents.as_bytes().to_vec());
+        }
+
+        /// Puts a resource where an `#embed` can find it. Bytes rather than text, because the
+        /// whole point of the directive is the files that are not text.
+        fn bytes(&mut self, path: &str, contents: &[u8]) {
+            self.fs.insert(path, contents.to_vec());
+        }
+
+        /// Adds a directory to the `-I` part of the search path.
+        fn dir(&mut self, path: &str) {
+            self.search.push_bracket(path);
+        }
+
+        /// Defines the predefined set for a target, as the driver does before reading input.
+        fn predefine(&mut self, triple: &str, opts: &Predef) {
+            let target = TargetInfo::new(triple.parse().expect("a supported triple"));
+            let mut cx =
+                Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+            self.pp.predefine(&target, opts, &mut cx).expect("the map has room");
+        }
+
+        /// The surviving tokens, spelled with one space wherever they were separated.
+        fn go(&mut self, src: &str) -> String {
+            self.go_named("/main.c", src)
+        }
+
+        /// The surviving tokens themselves, for a test about a flag rather than a spelling.
+        fn raw(&mut self, src: &str) -> Vec<Tok> {
+            let file = self.sources.add("/main.c", src.as_bytes().to_vec()).expect("room");
+            let pedantic = self.pedantic;
+            let mut cx =
+                Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+            cx.pedantic = pedantic;
+            self.pp.run(file, &mut cx)
+        }
+
+        /// Reads what `-imacros` and `-include` named, as the driver does before the source file.
+        fn preinclude(&mut self, files: &[Preinclude]) -> String {
+            let mut out = Vec::new();
+            {
+                let mut cx =
+                    Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                self.pp.preinclude(files, &mut out, &mut cx).expect("the map has room");
+            }
+            self.spell(&out)
+        }
+
+        /// The same, for a test that cares what the main file is called.
+        fn go_named(&mut self, path: &str, src: &str) -> String {
+            let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
+            let pedantic = self.pedantic;
+            let assembly = self.assembly;
+            let out = {
+                let mut cx =
+                    Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                cx.pedantic = pedantic;
+                if assembly {
+                    cx.lex = cx.lex.for_assembly();
+                }
+                self.pp.run(file, &mut cx)
+            };
+            self.spell(&out)
+        }
+
+        /// A run of tokens as text, with one space wherever they were separated.
+        fn spell(&self, out: &[Tok]) -> String {
+            let mut text = String::new();
+            for (at, tok) in out.iter().enumerate() {
+                let spaced = tok.flags.has(TokenFlags::LEADING_SPACE)
+                    || tok.flags.has(TokenFlags::START_OF_LINE);
+                if at > 0 && spaced {
+                    text.push(' ');
+                }
+                match tok.kind {
+                    PpTokenKind::Punct(p) => text.push_str(p.as_str()),
+                    _ => text.push_str(
+                        self.interner.resolve(tok.value.expect("every non-punctuator interns")),
+                    ),
+                }
+            }
+            text
+        }
+
+        /// How many files were opened, main file included. A header that the guard
+        /// optimization skipped never reaches the source map, so this is what says whether
+        /// it was really skipped rather than read and thrown away.
+        fn files(&self) -> usize {
+            self.sources.files().len()
+        }
+
+        fn messages(&mut self) -> Vec<String> {
+            self.pp.take_diagnostics().into_iter().map(|d| d.message).collect()
+        }
+
+        fn severities(&mut self) -> Vec<Severity> {
+            self.pp.diagnostics().iter().map(|d| d.severity).collect()
+        }
+    }
+
+    fn clean(src: &str) -> String {
+        let mut run = Run::new();
+        let text = run.go(src);
+        assert!(run.messages().is_empty(), "expected no diagnostics from {src:?}");
+        text
+    }
+
+    #[test]
+    fn a_taken_branch_is_kept_and_the_other_is_not() {
+        assert_eq!(clean("#if 1\nyes\n#else\nno\n#endif\n"), "yes");
+        assert_eq!(clean("#if 0\nyes\n#else\nno\n#endif\n"), "no");
+    }
+
+    #[test]
+    fn ifdef_and_ifndef_ask_the_macro_table() {
+        assert_eq!(clean("#define F 1\n#ifdef F\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#ifdef F\nyes\n#endif\n"), "");
+        assert_eq!(clean("#ifndef F\nyes\n#endif\n"), "yes");
+        // C23 spells the two of them as `#elifdef` and `#elifndef` as well.
+        assert_eq!(clean("#define F 1\n#if 0\na\n#elifdef F\nb\n#endif\n"), "b");
+        assert_eq!(clean("#if 0\na\n#elifndef F\nb\n#endif\n"), "b");
+    }
+
+    #[test]
+    fn only_the_first_true_branch_of_a_chain_is_taken() {
+        assert_eq!(clean("#if 0\na\n#elif 1\nb\n#elif 1\nc\n#else\nd\n#endif\n"), "b");
+        assert_eq!(clean("#if 0\na\n#elif 0\nb\n#else\nc\n#endif\n"), "c");
+    }
+
+    #[test]
+    fn a_branch_after_one_that_was_taken_is_not_evaluated() {
+        // `1/0` in a branch that cannot be reached is legal, and headers rely on it: the
+        // guard that made the branch dead is often the thing that made the expression safe.
+        assert_eq!(clean("#if 1\na\n#elif 1/0\nb\n#endif\n"), "a");
+    }
+
+    #[test]
+    fn a_skipped_region_is_not_read_for_anything_but_nesting() {
+        // Prose, an unknown directive and a broken `#define` all have to pass silently.
+        let src = "#if 0\nthis is not C at all\n#frobnicate\n#define\n#if 1\ninner\n#endif\n#endif\nafter\n";
+        assert_eq!(clean(src), "after");
+    }
+
+    #[test]
+    fn nesting_inside_a_dead_branch_stays_balanced() {
+        let src = "#if 0\n#ifdef X\na\n#else\nb\n#endif\n#else\nc\n#endif\n";
+        assert_eq!(clean(src), "c");
+    }
+
+    #[test]
+    fn defined_works_in_both_spellings_and_before_expansion() {
+        assert_eq!(clean("#define F 0\n#if defined F\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define F 0\n#if defined(F)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if defined(F)\nyes\n#endif\n"), "");
+        // `F` expands to 0, but `defined F` is answered before that happens, which is the
+        // whole reason `defined` is resolved in a pass of its own.
+        assert_eq!(clean("#define F 0\n#if defined F && !F\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_macro_may_write_the_defined_operator_itself() {
+        // What the expansion leaves behind is `defined F`, in both spellings, and the pass
+        // after it answers that. mingw-w64's `<intrin.h>` is built out of this and so is a
+        // good deal of Boost.
+        assert_eq!(clean("#define F 0\n#define D defined F\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define F 0\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define D defined(F)\n#if D\nyes\n#else\nno\n#endif\n"), "no");
+    }
+
+    #[test]
+    fn the_name_a_macro_wrote_the_defined_operator_about_is_not_expanded() {
+        // This is the case that says the operand has to be left alone rather than expanded and
+        // then looked at. `F` is defined as `1`, so an expansion that reached it first would
+        // ask whether `1` is defined and answer no, and the header would take the wrong branch
+        // with nothing to say it had.
+        assert_eq!(clean("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        // The same with the macro defined as nothing at all, which is how mingw-w64 marks an
+        // intrinsic as already declared. Expanding the operand leaves `defined()`, which is an
+        // error rather than an answer.
+        assert_eq!(clean("#define F\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        // And through a paste, which is the spelling `<psdk_inc/intrin-impl.h>` uses.
+        let src = "#define MARK_lrotl\n#define HAVE(n) defined(MARK_ ## n)\n\
+                   #if HAVE(lrotl)\nyes\n#endif\n";
+        assert_eq!(clean(src), "yes");
+    }
+
+    #[test]
+    fn a_defined_a_macro_wrote_is_reported_under_pedantic() {
+        let mut run = Run::pedantic();
+        assert_eq!(run.go("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+        assert_eq!(run.messages(), vec!["this use of `defined` may not be portable".to_owned()]);
+        // Written where it stands it is ordinary and says nothing, since the order the two
+        // operators run in is only in question when one of them made the other.
+        let mut run = Run::pedantic();
+        assert_eq!(run.go("#define F 1\n#if defined(F)\nyes\n#endif\n"), "yes");
+        assert!(run.messages().is_empty());
+        // And it is off without the flag, which is where every build that is not looking for
+        // portability problems is.
+        assert_eq!(clean("#define F 1\n#define D defined(F)\n#if D\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_defined_a_macro_wrote_badly_is_still_an_error() {
+        // The operator and its operand come out of the expansion in the order they went in, so
+        // the pass that answers them sees a malformed one as malformed and says the same thing
+        // it says about a malformed one written by hand.
+        let mut run = Run::new();
+        run.go("#define D defined\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages(), vec!["`defined` without a macro name".to_owned()]);
+        // A number where the name should be leaves the parentheses behind for the evaluator to
+        // complain about as well, which is the second message and is what GCC does too.
+        let mut run = Run::new();
+        run.go("#define D defined(1)\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages()[0], "`defined` without a macro name");
+        let mut run = Run::new();
+        run.go("#define D defined(F\n#if D\nyes\n#endif\n");
+        assert_eq!(run.messages(), vec!["expected `)` after `defined`".to_owned()]);
+        // A name the caller passed as an argument is expanded before it is substituted, so a
+        // macro that asks about its own parameter asks about whatever the caller's macro was
+        // defined as. GCC reports the same error on the same line, and the way a header gets
+        // this right is to paste the name rather than pass it.
+        let mut run = Run::new();
+        run.go("#define F 0\n#define D(x) defined(x)\n#if D(F)\nyes\n#endif\n");
+        assert_eq!(run.messages()[0], "`defined` without a macro name");
+    }
+
+    #[test]
+    fn an_identifier_that_survived_expansion_is_zero() {
+        assert_eq!(clean("#if NOT_DEFINED_ANYWHERE\nyes\n#else\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if !NOT_DEFINED_ANYWHERE\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn short_circuiting_keeps_a_guarded_expression_safe() {
+        // The reason `&&` has to short circuit rather than merely produce the right answer:
+        // the right hand side divides by zero when the guard is false.
+        assert_eq!(clean("#if defined(F) && 1/F\nyes\n#else\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if 1 ? 2 : 1/0\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn the_operators_have_the_precedence_they_do_in_c() {
+        assert_eq!(clean("#if 1 + 2 * 3 == 7\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if (1 + 2) * 3 == 9\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if 1 << 4 == 16\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if -8 / 3 == -2\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if (0xff & 0x0f) == 15\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn an_unsigned_operand_makes_the_whole_comparison_unsigned() {
+        // The rule that catches everyone out in C catches them out here too, and a
+        // preprocessor that quietly disagreed with the compiler would be worse than one that
+        // is merely surprising.
+        assert_eq!(clean("#if -1 < 0u\nyes\n#else\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if -1 < 0\nyes\n#else\nno\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn character_constants_evaluate() {
+        assert_eq!(clean("#if 'A' == 65\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if '\\n' == 10\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_character_constant_has_the_sign_the_target_gives_char() {
+        // `#if '\xff' < 0` is how a header asks whether plain `char` is signed, and the answer
+        // is the target's. AArch64 Linux makes it unsigned and makes `wchar_t` unsigned too,
+        // while Apple arm64 keeps both signed the way x86-64 does.
+        let src = "#if '\\xff' < 0\nsigned\n#else\nunsigned\n#endif\n\
+                   #if L'\\xffffffff' < 0\nwsigned\n#else\nwunsigned\n#endif\n";
+        for (triple, want) in [
+            ("x86_64-unknown-linux-gnu", "signed wsigned"),
+            ("aarch64-unknown-linux-gnu", "unsigned wunsigned"),
+            ("aarch64-apple-darwin", "signed wsigned"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(src), want, "{triple}");
+        }
+        // `u8`, `u` and `U` constants are unsigned types on every target.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#if u'\\xffff' > 0 && U'\\xffffffff' > 0\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_macro_is_expanded_before_the_expression_is_evaluated() {
+        assert_eq!(clean("#define V 3\n#if V > 2\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#define M(a) ((a) * 2)\n#if M(3) == 6\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn an_invocation_may_span_lines_within_a_run_of_text() {
+        assert_eq!(clean("#define M(a, b) a + b\nM(1,\n2)\n"), "1 + 2");
+    }
+
+    #[test]
+    fn a_conditional_inside_the_arguments_of_an_invocation_picks_what_they_hold() {
+        // toybox wraps each command's globals in `GLOBALS(...)` with `#if` lines inside.
+        let src = "#define G(...) struct { __VA_ARGS__ } g;\nG(\nint a;\n#if 0\nint b;\n#elif 1\nint c;\n#else\nint d;\n#endif\nint e;\n)\n";
+        assert_eq!(clean(src), "struct { int a; int c; int e; } g;");
+        // A parenthesis that is not a macro's still ends the run, as it always did.
+        assert_eq!(clean("f(1,\n#ifdef X\n2\n#else\n3\n#endif\n)\n"), "f(1, 3 )");
+    }
+
+    #[test]
+    fn a_conditional_inside_the_arguments_after_an_object_like_name_for_one_is_read_too() {
+        // The kernel's `cpu_to_le64` is `__cpu_to_le64`, and arm64's SMMU driver has an
+        // `#ifdef __BIG_ENDIAN` inside the parentheses after it.
+        let src = "#define F(x) [x]\n#define G F\n#define H G\nH(1 |\n#ifdef X\n2 |\n#endif\n4)\n";
+        assert_eq!(clean(src), "[1 | 4]");
+        // A name defined as itself is still only a name.
+        assert_eq!(clean("#define S S\nS(1,\n#ifdef X\n2\n#endif\n)\n"), "S(1, )");
+    }
+
+    #[test]
+    fn a_definition_inside_the_arguments_of_an_invocation_is_made_where_it_stands() {
+        // nouveau's `nvif/ioctl.h` defines the values of each field inside the
+        // `struct_group_tagged(...)` that holds it, and xe defines a helper inside the
+        // parentheses of the table it is used in.
+        let src = "#define G(...) struct { __VA_ARGS__ } g;\nG(\nint a;\n#define V 1\n#define W 2\n\
+                   #undef W\nint b;\n)\nV W\n";
+        assert_eq!(clean(src), "struct { int a; int b; } g; 1 W");
+        let src = "#define T(...) { __VA_ARGS__ }\nT(1,\n#define D(x) (x * 2)\nD(3), 4)\n";
+        assert_eq!(clean(src), "{ 1, (3 * 2), 4 }");
+        // The text in front of the invocation is read before the definition is made.
+        let src = "#define F(...) __VA_ARGS__\nL F(L,\n#define L 9\nL)\n";
+        assert_eq!(clean(src), "L 9, 9");
+    }
+
+    #[test]
+    fn a_comment_across_lines_inside_a_definition_does_not_end_it() {
+        let src = "#define F(x) \\\n  ((x) + \\\n/* runs\nonto two lines */ \\\n  1)\nF(2)\n";
+        assert_eq!(clean(src), "((2) + 1)");
+        assert_eq!(clean("#define G 1 /* a\nb */ + 2\nG\n"), "1 + 2");
+        // The `#` of a directive may be separated from its name by one too.
+        assert_eq!(clean("#/* a\n*/define H 4\nH\n"), "4");
+    }
+
+    #[test]
+    fn a_hash_after_a_comment_across_lines_is_a_directive_only_if_the_comment_began_the_line() {
+        assert_eq!(clean("/* a\nb */ #define X 3\nX\n"), "3");
+        assert!(clean("int x; /* a\nb */ #define Y 3\nY\n").ends_with(" 3 Y"));
+    }
+
+    #[test]
+    fn undef_removes_a_definition() {
+        assert_eq!(clean("#define F 1\n#undef F\n#ifdef F\nyes\n#else\nno\n#endif\n"), "no");
+        // Undefining something that was never defined is not an error, and configure scripts
+        // emit it constantly.
+        assert_eq!(clean("#undef NEVER_DEFINED\nok\n"), "ok");
+    }
+
+    #[test]
+    fn some_names_cannot_be_undefined() {
+        let mut run = Run::new();
+        run.go("#undef defined\n");
+        assert_eq!(run.messages(), vec!["`defined` cannot be undefined".to_owned()]);
+    }
+
+    #[test]
+    fn a_name_that_only_looks_reserved_can_be_undefined() {
+        let mut run = Run::new();
+        let src = "#define __STDC_WANT_LIB_EXT1__ 0\n#undef __STDC_WANT_LIB_EXT1__\n\
+                   #ifndef __STDC_WANT_LIB_EXT1__\ngone\n#endif\n";
+        assert_eq!(run.go(src), "gone");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+    }
+
+    #[test]
+    fn error_reports_the_rest_of_the_line() {
+        let mut run = Run::new();
+        run.go("#if 0\n#error not this one\n#else\n#error unsupported target\n#endif\n");
+        assert_eq!(run.messages(), vec!["unsupported target".to_owned()]);
+    }
+
+    #[test]
+    fn warning_is_a_warning() {
+        let mut run = Run::new();
+        run.go("#warning this is fine\n");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["this is fine".to_owned()]);
+    }
+
+    #[test]
+    fn an_unterminated_conditional_is_reported() {
+        let mut run = Run::new();
+        assert_eq!(run.go("#if 1\nyes\n"), "yes");
+        assert_eq!(run.messages(), vec!["unterminated `#if`".to_owned()]);
+    }
+
+    #[test]
+    fn a_conditional_without_an_if_is_reported() {
+        let mut run = Run::new();
+        run.go("#endif\n");
+        assert_eq!(run.messages(), vec!["`#endif` without `#if`".to_owned()]);
+
+        let mut run = Run::new();
+        run.go("#if 1\n#else\n#else\n#endif\n");
+        assert_eq!(run.messages(), vec!["a second `#else`".to_owned()]);
+
+        let mut run = Run::new();
+        run.go("#if 1\n#else\n#elif 1\n#endif\n");
+        assert_eq!(run.messages(), vec!["`#elif` after `#else`".to_owned()]);
+    }
+
+    #[test]
+    fn tokens_after_endif_are_a_warning_rather_than_an_error() {
+        // `#endif FOO` as a hand written comment predates `//` being portable and there is a
+        // great deal of it about. Refusing to compile it would be correct and useless.
+        let mut run = Run::new();
+        assert_eq!(run.go("#if 1\nyes\n#endif FOO\n"), "yes");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["extra tokens after `#endif`".to_owned()]);
+    }
+
+    #[test]
+    fn the_null_directive_does_nothing() {
+        assert_eq!(clean("#\na\n#\nb\n"), "a b");
+    }
+
+    #[test]
+    fn an_unknown_directive_is_an_error_when_the_region_is_live() {
+        let mut run = Run::new();
+        run.go("#frobnicate\n");
+        assert_eq!(run.messages(), vec!["invalid preprocessing directive".to_owned()]);
+    }
+
+    /// `#ident` and `#sccs` with a string are taken and leave nothing behind, and a macro that
+    /// gives the string is expanded first, as gcc does. Anything else is gcc's error.
+    #[test]
+    fn ident_and_sccs_take_a_string_and_leave_nothing() {
+        let mut run = Run::new();
+        let out = run
+            .go("#ident\t\"@(#)warmstart.c\t1.7\t93/07/05 SMI\"\n#define V \"1.2\"\n#sccs V\na\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "a");
+
+        let mut run = Run::new();
+        run.go("#ident 12\n#sccs\n");
+        let want = ["invalid #ident directive".to_owned(), "invalid #sccs directive".to_owned()];
+        assert_eq!(run.messages(), want);
+    }
+
+    #[test]
+    fn in_assembly_a_line_that_is_not_a_directive_is_text_and_is_expanded() {
+        let mut run = Run::assembly();
+        let out = run.go("#define N 3\n# a comment that says N\n#frobnicate N\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "# a comment that says 3 #frobnicate 3");
+    }
+
+    #[test]
+    fn in_assembly_a_paste_that_does_not_make_a_token_keeps_both_halves_quietly() {
+        // The kernel's linkage.h pastes a label prefix onto `\name` inside a `.macro`, and
+        // vmlinux.lds.S pastes `.init` onto a section name. gcc lets both through in assembly.
+        let mut run = Run::assembly();
+        let out = run.go("#define SIZE(n) L__sym_size_##n\n#define SEC(n) n##.init\nSIZE(\\name)\nSEC(initcall0)\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "L__sym_size_\\name initcall0.init");
+    }
+
+    #[test]
+    fn in_c_the_same_paste_is_still_an_error() {
+        let mut run = Run::new();
+        run.go("#define SEC(n) n##.init\nSEC(initcall0)\n");
+        assert!(
+            run.messages().iter().any(|m| m.contains("does not give a valid")),
+            "{:?}",
+            run.messages()
+        );
+    }
+
+    #[test]
+    fn in_assembly_a_number_after_the_hash_is_not_a_line_marker() {
+        let mut run = Run::assembly();
+        let out = run.go("# 42 \"other.S\"\nx\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "# 42 \"other.S\" x");
+        assert!(run.pp.line_directives().is_empty());
+    }
+
+    #[test]
+    fn in_assembly_the_directives_are_still_directives() {
+        let mut run = Run::assembly();
+        let out = run.go("#if 0\n#frobnicate\n#else\n#define N 1\nN\n#endif\n#\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "1");
+    }
+
+    #[test]
+    fn in_assembly_a_pragma_is_dropped_and_the_ones_the_preprocessor_answers_still_act() {
+        // x86's boot/compressed reads hidden.h into its `.S` files with `-include`, and gcc -E
+        // in assembler-with-cpp prints neither of these two.
+        let mut run = Run::assembly();
+        let src = "#pragma GCC visibility push(hidden)\n_Pragma(\"weak x\") ret\n\
+                   #define N 1\n#pragma push_macro(\"N\")\n#undef N\n\
+                   #pragma pop_macro(\"N\")\nN\n";
+        let out = run.go(src);
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "ret 1");
+    }
+
+    #[test]
+    fn in_assembly_a_hash_before_a_word_that_is_not_a_parameter_is_kept() {
+        // The AArch64 immediate. In C this is E0305, which the macros tests cover.
+        let mut run = Run::assembly();
+        let out =
+            run.go("#define ZERO(r) mov r, #0\n#define IMM(r) mov r, #imm\nZERO(x1)\nIMM(x2)\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "mov x1, #0 mov x2, #imm");
+    }
+
+    #[test]
+    fn in_assembly_the_name_after_a_dollar_is_expanded() {
+        let mut run = Run::assembly();
+        let out = run.go("#define FOO 3\nmovq $FOO, %rax\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "movq $3, %rax");
+    }
+
+    #[test]
+    fn line_is_recorded_for_the_source_map() {
+        let mut run = Run::new();
+        run.go("#line 42 \"other.c\"\n");
+        assert!(run.messages().is_empty());
+        let recorded = run.pp.line_directives();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].line, 42);
+        let file = recorded[0].file.expect("a file name was given");
+        assert_eq!(run.interner.resolve(file), "\"other.c\"");
+    }
+
+    #[test]
+    fn line_moves_what_line_and_file_the_lines_after_it_are_on() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 1000\n__LINE__ __FILE__\n__LINE__\n"), "1000 \"/main.c\" 1001");
+    }
+
+    #[test]
+    fn a_line_marker_moves_the_lines_after_it_the_way_line_does() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 200 \"xyz\"\n__FILE__ __LINE__\n"), "\"xyz\" 200");
+    }
+
+    #[test]
+    fn a_line_marker_with_no_name_leaves_the_name_alone() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 20\n__FILE__ __LINE__\n"), "\"/main.c\" 20");
+    }
+
+    #[test]
+    fn a_line_marker_may_say_line_zero() {
+        // `#line 0` is an error and this is not, because a marker is written by a program and a
+        // program counting from zero is allowed to say so.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 0 \"xyz\"\n__LINE__\n"), "0");
+    }
+
+    #[test]
+    fn entering_and_returning_are_a_nesting_the_marker_flags_keep() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let text =
+            run.go("# 200 \"xyz\" 1\n__FILE__\n# 5 \"/main.c\" 2\n__FILE__ __LINE__\n# 9 3 4\n");
+        assert_eq!(text, "\"xyz\" \"/main.c\" 5");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn returning_to_a_file_nothing_was_ever_in_is_ignored() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("# 200 \"xyz\" 2 3\n__FILE__ __LINE__\n"), "\"/main.c\" 2");
+        assert_eq!(
+            run.messages(),
+            vec!["file `xyz` linemarker ignored due to incorrect nesting".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_flag_that_is_not_one_of_the_four_is_an_error() {
+        let mut run = Run::new();
+        run.go("# 20 \"a\" 7\n");
+        assert_eq!(run.messages(), vec!["invalid flag `7` in line directive".to_owned()]);
+    }
+
+    #[test]
+    fn a_hash_and_something_that_is_not_a_line_number_is_still_an_unknown_directive() {
+        // A preprocessing number is a wider thing than a number, and `1.5` is one of them.
+        let mut run = Run::new();
+        run.go("# 1.5 \"a\"\n");
+        assert_eq!(run.messages(), vec!["invalid preprocessing directive".to_owned()]);
+    }
+
+    #[test]
+    fn a_name_on_the_directive_is_the_name_from_there_on() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\"\n__FILE__ __LINE__\n"), "\"gen.y\" 7");
+    }
+
+    #[test]
+    fn a_directive_with_no_name_keeps_the_one_already_in_force() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\"\n#line 20\n__FILE__ __LINE__\n"), "\"gen.y\" 20");
+    }
+
+    #[test]
+    fn the_number_is_expanded_first_because_line_plus_one_is_real_code() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#define WHERE 300\n#line WHERE\n__LINE__\n"), "300");
+    }
+
+    #[test]
+    fn a_directive_in_a_header_does_not_move_the_file_that_included_it() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/h.h", "#line 500\n__LINE__\n");
+        run.dir("/");
+        assert_eq!(run.go("#include <h.h>\n__LINE__\n"), "500 2");
+    }
+
+    #[test]
+    fn extra_tokens_after_the_file_name_are_a_warning_and_not_an_error() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#line 7 \"gen.y\" and more\n__LINE__\n"), "7");
+        assert_eq!(run.messages(), vec!["extra tokens after `#line`".to_owned()]);
+    }
+
+    #[test]
+    fn a_line_number_out_of_range_is_refused() {
+        let mut run = Run::new();
+        run.go("#line 0\n");
+        assert_eq!(run.messages(), vec!["`#line` number is out of range".to_owned()]);
+
+        let mut run = Run::new();
+        run.go("#line notanumber\n");
+        assert_eq!(run.messages(), vec!["`#line` needs a decimal line number".to_owned()]);
+    }
+
+    #[test]
+    fn a_pragma_passes_through_unchanged() {
+        assert_eq!(clean("#pragma pack(1)\nint x;\n"), "#pragma pack(1) int x;");
+    }
+
+    /// `#pragma GCC warning` and `#pragma GCC error` are said here and kept out of the output,
+    /// written either way, as gcc's `-E` keeps them out. `#pragma message` is the parser's.
+    #[test]
+    fn gcc_warning_and_error_are_said_here_and_not_passed_on() {
+        let mut run = Run::new();
+        let text = run.go("#pragma GCC warning \"care\\tful\"\n#pragma GCC error \"stop\"\n\
+             #pragma message \"m\"\n_Pragma(\"GCC warning \\\"op\\\"\")\n\
+             #pragma GCC warning 42\nint x;\n");
+        assert_eq!(text, "#pragma message \"m\" int x;");
+        assert_eq!(
+            run.severities(),
+            vec![Severity::Warning, Severity::Error, Severity::Warning, Severity::Error]
+        );
+        assert_eq!(
+            run.messages(),
+            ["care\tful", "stop", "op", "invalid `#pragma GCC warning` directive"]
+        );
+    }
+
+    #[test]
+    fn a_poisoned_name_is_an_error_where_the_file_writes_it_and_not_where_a_macro_does() {
+        let mut run = Run::new();
+        let text =
+            run.go("#define OLD strcpy\n#define GONE 1\n#pragma GCC poison memcpy strcpy GONE\n\
+             #pragma GCC poison memcpy\n#pragma GCC poison 42 strcat\nOLD memcpy GONE strcat\n\
+             #ifdef strcpy\n#endif\n#if 0\nmemcpy\n#endif\n\
+             _Pragma(\"GCC poison late\") late late\nlate\n");
+        assert_eq!(text, "strcpy memcpy GONE strcat late late late");
+        assert_eq!(
+            run.messages(),
+            [
+                "poisoning existing macro `GONE`",
+                "invalid `#pragma GCC poison` directive",
+                "attempt to use poisoned `memcpy`",
+                "attempt to use poisoned `GONE`",
+                "attempt to use poisoned `strcpy`",
+                "attempt to use poisoned `late`",
+                "attempt to use poisoned `late`",
+                "attempt to use poisoned `late`",
+            ]
+        );
+    }
+
+    /// glibc indents a directive inside a nest of conditionals, one space per level, so
+    /// `regex.h` writes `# pragma GCC diagnostic push`. gcc prints it back with the space
+    /// gone, and a header preprocessed two ways that differ only there is a difference
+    /// somebody has to read before deciding it does not matter.
+    #[test]
+    fn the_space_between_the_hash_and_the_word_comes_off_a_pragma_that_is_indented() {
+        assert_eq!(clean("#if 1\n# pragma pack(1)\n#endif\n"), "#pragma pack(1)");
+        assert_eq!(clean("#  pragma  pack( 1 )\n"), "#pragma pack( 1 )", "the rest is kept");
+    }
+
+    #[test]
+    fn the_pragma_operator_becomes_a_pragma() {
+        assert_eq!(
+            clean("_Pragma(\"GCC visibility push(default)\")\nint x;\n"),
+            "#pragma GCC visibility push(default) int x;"
+        );
+    }
+
+    #[test]
+    fn the_pragma_operator_works_from_inside_a_macro() {
+        // This is the entire reason `_Pragma` exists: a `#pragma` cannot be written in a macro
+        // body, so a header that wants to wrap one has no other option.
+        let src = "#define PUSH _Pragma(\"pack(push)\")\nPUSH\nint x;\n";
+        assert_eq!(clean(src), "#pragma pack(push) int x;");
+    }
+
+    /// A pragma is a line even when it was written as an expression, so whatever follows one
+    /// has to start a line. The phase that turns these back into a record takes the line as
+    /// its unit, and without this the `int` would be read as part of the pragma.
+    #[test]
+    fn what_follows_a_pragma_operator_starts_a_line() {
+        let mut run = Run::new();
+        let out = run.raw("int x; _Pragma(\"pack(1)\") int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        // `int x ;` then the six the pragma became, then `int y ;`. Only the first `int` was
+        // at the start of a line in the source, and the second one is now.
+        assert_eq!(
+            starts,
+            vec![true, false, false, true, false, false, false, false, false, true, false, false]
+        );
+    }
+
+    /// A line belongs to the file rather than to the macro that happened to be written first
+    /// on it, so a macro that comes to nothing hands the line to whatever follows it. The same
+    /// phase as above is what needs this: `SQLITE_API const char sqlite3_version[] = ...` after
+    /// a `#pragma pack` is read as more of the pragma without it, and the declaration is gone.
+    #[test]
+    fn a_macro_that_came_to_nothing_hands_on_the_line_it_started() {
+        let mut run = Run::new();
+        let out = run.raw("#define E\nint x;\nE int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        // `int x ;` then `int y ;`, and the second `int` is where the `E` stood.
+        assert_eq!(starts, vec![true, false, false, true, false, false]);
+    }
+
+    /// The debt walks along until something real takes it, which is how the space does it too.
+    #[test]
+    fn a_run_of_macros_that_came_to_nothing_hands_the_line_along() {
+        let mut run = Run::new();
+        let out = run.raw("#define E\n#define F(x)\nE F(1) E int y;\n");
+        let starts: Vec<_> =
+            out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
+        assert_eq!(starts, vec![true, false, false]);
+    }
+
+    /// `vcruntime.h` opens every C runtime header this way, so on an msvc row nothing that
+    /// includes `stdio.h` gets past its first declaration without it.
+    #[test]
+    fn microsofts_pragma_operator_takes_tokens_on_an_msvc_row() {
+        let src = "#define PACKING 8\n#define BEGIN __pragma(pack(push, PACKING))\nBEGIN int x;\n\
+                   __pragma(warning(disable: 4001)) int y;\n";
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        assert_eq!(
+            run.go(src),
+            "#pragma pack(push, 8) int x; #pragma warning(disable: 4001) int y;"
+        );
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        run.go("__pragma(pack(push) int x;\n");
+        assert_eq!(run.messages(), vec!["`__pragma` takes the pragma in parentheses".to_owned()]);
+    }
+
+    /// Elsewhere it is an identifier like any other, as it is to gcc, unless `-fms-extensions`
+    /// asks for Microsoft's dialect, and `-fno-ms-extensions` takes it away on an msvc row.
+    #[test]
+    fn microsofts_pragma_operator_is_an_identifier_without_microsofts_extensions() {
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-gnu", &Predef::new());
+        assert_eq!(run.go("__pragma(pack(1))\n"), "__pragma(pack(1))");
+
+        let off = Predef { ms_extensions: Some(false), ..Predef::new() };
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &off);
+        assert_eq!(run.go("__pragma(pack(1))\n"), "__pragma(pack(1))");
+
+        let on = Predef { ms_extensions: Some(true), ..Predef::new() };
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &on);
+        assert_eq!(run.go("__pragma(pack(1))\n"), "#pragma pack(1)");
+    }
+
+    #[test]
+    fn a_pragma_operator_that_is_not_given_a_string_is_reported() {
+        let mut run = Run::new();
+        run.go("_Pragma(x)\n");
+        assert_eq!(run.messages(), vec!["`_Pragma` takes a single string literal".to_owned()]);
+    }
+
+    #[test]
+    fn an_include_reads_the_file_it_names() {
+        let mut run = Run::new();
+        run.file("/dir/one.h", "int from_the_header;\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <one.h>\nint after;\n"), "int from_the_header; int after;");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_quoted_include_looks_next_to_the_including_file_first() {
+        let mut run = Run::new();
+        run.file("/local.h", "beside\n");
+        run.file("/dir/local.h", "on the path\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include \"local.h\"\n"), "beside");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_angled_include_does_not_look_next_to_the_including_file() {
+        let mut run = Run::new();
+        run.file("/local.h", "beside\n");
+        run.file("/dir/local.h", "on the path\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <local.h>\n"), "on the path");
+    }
+
+    #[test]
+    fn a_macro_defined_in_a_header_is_visible_after_the_include() {
+        let mut run = Run::new();
+        run.file("/dir/defs.h", "#define N 42\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <defs.h>\nint a = N;\n"), "int a = 42;");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_include_guard_keeps_the_second_read_empty() {
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\nonce\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+        assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2, "the second include is not opened at all");
+    }
+
+    fn named(name: &str, macros_only: bool) -> Preinclude {
+        Preinclude { name: name.to_owned(), macros_only }
+    }
+
+    #[test]
+    fn a_command_line_include_contributes_its_text_and_an_imacros_contributes_none() {
+        let mut run = Run::new();
+        run.file("i.h", "from_include\n#define I 1\n");
+        run.file("m.h", "from_macros\n#define M 1\n");
+        assert_eq!(run.preinclude(&[named("i.h", false), named("m.h", true)]), "from_include");
+        // Both sets of definitions are in scope for the source file, whichever flag named them.
+        assert_eq!(run.go("I M\n"), "1 1");
+    }
+
+    #[test]
+    fn every_imacros_runs_before_every_include_whatever_order_the_command_line_was_in() {
+        // Measured against GCC: the two flags the other way round give the same output byte for
+        // byte, so the order between the families is fixed and the order within one is not.
+        for files in
+            [[named("i.h", false), named("m.h", true)], [named("m.h", true), named("i.h", false)]]
+        {
+            let mut run = Run::new();
+            run.file("i.h", "#ifdef M\nsaw_it\n#else\nmissed_it\n#endif\n");
+            run.file("m.h", "#define M 1\n");
+            assert_eq!(run.preinclude(&files), "saw_it");
+        }
+    }
+
+    #[test]
+    fn a_header_read_for_its_macros_is_not_read_again_by_an_include_that_its_guard_covers() {
+        // What makes `-imacros` usable on a header the source includes anyway: the definitions
+        // arrive early and the declarations do not arrive twice.
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\ndeclarations\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.preinclude(&[named("/dir/g.h", true)]), "");
+        assert_eq!(run.go("#include <g.h>\n"), "");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_command_line_include_is_a_dependency_and_is_named_before_the_headers_it_reads() {
+        let mut run = Run::new();
+        run.file("i.h", "#include \"deep.h\"\n");
+        run.file("deep.h", "\n");
+        run.file("m.h", "\n");
+        run.preinclude(&[named("i.h", false), named("m.h", true)]);
+        let names: Vec<String> =
+            run.pp.dependencies().iter().map(|d| d.path.to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = names.iter().map(|n| n.replace('\\', "/")).collect();
+        assert_eq!(names, ["m.h", "i.h", "deep.h"]);
+    }
+
+    #[test]
+    fn a_prerequisite_is_spelled_without_the_dot_the_search_path_was_written_with() {
+        // What GCC writes, and it disagrees with what the same header's line marker says. A
+        // marker names the file the way the search reached it and a prerequisite names a file
+        // `make` compares a timestamp against, and the leading `./` says nothing about that.
+        let mut run = Run::new();
+        run.file("d/f.h", "\n");
+        run.dir("./d");
+        run.go("#include <f.h>\n");
+        let names: Vec<String> =
+            run.pp.dependencies().iter().map(|d| d.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(names.iter().map(|n| n.replace('\\', "/")).collect::<Vec<_>>(), ["d/f.h"]);
+    }
+
+    #[test]
+    fn a_header_is_a_prerequisite_once_for_each_spelling_of_its_path() {
+        // Measured against GCC 13.3, where `gcc -M` on `#include "d/a.h"`, `"./d/a.h"`,
+        // `"d/a.h"`, `"d/./a.h"`, `"d//a.h"` and `"d/e/../a.h"` writes `d/a.h d/a.h d/./a.h
+        // d//a.h d/e/../a.h`. The third include is the first spelling again and adds nothing,
+        // and the second `d/a.h` is `./d/a.h` with its `./` taken off. Here the main file is in
+        // `/`, so each path starts there and no `./` is at the front. The `..` spelling is left
+        // out, because the memory file system does not resolve a `..`.
+        let mut run = Run::new();
+        run.file("/d/a.h", "\n");
+        let includes = ["d/a.h", "./d/a.h", "d/a.h", "d/./a.h", "d//a.h"];
+        let text: String = includes.iter().map(|i| format!("#include \"{i}\"\n")).collect();
+        run.go(&text);
+        let messages = run.messages();
+        assert!(messages.is_empty(), "{messages:?}");
+        let names: Vec<String> = run
+            .pp
+            .dependencies()
+            .iter()
+            .map(|d| d.path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(names, ["/d/a.h", "/./d/a.h", "/d/./a.h", "/d//a.h"]);
+        assert_eq!(prerequisite(Path::new("./d/a.h")), Path::new("d/a.h"));
+        assert_eq!(prerequisite(Path::new(".//./d/a.h")), Path::new("d/a.h"));
+        assert_eq!(prerequisite(Path::new("d/./a.h")).to_str(), Some("d/./a.h"));
+        assert_eq!(prerequisite(Path::new("../d/a.h")).to_str(), Some("../d/a.h"));
+    }
+
+    #[test]
+    fn a_command_line_include_that_is_nowhere_is_reported_against_the_flag_that_named_it() {
+        let mut run = Run::new();
+        assert_eq!(run.preinclude(&[named("nope.h", false)]), "");
+        assert_eq!(run.messages(), ["`nope.h` file not found"]);
+    }
+
+    #[test]
+    fn the_other_spelling_of_a_guard_is_recognised_too() {
+        for guard in ["#if !defined(G)", "#if !defined G"] {
+            let mut run = Run::new();
+            run.file("/dir/g.h", &format!("{guard}\n#define G\nonce\n#endif\n"));
+            run.dir("/dir");
+            assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+            assert_eq!(run.files(), 2, "{guard} should be a guard");
+        }
+    }
+
+    #[test]
+    fn a_conditional_that_is_not_a_guard_does_not_skip_anything() {
+        // Nothing defines the macro, so the second read is not the same as the first and the
+        // file has to be opened again.
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\ntwice\n#endif\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "twice twice");
+        assert_eq!(run.files(), 3);
+    }
+
+    #[test]
+    fn a_file_whose_opening_conditional_has_another_branch_is_read_again() {
+        // A file that counts how many times it has been read, which is a real shape and not a
+        // puzzle: tcc's own test suite includes one three times through three spellings of the
+        // same header name to check that computed includes work. The opening line is `#ifndef`
+        // and the macro does get defined, so everything the optimization looks at says guard,
+        // and the branch behind the `#elif` is what makes that wrong. The second read produces
+        // the second branch rather than nothing at all.
+        let mut run = Run::new();
+        let file = "#ifndef G\n#define G\nfirst\n#elif !defined H\n#define H\nsecond\n#else\nthird\n#endif\n";
+        run.file("/dir/g.h", file);
+        run.dir("/dir");
+        let out = run.go("#include <g.h>\n#include <g.h>\n#include <g.h>\n");
+        assert_eq!(out, "first second third");
+        assert_eq!(run.files(), 4, "the file is opened once for each include");
+    }
+
+    #[test]
+    fn a_branch_inside_the_guard_is_not_the_guard_having_a_branch() {
+        // The `#else` here belongs to a conditional nested inside the guard and says nothing
+        // about whether reading the file again produces anything, so the optimization holds.
+        let mut run = Run::new();
+        let file = "#ifndef G\n#define G\n#if 0\nno\n#else\nonce\n#endif\n#endif\n";
+        run.file("/dir/g.h", file);
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "once");
+        assert_eq!(run.files(), 2, "the second include is skipped");
+    }
+
+    #[test]
+    fn a_token_outside_the_guard_stops_it_being_a_guard() {
+        let mut run = Run::new();
+        run.file("/dir/g.h", "#ifndef G\n#define G\n#endif\nalways\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <g.h>\n#include <g.h>\n"), "always always");
+        assert_eq!(run.files(), 3);
+    }
+
+    #[test]
+    fn pragma_once_skips_the_second_read_and_does_not_reach_the_output() {
+        let mut run = Run::new();
+        run.file("/dir/o.h", "#pragma once\nonce\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#include <o.h>\n#include <o.h>\n"), "once");
+        assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2);
+    }
+
+    #[test]
+    fn pragma_once_in_the_main_file_is_a_warning_and_is_still_applied() {
+        // The warning is about the usual case, a main file that meant to be a header. The
+        // line is applied anyway, because the file that includes itself is the case where it
+        // does work in a main file, and without it this is an infinite include.
+        let mut run = Run::new();
+        let src = "#pragma once\n#include <s.c>\nbody\n";
+        run.file("/dir/s.c", src);
+        run.dir("/dir");
+        assert_eq!(run.go_named("/dir/s.c", src), "body");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["`#pragma once` in the main file".to_owned()]);
+        assert_eq!(run.files(), 1);
+    }
+
+    #[test]
+    fn pragma_once_holds_across_two_spellings_of_the_one_path() {
+        // `-I .` puts a `./` in front of everything it finds, and the file that asked to be
+        // read once was named without one. Comparing the text as written would read it twice.
+        let mut run = Run::new();
+        run.file("dir/s.c", "#pragma once\nbody\n");
+        run.dir(".");
+        assert_eq!(run.go("#include <dir/s.c>\n#include <dir/s.c>\n"), "body");
+        assert!(run.messages().is_empty());
+        assert_eq!(run.files(), 2);
+    }
+
+    #[test]
+    fn any_other_pragma_still_passes_through() {
+        assert_eq!(clean("#pragma once_upon_a_time\n"), "#pragma once_upon_a_time");
+    }
+
+    /// clang's own `__clang_cuda_complex_builtins.h` opens with this, and a header that pushes a
+    /// name, defines it for its own use and pops it at the end is the whole idiom.
+    #[test]
+    fn push_macro_and_pop_macro_put_a_definition_aside_and_bring_it_back() {
+        let src = "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n                   a X\n#pragma pop_macro(\"X\")\nb X\n";
+        assert_eq!(clean(src), "a 2 b 1");
+    }
+
+    #[test]
+    fn a_name_with_no_definition_pushes_and_pops_the_absence() {
+        // The pragma is about the state, and "not defined" is a state. A header that pushes a
+        // name it does not know about has to get an undefined name back, not the one it made.
+        let src = "#pragma push_macro(\"X\")\n#define X 1\na X\n#pragma pop_macro(\"X\")\nb X\n";
+        assert_eq!(clean(src), "a 1 b X");
+    }
+
+    #[test]
+    fn the_pushes_nest() {
+        let src = "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n                   #pragma push_macro(\"X\")\n#undef X\n#define X 3\n                   a X\n#pragma pop_macro(\"X\")\nb X\n#pragma pop_macro(\"X\")\nc X\n";
+        assert_eq!(clean(src), "a 3 b 2 c 1");
+    }
+
+    #[test]
+    fn a_pop_with_nothing_pushed_says_nothing() {
+        // The two are written in pairs across headers that do not know about each other, so a
+        // diagnostic here would fire on code that is not wrong. gcc is silent as well.
+        assert_eq!(clean("#define X 1\n#pragma pop_macro(\"X\")\nX\n"), "1");
+        assert_eq!(clean("#pragma pop_macro(\"Never\")\nx\n"), "x");
+    }
+
+    #[test]
+    fn the_pragma_operator_spelling_works_and_takes_effect_where_it_is_written() {
+        // A `#pragma` cannot come out of a macro body, so a macro that wants to save a name has
+        // only this spelling. The lines around it are one run of text to the expander, and the
+        // pop has to be answered before the line after it is expanded or that line still sees
+        // the definition the pop was there to undo.
+        let src = "#define X 1\n_Pragma(\"push_macro(\\\"X\\\")\")\n#undef X\n#define X 2\n                   a X\n_Pragma(\"pop_macro(\\\"X\\\")\")\nb X\n";
+        assert_eq!(clean(src), "a 2 b 1");
+    }
+
+    #[test]
+    fn the_gcc_spelling_is_not_one_of_these_and_passes_through() {
+        // `#pragma GCC push_macro("X")` does nothing in gcc and is printed back, unlike the
+        // namespaced spellings of the pragmas the compiler proper reads. Answering it here
+        // would be a difference from gcc dressed up as a courtesy.
+        let src = "#define X 1\n#pragma GCC push_macro(\"X\")\n#undef X\n#define X 2\nX\n";
+        assert_eq!(clean(src), "#pragma GCC push_macro(\"X\") 2");
+    }
+
+    #[test]
+    fn a_push_macro_that_is_not_the_shape_is_an_error() {
+        for src in ["#pragma push_macro\n", "#pragma push_macro(X)\n", "#pragma pop_macro()\n"] {
+            let mut run = Run::new();
+            run.go(src);
+            let word = if src.contains("push") { "push" } else { "pop" };
+            assert_eq!(
+                run.messages(),
+                vec![format!("invalid `#pragma {word}_macro` directive")],
+                "from {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_string_that_does_not_spell_one_identifier_names_no_macro() {
+        // gcc neither complains about these nor does anything with them, and matching that is
+        // worth more than improving on it: a header that has one has been building for years.
+        assert_eq!(clean("#pragma push_macro(\"a b\")\nx\n"), "x");
+        assert_eq!(clean("#pragma push_macro(\"2\")\nx\n"), "x");
+    }
+
+    #[test]
+    fn what_follows_the_closing_parenthesis_is_the_usual_warning() {
+        let mut run = Run::new();
+        assert_eq!(run.go("#define X 1\n#pragma push_macro(\"X\") junk\nX\n"), "1");
+        assert_eq!(run.severities(), vec![Severity::Warning]);
+        assert_eq!(run.messages(), vec!["extra tokens after `#pragma`".to_owned()]);
+    }
+
+    #[test]
+    fn has_include_answers_from_the_search_path() {
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        let src = "#if __has_include(<there.h>)\nyes\n#endif\n\
+                   #if __has_include(<gone.h>)\nno\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty(), "a header that is not there is an answer, not an error");
+    }
+
+    #[test]
+    fn has_include_asks_the_question_the_include_on_the_same_line_would() {
+        // The quoted form looks next to the file that wrote it, so the two spellings answer
+        // differently about the same header. A `__has_include` that did not agree with the
+        // `#include` it guards would be worse than not having one.
+        let mut run = Run::new();
+        run.file("/beside.h", "");
+        let src = "#if __has_include(\"beside.h\")\nquoted\n#endif\n\
+                   #if __has_include(<beside.h>)\nangled\n#endif\n";
+        assert_eq!(run.go(src), "quoted");
+    }
+
+    #[test]
+    fn has_include_next_starts_where_include_next_would() {
+        let mut run = Run::new();
+        run.file("/a/both.h", "#if __has_include_next(<both.h>)\nmore\n#endif\n");
+        run.file("/b/both.h", "last\n");
+        run.file("/a/only.h", "#if __has_include_next(<only.h>)\nmore\n#endif\n");
+        run.dir("/a");
+        run.dir("/b");
+        assert_eq!(run.go("#include <both.h>\n"), "more");
+        assert_eq!(run.go("#include <only.h>\n"), "", "there is nothing after /a to find it in");
+    }
+
+    #[test]
+    fn the_operand_of_has_include_is_not_macro_expanded() {
+        // `linux` is a predefined macro on a Linux target, and `<linux/version.h>` is a real
+        // header. Expanding the operand would ask about `<1/version.h>`.
+        let mut run = Run::new();
+        run.file("/dir/linux/version.h", "");
+        run.dir("/dir");
+        let src = "#define linux 1\n#if __has_include(<linux/version.h>)\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn a_macro_may_expand_to_a_has_include() {
+        // Which is why the operators are resolved after expansion as well as before it.
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        let src = "#define HAVE __has_include(<there.h>)\n#if HAVE\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn defined_says_the_has_operators_are_there() {
+        // The shape every header that uses them is written in, because they are newer than
+        // some of the compilers it has to build under.
+        let src = "#if defined(__has_include) && defined __has_builtin\nyes\n#endif\n";
+        assert_eq!(clean(src), "yes");
+        assert_eq!(clean("#ifdef __has_attribute\nyes\n#endif\n"), "yes");
+    }
+
+    /// The two conventions are there on x86 and not anywhere else, as gcc 16 answers, which is
+    /// yes with `-m32` as well even though it ignores both there with a warning, as this does.
+    #[test]
+    fn the_calling_convention_attributes_are_there_on_x86_alone() {
+        let asked = "__has_attribute(ms_abi) __has_attribute(__sysv_abi__)\n";
+        for (triple, answer) in [
+            ("x86_64-unknown-linux-gnu", "1 1"),
+            ("x86_64-w64-windows-gnu", "1 1"),
+            ("i686-unknown-linux-gnu", "1 1"),
+            ("aarch64-unknown-linux-gnu", "0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// gcc 16's answers for the 32-bit conventions, `ms_struct` and the DLL attributes, which
+    /// depend on the target: measured on x86-64 Linux, with `-m32`, with mingw-w64 gcc and with
+    /// AArch64 gcc.
+    #[test]
+    fn the_answers_for_the_x86_and_windows_attributes_are_the_targets() {
+        let asked = "__has_attribute(stdcall) __has_attribute(__cdecl__) \
+                     __has_c_attribute(gnu::fastcall) __has_attribute(ms_struct) \
+                     __has_attribute(gcc_struct) __has_attribute(dllimport) \
+                     __has_attribute(selectany) __has_attribute(vectorcall)\n";
+        for (triple, answer) in [
+            ("x86_64-unknown-linux-gnu", "1 1 1 1 1 0 0 0"),
+            ("x86_64-w64-windows-gnu", "1 1 1 1 1 1 1 0"),
+            ("i686-unknown-linux-gnu", "1 1 1 1 1 0 0 0"),
+            ("aarch64-unknown-linux-gnu", "0 0 0 0 0 0 0 0"),
+            ("aarch64-w64-windows-gnu", "0 0 0 1 1 1 1 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// clang has the three wasm attributes on its wasm target, and gcc has no wasm target, so
+    /// gcc 16 does not know the names on any other row.
+    #[test]
+    fn the_wasm_attributes_are_there_on_the_wasm_rows_alone() {
+        let asked = "__has_attribute(export_name) __has_attribute(__import_module__) \
+                     __has_attribute(import_name)\n";
+        for (triple, answer) in [
+            ("wasm32-unknown-wasip1", "1 1 1"),
+            ("wasm32-unknown-unknown", "1 1 1"),
+            ("x86_64-unknown-linux-gnu", "0 0 0"),
+            ("aarch64-unknown-linux-gnu", "0 0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// clang has it on AArch64 alone, and mingw-w64's `<setjmp.h>` takes a yes anywhere as
+    /// leave to call `_setjmp(buf, __builtin_sponentry())`, which sema then refuses.
+    #[test]
+    fn sponentry_is_there_on_aarch64_alone() {
+        let asked = "__has_builtin(__builtin_sponentry)\n";
+        for (triple, answer) in [
+            ("aarch64-w64-windows-gnu", "1"),
+            ("aarch64-unknown-linux-gnu", "1"),
+            ("x86_64-w64-windows-gnu", "0"),
+            ("x86_64-unknown-linux-gnu", "0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// The kernel asks `__has_attribute(__counted_by__)` to decide whether to write it, and under
+    /// `-fgnuc-version=12.2.0` the answer is gcc 12's, which has never heard of it.
+    #[test]
+    fn the_operators_answer_for_the_gcc_the_persona_claims() {
+        let asked = "__has_attribute(__counted_by__) __has_builtin(__builtin_counted_by_ref) \
+                     __has_attribute(packed)\n";
+        for (major, answer) in [(16, "1 1 1"), (15, "1 1 1"), (12, "0 0 1")] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
+        }
+    }
+
+    #[test]
+    fn has_attribute_answers_out_of_the_matrix() {
+        // Both answers matter. A yes for an attribute this compiler ignores sends a header down
+        // a path that then fails to compile, and a no for one it honours sends it down a worse
+        // path than it had to take.
+        assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_attribute(alloc_size)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if !__has_attribute(no_such_attribute)\nno\n#endif\n"), "no");
+        // A row the table has and marks as not done is a no as well, whichever row that is today.
+        let undone = rucc_gnu::features()
+            .iter()
+            .find(|row| row.kind == Kind::Attribute && !row.status.is_available());
+        if let Some(row) = undone {
+            let asked = format!("#if __has_attribute({})\nyes\n#endif\n", row.name);
+            assert_eq!(clean(&asked), "", "{}", row.name);
+        }
+    }
+
+    #[test]
+    fn the_scoped_spelling_of_an_attribute_is_the_same_question() {
+        // `[[gnu::packed]]` and `__attribute__((packed))` are one attribute, so both operators
+        // answer one for the scoped spelling, as gcc 16 does. A scoped name is asked of the
+        // GNU attributes only, so it answers one rather than the standard's number, a name
+        // only the standard has answers zero, and a vendor that is not GCC answers zero.
+        let ask = |line: &str| clean(&format!("{line}\n"));
+        assert_eq!(ask("c __has_c_attribute(gnu::packed)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(__gnu__::__packed__)"), "c 1");
+        assert_eq!(ask("c __has_attribute(gnu::packed)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(gnu::fallthrough)"), "c 1");
+        assert_eq!(ask("c __has_attribute(gnu::deprecated)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(gnu::nodiscard)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(gnu::no_such_attribute)"), "c 0");
+        assert_eq!(ask("c __has_attribute(clang::packed)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(clang::packed)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(deprecated)"), "c 202311");
+        assert_eq!(ask("c __has_attribute(deprecated)"), "c 202311");
+    }
+
+    /// Every name the kernel's `include/linux/compiler_attributes.h` asks about, from v6.12, with
+    /// what gcc 16 answers for it on x86-64.
+    ///
+    /// The header defines each of its macros empty when `__has_attribute` says no, so a no for an
+    /// attribute this compiler honours quietly changes the kernel, and a yes for one it ignores is
+    /// a promise nothing keeps. The names are the ones the header asks about and the ones it writes
+    /// unconditionally, since a header written for gcc 5.1 and up takes those as given.
+    ///
+    /// The answers are what gcc 16 gives. GCC 14 answered the standard's older numbers for
+    /// `fallthrough` and `noreturn`, 201904 and 202202, where 16 answers 202311 for every C23
+    /// attribute, and this compiler calls itself 16. `no_caller_saved_registers` is an attribute
+    /// of x86 alone, which is why the target is written down. The clang-only names at the bottom
+    /// are ones gcc answers no for and so must this.
+    const KERNEL_ATTRIBUTES: [(&str, u32); 39] = [
+        ("alias", 1),
+        ("aligned", 1),
+        ("alloc_size", 1),
+        ("always_inline", 1),
+        ("assume_aligned", 1),
+        ("cleanup", 1),
+        ("const", 1),
+        ("copy", 1),
+        ("designated_init", 1),
+        ("error", 1),
+        ("externally_visible", 1),
+        ("fallthrough", 202_311),
+        ("format", 1),
+        ("gnu_inline", 1),
+        ("malloc", 1),
+        ("mode", 1),
+        ("no_caller_saved_registers", 1),
+        ("no_profile_instrument_function", 1),
+        ("no_stack_protector", 1),
+        ("noclone", 1),
+        ("noinline", 1),
+        ("nonstring", 1),
+        ("noreturn", 202_311),
+        ("packed", 1),
+        ("pure", 1),
+        ("section", 1),
+        ("uninitialized", 1),
+        ("unused", 1),
+        ("used", 1),
+        ("warn_unused_result", 1),
+        ("warning", 1),
+        ("weak", 1),
+        ("counted_by", 1),
+        ("diagnose_as_builtin", 0),
+        ("disable_sanitizer_instrumentation", 0),
+        ("overloadable", 0),
+        ("pass_dynamic_object_size", 0),
+        ("pass_object_size", 0),
+        ("name", 0),
+    ];
+
+    /// The kernel's names are answered the way gcc 16 answers them, except where this compiler
+    /// does not do what the attribute asks, and there the answer is no and the table says so.
+    ///
+    /// A difference has to go one way only. Answering yes where gcc says no is never right, and
+    /// answering no where gcc says yes is right only for a row the table marks as not done, so a
+    /// name the kernel uses cannot be missing from the table and come out as no by accident.
+    #[test]
+    fn the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them() {
+        let asked: Vec<String> = KERNEL_ATTRIBUTES
+            .iter()
+            .map(|(name, _)| format!("__has_attribute(__{name}__)"))
+            .collect();
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let text = run.go(&(asked.join("\n") + "\n"));
+        let answers: Vec<u32> = text.split(' ').map(|n| n.parse().expect("a number")).collect();
+        assert_eq!(answers.len(), KERNEL_ATTRIBUTES.len(), "{text}");
+        for (&(name, gcc), &ours) in KERNEL_ATTRIBUTES.iter().zip(&answers) {
+            if ours == gcc {
+                continue;
+            }
+            assert_eq!(ours, 0, "`{name}` is answered {ours} where gcc answers {gcc}");
+            let row = rucc_gnu::lookup(Kind::Attribute, name);
+            assert!(
+                row.is_some_and(|row| !row.status.is_available()),
+                "`{name}` is answered no where gcc answers {gcc} and the table has no row saying why"
+            );
+        }
+    }
+
+    #[test]
+    fn has_builtin_answers_no_until_the_builtin_is_real() {
+        assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_clz)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_alloca)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_object_size)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__atomic_signal_fence)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_va_arg_pack)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_nonesuch)\nyes\n#endif\n"), "");
+    }
+
+    #[test]
+    fn has_feature_and_has_extension_answer_what_gcc_14_answers() {
+        // The answers gcc 14 and 16 give for each standard, with `F` from `__has_feature` and `E`
+        // from `__has_extension`. The operand is expanded first, as in gcc, and `modules` is a
+        // name clang has and gcc does not.
+        let asked = "#define NAME c_atomic\n\
+                     F __has_feature(NAME) __has_feature(__c_generic_selections__) \
+                     __has_feature(cxx_binary_literals) __has_feature(tls) \
+                     __has_feature(gnu_asm_goto_with_outputs) __has_feature(modules)\n\
+                     E __has_extension(NAME) __has_extension(c_generic_selections) \
+                     __has_extension(cxx_binary_literals) __has_extension(tls) \
+                     __has_extension(gnu_asm_goto_with_outputs) __has_extension(modules)\n";
+        for (std, pedantic_errors, answer) in [
+            (Std::C99, false, "F 0 0 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C11, false, "F 1 1 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C17, false, "F 1 1 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C23, false, "F 1 1 1 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C99, true, "F 0 0 0 1 0 0 E 0 0 0 1 0 0"),
+            (Std::C11, true, "F 1 1 0 1 0 0 E 1 1 0 1 0 0"),
+        ] {
+            let opts = Predef { std, pedantic_errors, ..Predef::new() };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "{std:?} {pedantic_errors}");
+        }
+        // A sanitizer's name is there only while the sanitizer is on.
+        let asked =
+            "__has_feature(address_sanitizer) __has_extension(undefined_behavior_sanitizer)\n";
+        for (address, undefined, answer) in
+            [(false, false, "0 0"), (true, false, "1 0"), (false, true, "0 1")]
+        {
+            let opts = Predef { address, undefined, ..Predef::new() };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "{address} {undefined}");
+        }
+        // The clang names for things this compiler does and gcc 16 does too are answered no,
+        // because gcc 16 answers no for them: a header that asks has only ever been built by gcc
+        // down the path the no takes. The row still says the thing is implemented.
+        for name in ["pragma_once", "include_next", "statement_expressions", "case_ranges"] {
+            assert_eq!(clean(&format!("#if __has_feature({name})\nyes\n#endif\n")), "", "{name}");
+            assert_eq!(clean(&format!("#if __has_extension({name})\nyes\n#endif\n")), "", "{name}");
+        }
+    }
+
+    /// gcc 13 has neither operator, and FreeBSD's `sys/cdefs.h` defines both as zero when
+    /// `#ifndef` says they are not there.
+    #[test]
+    fn has_feature_and_has_extension_are_not_there_before_gcc_14() {
+        let asked = "#ifdef __has_feature\nF\n#endif\n\
+                     #if defined(__has_extension)\nE\n#endif\n\
+                     #ifndef __has_feature\n#define __has_feature(x) 0\n#endif\n\
+                     #ifndef __has_extension\n#define __has_extension(x) 0\n#endif\n\
+                     #ifdef __has_attribute\nA\n#endif\n\
+                     __has_feature(tls) __has_extension(c_atomic)\n";
+        for (major, answer) in [(13, "A 0 0"), (14, "F E A 1 1"), (16, "F E A 1 1")] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
+            assert!(run.messages().is_empty(), "gcc {major}: {:?}", run.messages());
+        }
+    }
+
+    /// gcc 10 has no `__has_c_attribute` and gives `__has_attribute(deprecated)` the GNU answer,
+    /// which is what NetBSD 10's gcc 10.5 says. `__has_embed` came in gcc 15 with `#embed`.
+    #[test]
+    fn has_c_attribute_and_has_embed_are_not_there_before_their_gcc() {
+        let asked = "#ifdef __has_c_attribute\nC\n#endif\n\
+                     #ifdef __has_embed\nE\n#endif\n\
+                     __has_attribute(deprecated) __has_attribute(fallthrough)\n";
+        for (major, answer) in [
+            (10, "1 1"),
+            (11, "C 201904 201904"),
+            (14, "C 202311 202311"),
+            (15, "C E 202311 202311"),
+        ] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-netbsd", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
+            assert!(run.messages().is_empty(), "gcc {major}: {:?}", run.messages());
+        }
+    }
+
+    #[test]
+    fn building_module_is_always_no_and_is_recognised_so_that_the_line_parses() {
+        // Clang's own stddef.h writes this, and the whole point of knowing the name is that
+        // the operand disappears with it. An unknown identifier would leave `(m)` behind and
+        // the `#if` would fail to parse rather than answering no.
+        assert_eq!(clean("#if __building_module(m)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if !__building_module(m)\nyes\n#endif\n"), "yes");
+        assert_eq!(
+            clean(
+                "#if !defined(offsetof) || (__has_feature(modules) && !__building_module(x))\nyes\n#endif\n"
+            ),
+            "yes"
+        );
+        // Defined, the same as the rest of the family: a header asks before it uses one.
+        assert_eq!(clean("#ifdef __building_module\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if defined(__building_module)\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_has_operator_without_an_operand_is_reported() {
+        let mut run = Run::new();
+        run.go("#if __has_include\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected `(` after `__has_include`"]);
+        let mut run = Run::new();
+        run.go("#if __has_include(1)\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected a file name in `<>` or `\"\"`"]);
+        let mut run = Run::new();
+        run.go("#if __has_attribute(\"packed\")\nyes\n#endif\n");
+        assert_eq!(run.messages(), ["expected an identifier as the operand of `__has_attribute`"]);
+    }
+
+    #[test]
+    fn the_has_operators_answer_in_ordinary_text_too() {
+        // GCC and clang both make these builtin macros rather than something only the
+        // conditional parser knows, so a program may write one in a declaration. Real headers
+        // do: an attribute macro is often written as the answer rather than as a `#if`.
+        assert_eq!(clean("f __has_feature(tls)\n"), "f 1");
+        assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 1");
+        assert_eq!(clean("a __has_attribute(packed)\n"), "a 1");
+        assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 202311");
+        assert_eq!(clean("m __building_module(foo)\n"), "m 0");
+    }
+
+    #[test]
+    fn a_macro_that_expands_to_a_has_operator_is_answered_where_it_is_used() {
+        // The awkward half of the same feature. The answer is deferred to wherever the macro
+        // lands, so the sweep has to run after expansion and not only before it.
+        assert_eq!(clean("#define HAVE __has_feature(tls)\nx HAVE\n"), "x 1");
+        assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 1");
+    }
+
+    #[test]
+    fn a_has_operator_in_text_still_needs_its_operand() {
+        let mut run = Run::new();
+        run.go("tail __has_attribute;\n");
+        assert_eq!(run.messages(), ["expected `(` after `__has_attribute`"]);
+    }
+
+    #[test]
+    fn the_header_operators_are_refused_in_ordinary_text() {
+        // `<stdio.h>` in a text line was scanned as a run of comparisons, so there is no
+        // header name left to ask about. GCC and clang both say the same thing here.
+        let mut run = Run::new();
+        run.file("/dir/there.h", "");
+        run.dir("/dir");
+        run.go("a __has_include(<there.h>)\n");
+        assert_eq!(run.messages(), ["`__has_include` used outside of a preprocessing directive"]);
+        let mut run = Run::new();
+        run.go("b __has_include_next(\"x.h\")\n");
+        assert_eq!(
+            run.messages(),
+            ["`__has_include_next` used outside of a preprocessing directive"]
+        );
+    }
+
+    #[test]
+    fn the_predefined_set_is_visible_to_the_source_file() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let src = "#if defined(__x86_64__) && defined(__linux__) && __SIZEOF_LONG__ == 8\n\
+                   yes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_predefined_set_follows_the_target_and_not_the_host() {
+        let mut run = Run::new();
+        run.predefine("aarch64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(
+            run.go("#ifdef __x86_64__\nno\n#endif\n#ifdef __aarch64__\nyes\n#endif\n"),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn a_predefined_macro_expands_where_it_is_used() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__SIZE_TYPE__ n;\n"), "long unsigned int n;");
+    }
+
+    #[test]
+    fn a_command_line_define_is_a_definition_like_any_other() {
+        let mut opts = Predef::new();
+        opts.defines = vec!["FOO".to_owned(), "BAR=3".to_owned()];
+        opts.undefines = vec!["__linux__".to_owned()];
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let src = "#if FOO && BAR == 3 && !defined(__linux__)\nyes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_predefined_set_produces_no_tokens_of_its_own() {
+        // It is a file of directives, so the output of the compilation is the source file
+        // and nothing else. A stray token here would appear at the top of every `-E` run.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("alone\n"), "alone");
+    }
+
+    #[test]
+    fn the_predefined_files_are_named_the_way_gcc_names_them() {
+        let mut run = Run::new();
+        let mut opts = Predef::new();
+        opts.defines = vec!["FOO=1".to_owned()];
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let names: Vec<&str> = run.sources.files().iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["<built-in>", "<command-line>"]);
+    }
+
+    #[test]
+    fn a_dialect_without_the_gnu_extensions_says_so() {
+        let mut opts = Predef::new();
+        opts.gnu_extensions = false;
+        opts.std = Std::C99;
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        let src = "#if defined(__STRICT_ANSI__) && __STDC_VERSION__ == 199901L && !defined(linux)\n\
+                   yes\n#endif\n";
+        assert_eq!(run.go(src), "yes");
+    }
+
+    #[test]
+    fn the_date_and_time_are_the_same_for_the_whole_translation_unit() {
+        let mut opts = Predef::new();
+        opts.timestamp = Timestamp::from_unix(0);
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &opts);
+        assert_eq!(run.go("__DATE__ __TIME__\n"), "\"Jan  1 1970\" \"00:00:00\"");
+    }
+
+    #[test]
+    fn a_has_operator_in_a_dead_branch_is_not_asked_about() {
+        // The line is not evaluated at all, so a malformed one inside `#if 0` is text.
+        assert_eq!(clean("#if 0\n#if __has_include\n#endif\n#endif\nafter\n"), "after");
+    }
+
+    #[test]
+    fn a_conditional_may_not_span_an_include() {
+        // GCC and Clang both refuse this, and the reason is that a header which opens a
+        // conditional it does not close leaves the file that included it in a state nothing
+        // downstream can reason about.
+        let mut run = Run::new();
+        run.file("/dir/open.h", "#if 1\n");
+        run.dir("/dir");
+        run.go("#include <open.h>\nkept\n#endif\n");
+        let messages = run.messages();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("unterminated"));
+        assert!(messages[1].contains("without"));
+    }
+
+    #[test]
+    fn include_next_continues_after_the_directory_the_file_came_from() {
+        // The wrapper header trick: `/a` has a `limits.h` that pulls in the real one from
+        // `/b`, and the two have the same name on purpose.
+        let mut run = Run::new();
+        run.file("/a/limits.h", "wrapper\n#include_next <limits.h>\n");
+        run.file("/b/limits.h", "real\n");
+        run.dir("/a");
+        run.dir("/b");
+        assert_eq!(run.go("#include <limits.h>\n"), "wrapper real");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_computed_include_is_expanded_first() {
+        let mut run = Run::new();
+        run.file("/dir/sub/thing.h", "computed\n");
+        run.dir("/dir");
+        let src = "#define HEADER <sub/thing.h>\n#include HEADER\n";
+        assert_eq!(run.go(src), "computed");
+        assert!(run.messages().is_empty());
+        // The string literal form goes through the same path and keeps its delimiters.
+        let mut run = Run::new();
+        run.file("/dir/sub/thing.h", "computed\n");
+        run.dir("/dir");
+        assert_eq!(run.go("#define H \"sub/thing.h\"\n#include H\n"), "computed");
+    }
+
+    #[test]
+    fn a_header_that_is_not_there_says_where_it_looked() {
+        let mut run = Run::new();
+        run.dir("/dir");
+        run.go("#include <nope.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, Some("E0341"));
+        assert_eq!(diagnostics[0].message, "`nope.h` file not found");
+        assert!(diagnostics[0].children[0].message.contains("/dir"));
+    }
+
+    /// And says why there was nowhere to look, when the driver left a reason on the path.
+    ///
+    /// What the reason is for is `rucc_sysroot::Wall`: a target whose system headers nobody may
+    /// redistribute has no directories of its own on the path, and an include that failed is the one
+    /// moment where saying so helps. It is a second note rather than the message, because the
+    /// message is about this include and the reason is about the machine.
+    #[test]
+    fn a_header_that_is_not_there_says_why_the_system_directories_are_missing() {
+        let mut run = Run::new();
+        run.search.explain_missing_system("aarch64-macos needs a macOS SDK and there is none here");
+        run.go("#include <stdio.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "`stdio.h` file not found");
+        assert!(diagnostics[0].children[0].message.contains("search path is empty"));
+        assert!(diagnostics[0].children[1].message.contains("needs a macOS SDK"));
+        // And a run with nothing left on the path keeps the one note it had.
+        let mut run = Run::new();
+        run.dir("/dir");
+        run.go("#include <nope.h>\n");
+        assert_eq!(run.pp.take_diagnostics()[0].children.len(), 1);
+    }
+
+    #[test]
+    fn an_include_that_is_not_a_header_name_is_reported() {
+        let mut run = Run::new();
+        run.go("#include 3\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics[0].code, Some("E0343"));
+    }
+
+    #[test]
+    fn a_header_that_includes_itself_stops() {
+        let mut run = Run::new();
+        run.file("/dir/loop.h", "#include <loop.h>\n");
+        run.dir("/dir");
+        run.go("#include <loop.h>\n");
+        let diagnostics = run.pp.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "one complaint, not one per level");
+        assert_eq!(diagnostics[0].code, Some("E0342"));
+    }
+
+    #[test]
+    fn an_include_in_a_dead_branch_is_not_read() {
+        let mut run = Run::new();
+        assert_eq!(run.go("#if 0\n#include <nothing.h>\n#endif\nafter\n"), "after");
+        assert!(run.messages().is_empty(), "a skipped include is not resolved");
+    }
+
+    #[test]
+    fn embed_writes_the_bytes_of_the_resource() {
+        let mut run = Run::new();
+        run.bytes("/logo.bin", &[0, 1, 127, 128, 255]);
+        assert_eq!(run.go("#embed \"logo.bin\"\n"), "0, 1, 127, 128, 255");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn an_embed_is_a_valid_initializer_on_both_sides_of_empty() {
+        // The reason `prefix` and `suffix` exist. An empty resource is `if_empty` alone, with
+        // neither of them, so the same three lines are a well formed array whether the file
+        // has bytes in it or not. Emitting `prefix` and `suffix` around nothing would leave a
+        // trailing comma inside the braces and turn an empty file into a syntax error.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[7, 8]);
+        run.bytes("/none.bin", &[]);
+        let line = |name: &str| {
+            format!("{{\n#embed \"{name}\" prefix(0xEF,) suffix(,0xFE) if_empty(0)\n}}\n")
+        };
+        assert_eq!(run.go(&line("some.bin")), "{ 0xEF,7, 8 ,0xFE }");
+        assert_eq!(run.go_named("/other.c", &line("none.bin")), "{ 0 }");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_limit_and_the_offset_choose_a_window_of_the_resource() {
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(run.go("#embed \"eight.bin\" limit(3)\n"), "1, 2, 3");
+        assert_eq!(
+            run.go_named("/b.c", "#embed \"eight.bin\" gnu::offset(4) limit(3)\n"),
+            "5, 6, 7"
+        );
+        // A limit of zero is an empty embed, not an unlimited one, and an offset past the end
+        // is empty rather than an error.
+        assert_eq!(run.go_named("/c.c", "#embed \"eight.bin\" limit(0) if_empty(9)\n"), "9");
+        assert_eq!(run.go_named("/d.c", "#embed \"eight.bin\" gnu::offset(99)\n"), "");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_limit_is_a_constant_expression_and_not_just_a_number() {
+        // It is the `#if` language, so a macro and arithmetic both work. A header that writes
+        // `limit(CHUNK * 2)` is doing the ordinary thing.
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            run.go("#define CHUNK 2\n#embed \"eight.bin\" limit(CHUNK * 2)\n"),
+            "1, 2, 3, 4"
+        );
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_misspelled_embed_parameter_is_refused_rather_than_ignored() {
+        // Carrying on without it would produce an array with the wrong contents and no
+        // message, which is the worst outcome available.
+        let mut run = Run::new();
+        run.bytes("/eight.bin", &[1, 2]);
+        assert_eq!(run.go("#embed \"eight.bin\" limits(1)\n"), "");
+        assert_eq!(run.messages(), vec!["unknown `#embed` parameter `limits`".to_owned()]);
+        let mut vendor = Run::new();
+        vendor.bytes("/eight.bin", &[1, 2]);
+        assert_eq!(vendor.go("#embed \"eight.bin\" clang::offset(1)\n"), "");
+        assert_eq!(
+            vendor.messages(),
+            vec!["unknown `#embed` parameter `clang::offset`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_missing_embed_resource_is_reported_as_a_resource() {
+        let mut run = Run::new();
+        run.go("#embed <nothing.bin>\n");
+        assert_eq!(run.messages(), vec!["`nothing.bin` resource not found".to_owned()]);
+    }
+
+    #[test]
+    fn has_embed_tells_missing_from_present_from_empty() {
+        // Three answers, which is the reason the operator is not `__has_include` with a
+        // different name. A present but empty resource needs its `if_empty` written and a
+        // missing one needs a fallback, and a yes or no cannot tell the two apart.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[1]);
+        run.bytes("/none.bin", &[]);
+        let src = "#if __has_embed(\"none.bin\") == __STDC_EMBED_EMPTY__\nempty\n#endif\n\
+                   #if __has_embed(\"some.bin\") == __STDC_EMBED_FOUND__\nfound\n#endif\n\
+                   #if __has_embed(\"gone.bin\") == __STDC_EMBED_NOT_FOUND__\ngone\n#endif\n";
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::default());
+        assert_eq!(run.go(src), "empty found gone");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn has_embed_takes_the_limit_into_account() {
+        // The guard has to answer the question the directive it guards will ask. A resource
+        // that exists but has nothing left after `limit(0)` is empty to both of them.
+        let mut run = Run::new();
+        run.bytes("/some.bin", &[1, 2, 3]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::default());
+        let src = "#if __has_embed(\"some.bin\" limit(0)) == __STDC_EMBED_EMPTY__\nempty\n#endif\n";
+        assert_eq!(run.go(src), "empty");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_directive_may_have_space_before_the_hash_and_after_it() {
+        assert_eq!(clean("  #  define F 1\n#ifdef F\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_definition_survives_across_a_conditional() {
+        assert_eq!(clean("#if 1\n#define F 7\n#endif\nF\n"), "7");
+    }
+
+    #[test]
+    fn an_empty_if_expression_is_reported() {
+        let mut run = Run::new();
+        run.go("#if\n#endif\n");
+        assert_eq!(run.messages(), vec!["`#if` with no expression".to_owned()]);
+    }
+
+    #[test]
+    fn the_file_and_the_line_say_where_the_use_is() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__FILE__ __LINE__\n__LINE__\n"), "\"/main.c\" 1 2");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_macro_that_mentions_the_line_answers_with_the_call() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/where.h", "#define WHERE __FILE__ __LINE__\n");
+        // The point of the whole arrangement. `assert` is this macro, and a version that
+        // answered with the header the macro was written in would name a file the user has
+        // never opened and a line that means nothing.
+        assert_eq!(run.go("#include \"where.h\"\n\n\nWHERE\n"), "\"/main.c\" 4");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_file_name_is_the_file_without_the_directories() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/deep/down/main.c", "__FILE_NAME__\n"), "\"main.c\"");
+    }
+
+    #[test]
+    fn a_backslash_in_the_name_is_escaped() {
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        // The literal has to mean the path, so the separators are escaped. Getting this wrong
+        // turns `\src` into an unknown escape and `\a` into a bell character.
+        let text = run.go_named("C:\\src\\main.c", "__FILE__ __FILE_NAME__\n");
+        assert_eq!(text, "\"C:\\\\src\\\\main.c\" \"main.c\"");
+    }
+
+    #[test]
+    fn the_base_file_is_the_one_named_on_the_command_line() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/deep.h", "__FILE__ __BASE_FILE__\n");
+        assert_eq!(run.go("#include \"deep.h\"\n"), "\"/deep.h\" \"/main.c\"");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn a_prefix_map_rewrites_the_file_and_the_base_file_and_not_the_file_name() {
+        let mut run = Run::mapping(&[("/build", ".")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/build/deep.h", "__FILE__ __BASE_FILE__ __FILE_NAME__\n");
+        // The header is rewritten and so is the file at the bottom of the stack, because both of
+        // those are paths and a path is what the flag exists to hide. The last component is not,
+        // because a mapping rewrites the front of a path and that is what is left after the front
+        // has been taken off: a name with no directories in it is already what the flag is for.
+        // gcc draws the line in exactly this place.
+        let text = run.go_named("/build/main.c", "#include \"deep.h\"\n");
+        // The separators are whatever the host joined the directory and the header with, and this
+        // test is not about which of the two characters that is.
+        assert_eq!(slashes(&text), "\"./deep.h\" \"./main.c\" \"deep.h\"");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_last_rewrite_that_matches_is_the_one_that_acts() {
+        // Two roots mapped at once, which is what a distribution passes, and one of them inside
+        // the other, which is what makes the order matter. The later flag wins where both match.
+        let mut run = Run::mapping(&[("/build", "src"), ("/build/gen", "generated")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/gen/made.c", "__FILE__\n"), "\"generated/made.c\"");
+
+        let mut run = Run::mapping(&[("/build", "src"), ("/build/gen", "generated")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/hand.c", "__FILE__\n"), "\"src/hand.c\"");
+
+        // And a name the flags say nothing about comes out as it went in, rather than as an empty
+        // string or as the first rewrite applied to nothing.
+        let mut run = Run::mapping(&[("/build", "src")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/elsewhere/main.c", "__FILE__\n"), "\"/elsewhere/main.c\"");
+    }
+
+    #[test]
+    fn a_rewrite_matches_the_characters_and_not_the_directories() {
+        // gcc compares the front of the string, not a sequence of path components, so a rewrite
+        // that stops halfway through a directory name really does cut it in half. Surprising the
+        // first time and relied on the second, because it is what lets `-ffile-prefix-map=/b=/a`
+        // fix up a whole family of sibling roots at once, and a compiler that quietly rounded the
+        // rewrite up to the nearest separator would be answering a different question.
+        let mut run = Run::mapping(&[("/bui", "X")]);
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go_named("/build/main.c", "__FILE__\n"), "\"Xld/main.c\"");
+    }
+
+    #[test]
+    fn the_include_level_counts_the_headers_above_it() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        run.file("/one.h", "__INCLUDE_LEVEL__\n#include \"two.h\"\n");
+        run.file("/two.h", "__INCLUDE_LEVEL__\n");
+        assert_eq!(run.go("__INCLUDE_LEVEL__\n#include \"one.h\"\n"), "0 1 2");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_counter_is_a_different_number_every_time() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("__COUNTER__ __COUNTER__ __COUNTER__\n"), "0 1 2");
+    }
+
+    #[test]
+    fn the_counter_advances_once_per_argument_rather_than_once_per_use() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        // An argument is expanded once however many times the body names it, so `TWICE`
+        // produces the same number twice. That is what GCC does, and the reason for it is
+        // that expanding an argument twice would report anything wrong inside it twice.
+        assert_eq!(run.go("#define TWICE(x) x x\nTWICE(__COUNTER__) __COUNTER__\n"), "0 0 1");
+    }
+
+    #[test]
+    fn the_line_is_a_number_an_if_can_use() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#if __LINE__ == 1 && __INCLUDE_LEVEL__ == 0\nyes\n#endif\n"), "yes");
+        assert!(run.messages().is_empty());
+    }
+
+    #[test]
+    fn the_dynamic_macros_are_defined_like_any_others() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let src = "#ifdef __FILE__\nyes\n#endif\n#undef __LINE__\n#ifndef __LINE__\ngone\n#endif\n";
+        assert_eq!(run.go(src), "yes gone");
+        assert!(run.messages().is_empty(), "`#undef` of a builtin is allowed, as it is in GCC");
+    }
+
+    #[test]
+    fn redefining_a_dynamic_macro_warns_and_points_at_the_built_in_file() {
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#define __FILE__ \"mine.c\"\n__FILE__\n"), "\"mine.c\"");
+        let complaints = run.pp.take_diagnostics();
+        assert_eq!(complaints.len(), 1);
+        assert_eq!(complaints[0].code, Some("W0301"));
+        let previous = complaints[0].children.first().expect("a note saying where it was");
+        assert_eq!(run.sources.lookup(previous.span.lo).map(|loc| loc.file), {
+            let built_in = run.sources.files().iter().find(|f| f.name == BUILT_IN);
+            built_in.map(|f| f.id)
+        });
+    }
+
+    #[test]
+    fn destringizing_undoes_what_stringizing_did() {
+        assert_eq!(destringize(r#""a \"b\" c""#), r#"a "b" c"#);
+        assert_eq!(destringize(r#""a \\ b""#), r"a \ b");
+        assert_eq!(destringize(r#"L"wide""#), "wide");
+    }
+}

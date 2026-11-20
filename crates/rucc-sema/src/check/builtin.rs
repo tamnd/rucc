@@ -1,0 +1,914 @@
+//! The functions the compiler declares for itself.
+//!
+//! Design: `spec/13-gnu-compat.md`.
+//!
+//! A program calls `__builtin_clzll` without declaring it and without including anything, and
+//! it is right to: no header declares one, and the reserved prefix is what says the name
+//! belongs to the implementation. So the implementation has to declare it, and what it declares
+//! it as comes out of `features.toml`, which is the same table `__has_builtin` answers from.
+//! One table rather than two, because two lists of the same builtins are two lists that
+//! disagree.
+//!
+//! # Why the declaration is made on demand
+//!
+//! gcc declares all of them before it reads the first line, which puts a couple of thousand
+//! names in the symbol table of every translation unit whether or not one is used. Here a name
+//! is declared the first time it is looked up and not found, which reaches the same place for
+//! any program that could tell the difference. The declaration goes in the file scope, so it is
+//! visible for the rest of the unit and does not disappear when the block that first called it
+//! closes, and a program that declares a builtin itself never gets here at all, because its own
+//! declaration is what the lookup finds.
+//!
+//! # What is not here
+//!
+//! The builtins whose type depends on what they are handed. `__builtin_constant_p` takes
+//! anything, `__builtin_add_overflow` takes three types that have to agree, and the atomics are
+//! a family rather than a function. Those have no signature in the table, nothing here answers
+//! for them, and they are decided from their arguments in `check/builtin/generic.rs`.
+//!
+//! Anything the call then does, except for the one family where the call is the whole answer.
+//! A declared builtin is called like any other function, which is what makes the type checking
+//! right and the code wrong: for most of them the call reaches the IR as a call to a name no
+//! object file defines. Folding `__builtin_inf()` to an infinity and turning `__builtin_clzll`
+//! into an instruction are the next piece, and until they land those rows stay `unimplemented`
+//! in the table, so `__has_builtin` still answers no and a header that asks takes its fallback
+//! path.
+//!
+//! The family where the call is the whole answer is the library builtins, the ones whose row
+//! carries a `library`. `__builtin_abort` means `abort` and a call to the one is a call to the
+//! other, so the declaration made here is all the front end owes them and the only other thing
+//! anything needs is the name to put on the call, which [`library_name`] answers. gcc folds
+//! several of them when the arguments allow it, and folding one of these is an optimization on
+//! top of a call that was already right, which is why they can be implemented before anything
+//! folds anything.
+
+use rucc_base::Symbol;
+use rucc_diag::Span;
+use rucc_gnu::{Kind, Status};
+use rucc_types::{FloatKind, FunctionType, IntKind, Qualifiers, TypeId, TypeKind, int_width};
+
+use crate::check::Checker;
+use crate::decl::{
+    Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, Linkage, Startup,
+    StorageDuration,
+};
+use crate::expr::{ExprId, ExprKind};
+use crate::scope::Binding;
+
+mod abs;
+mod aligned;
+mod alloca;
+mod apply;
+mod atomic;
+mod bswap;
+mod classify;
+mod complex;
+mod constant;
+mod convertvector;
+mod count;
+pub(in crate::check) mod cpu;
+mod ctype;
+mod device;
+mod eflags;
+mod elementwise;
+mod entry;
+mod expect;
+mod frame;
+mod generic;
+mod jump;
+mod math;
+mod msvc;
+mod neon;
+mod overflow;
+mod pack;
+mod parts;
+mod prefetch;
+mod shuffle;
+mod sign;
+mod size;
+mod speculation;
+mod sse;
+mod tgmath;
+mod thread;
+mod trap;
+mod tsc;
+mod unreachable;
+mod unwind;
+mod xstate;
+
+pub use size::{open_to_pointer, unbounded_member};
+
+/// The name in the object file for a function declared under this spelling, when the two are
+/// not the same name.
+///
+/// The library builtins are the family where they are not: `__builtin_abort` is a call to
+/// `abort`, and a program writes the prefixed spelling to reach the function the C library
+/// promises where a macro or a definition of its own has taken the plain name. So the walk to
+/// the IR asks this for every name it is about to put in an object file, and the answer for
+/// everything that is not one of that family is that the name stands.
+///
+/// The question is asked of the spelling rather than of the declaration because the answer is a
+/// fact about the name and not about that particular declaration of it, and because the alternative
+/// is a field on every declaration in the program to carry something almost none of them have.
+#[must_use]
+pub fn library_name(spelled: &str) -> Option<&'static str> {
+    // Every name this can answer for starts with the prefix, and every other name in the
+    // program is asked too, so the test that costs nothing goes first.
+    if !spelled.starts_with("__builtin_") {
+        return None;
+    }
+    let feature = rucc_gnu::lookup(Kind::Builtin, spelled)?;
+    (!feature.library.is_empty()).then_some(feature.library)
+}
+
+/// The library function a `_chk` builtin means when the size it was handed says nothing is known,
+/// and nothing for every other name.
+///
+/// A checking function takes `(size_t) -1` to mean the object size is unknown and does no check,
+/// so a call handed that value is a call to the function it guards with a fourth argument nobody
+/// reads. gcc drops the argument and calls the plain function, at `-O0` and at every level above
+/// it, and this is the same rule for the same ten names.
+///
+/// Ten and not sixteen. The six formatted spellings never fold, however constant the size is,
+/// because the flag argument is a second thing the checking function is being asked to do: a `%n`
+/// in a format the program can write to is refused whether or not the destination's size is known,
+/// and `printf` will not refuse it. That was measured on gcc 16.2.0 rather than read off a manual.
+///
+/// Asked of the spelling for the reason [`library_name`] is: the answer is a fact about the name.
+/// The value that fold turns on is not, since the width of a `size_t` is the target's to say, so
+/// the caller holds that half of the question.
+#[must_use]
+pub fn unchecked_name(spelled: &str) -> Option<&'static str> {
+    // Every name this can answer for starts with the longer prefix, and every call in the program
+    // is asked, so the test that costs nothing goes first.
+    let plain = spelled.strip_prefix("__builtin___")?.strip_suffix("_chk")?;
+    // The checking function's own name is the library's, so a row that has one is a row that is
+    // called, and the family is the rows whose guarded function copies rather than formats.
+    const COPIES: &[&str] = &[
+        "memcpy", "memmove", "mempcpy", "memset", "strcpy", "stpcpy", "strcat", "strncpy",
+        "stpncpy", "strncat",
+    ];
+    COPIES.iter().copied().find(|&copy| copy == plain)
+}
+
+/// Whether this is a builtin that nothing implements and that nothing in the C library would
+/// answer for either, which is the set that has to be refused rather than called.
+///
+/// A builtin the walk to the IR does not recognise becomes a call to the name the program wrote,
+/// and no object file defines a name with that prefix, so the program fails at the linker on a
+/// name its author never typed. That is the worst place for the news to arrive, because a builtin
+/// is the one thing a programmer does not expect to have to provide.
+///
+/// The table already knows. A row whose status is not `implemented` is one nothing here does
+/// anything with, and a row with no `library` is one that has no function of its own to fall back
+/// on, so the two together are exactly the set. That is also what `__has_builtin` answers no for,
+/// which means the compiler has been saying the right thing about these all along and only the
+/// call was wrong.
+///
+/// Asked of the spelling for the same reason [`library_name`] is: the answer is a fact about the
+/// name rather than about a particular declaration of it.
+#[must_use]
+pub fn unimplemented_builtin(spelled: &str) -> bool {
+    // The `__sync_` and `__atomic_` families are in here too, so the test is the two underscores
+    // rather than the whole prefix. Every name in the program is asked, so it goes first.
+    if !spelled.starts_with("__") {
+        return false;
+    }
+    let Some(feature) = rucc_gnu::lookup(Kind::Builtin, spelled) else {
+        return false;
+    };
+    feature.status != Status::Implemented && feature.library.is_empty()
+}
+
+impl Checker<'_> {
+    /// Declares a name the program used and nothing declared, if it is a builtin we know the
+    /// type of. Answers the declaration, or nothing when the name is not one.
+    pub(in crate::check) fn declare_builtin(&mut self, name: Symbol, span: Span) -> Option<DeclId> {
+        let spelled = self.text(name);
+        // Every name this can answer for starts with two underscores, and every other undeclared
+        // name in the program reaches here too. The test costs a byte and saves the search.
+        if !spelled.starts_with("__") {
+            return None;
+        }
+        let feature = match rucc_gnu::lookup(Kind::Builtin, spelled) {
+            Some(feature) => feature,
+            None => self.reserved_library(spelled)?,
+        };
+        if feature.signature.is_empty() {
+            return None;
+        }
+        // gcc has no wasm target, so on any other row the `__builtin_wasm_*` names are names that
+        // gcc 16 has never heard of. It says that the declaration is implicit, and `__has_builtin`
+        // already answers 0 there. The rows for x86 alone are the same: gcc has `__builtin_infq`
+        // on x86 and nowhere else, and AArch64 has a `_Float128` that would let its signature
+        // build. `__builtin_sponentry` is on one target too, but clang refuses it in its own words
+        // in `check/builtin/entry.rs`, so the test is for these two sets of places alone.
+        let x86 = [rucc_gnu::Place::X86_64, rucc_gnu::Place::X86];
+        let limited = feature.targets == [rucc_gnu::Place::Wasm] || feature.targets == x86;
+        if limited && !feature.is_on(self.gnu_target()) {
+            return None;
+        }
+        let ty = self.signature_type(feature.signature)?;
+        let decl = self.tast.decl(
+            Decl {
+                name: Some(name),
+                ty,
+                kind: DeclKind::Function,
+                // External and declared, which is what it is: a name every translation unit
+                // that uses it shares, and one nothing here defines.
+                linkage: Linkage::External,
+                duration: StorageDuration::Static,
+                state: Definition::Declared,
+                alignment: None,
+                flags: DeclFlags::NONE,
+                asm_label: None,
+                register: None,
+                alias: None,
+                inline: Emission::Silent,
+                effects: Effects::Any,
+                visibility: None,
+                startup: Startup::default(),
+                init: None,
+                cleanup: None,
+                params: DeclList::EMPTY,
+                body: None,
+            },
+            span,
+        );
+        // Not added to the top level, which is the list of what the translation unit declares.
+        // The program declared nothing, and a `--emit=tast` that showed a declaration the source
+        // does not contain would be answering a question nobody asked.
+        self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
+        self.declared_builtins.push(name);
+        Some(decl)
+    }
+
+    /// The target as the rows of `features.toml` name places.
+    fn gnu_target(&self) -> rucc_gnu::Target {
+        let tuple = &self.cx.target.tuple;
+        rucc_gnu::Target::new(tuple.arch().as_str(), tuple.os().as_str())
+    }
+
+    /// Whether the row for a builtin, if it has one, is there on this target.
+    fn is_builtin_here(&self, spelled: &str) -> bool {
+        rucc_gnu::lookup(Kind::Builtin, spelled).is_none_or(|row| row.is_on(self.gnu_target()))
+    }
+
+    /// The row for a library function whose own name is in the implementation's namespace.
+    ///
+    /// gcc makes every builtin spelled with two underscores visible without a declaration, and
+    /// that takes in the library names that start that way as well as the prefixed ones. So
+    /// `__clear_cache` is declared for the program the way `__builtin___clear_cache` is, and LTP's
+    /// `mprotect04.c` calls it with nothing declaring it. Where the program has taken the name back
+    /// from the library, gcc does not declare it and neither does this.
+    fn reserved_library(&self, spelled: &str) -> Option<&'static rucc_gnu::Feature> {
+        if !self.cx.means_the_library(spelled) {
+            return None;
+        }
+        let feature = rucc_gnu::lookup(Kind::Builtin, &format!("__builtin_{spelled}"))?;
+        (feature.library == spelled).then_some(feature)
+    }
+
+    /// The type the implicit declaration of `name` gets, when the name is one the implementation
+    /// knows the type of.
+    ///
+    /// C89 6.3.2.2 says a call to a name nothing declared declares `extern int f()`, and gcc says
+    /// something else when the name is one of its builtins: the declaration is the builtin's, so
+    /// an implicitly declared `alloca` takes a `size_t` and answers a `void *` and is expanded
+    /// where it stands rather than called. Measured against gcc 16.2.0 over `alloca`, `memcpy`
+    /// and `strlen`, each of which comes out with no call in it and with
+    /// `incompatible implicit declaration of built-in function` beside the implicit declaration
+    /// warning. A declaration the program wrote that disagrees with the builtin's type is not
+    /// this, and was measured too: gcc keeps the program's type and writes the call.
+    ///
+    /// Four torture programs turn on it. `gcc.c-torture/execute/20020314-1.c` and its three
+    /// neighbours call `alloca` with nothing declaring it, and a compiler that took C89 at its
+    /// word emitted a call to a name no C library defines, since `alloca` is a macro for the
+    /// builtin in every header that offers it.
+    ///
+    /// The plain name only, since the prefixed one is never undeclared, and only where the
+    /// program has left the name to the library, which is what `-fno-builtin` and
+    /// `-ffreestanding` take away. A builtin nothing implements and nothing in the library
+    /// answers for is left alone as well, because a prototype for one of those turns a program
+    /// that was going to reach the linker into one that is refused here.
+    pub(in crate::check) fn implicit_builtin_type(&mut self, name: Symbol) -> Option<TypeId> {
+        let spelled = self.text(name);
+        if spelled.starts_with("__") || !self.cx.means_the_library(spelled) {
+            return None;
+        }
+        let prefixed = format!("__builtin_{spelled}");
+        let feature = rucc_gnu::lookup(Kind::Builtin, &prefixed)?;
+        if feature.signature.is_empty() || unimplemented_builtin(feature.name) {
+            return None;
+        }
+        self.signature_type(feature.signature)
+    }
+
+    /// The type a signature from the table names.
+    ///
+    /// Answers nothing only if the table is wrong, which `build.rs` and the test at the bottom
+    /// of this file are there to stop. Nothing is reported either way: a builtin whose type
+    /// cannot be built is a builtin the program hears about in the ordinary words, which is
+    /// that the name is undeclared.
+    fn signature_type(&mut self, signature: &str) -> Option<TypeId> {
+        let (result, rest) = signature.split_once('(')?;
+        let params = rest.strip_suffix(')')?;
+        let ret = self.written_type(result)?;
+        let mut types = Vec::new();
+        let mut variadic = false;
+        for param in params.split(',').map(str::trim).filter(|param| !param.is_empty()) {
+            if param == "..." {
+                variadic = true;
+                continue;
+            }
+            let ty = self.written_type(param)?;
+            // `void` alone is how C spells a parameter list with nothing in it, and it is the
+            // only place a parameter is allowed that type.
+            if rucc_types::is_void(&self.types, ty) {
+                continue;
+            }
+            // The same adjustment a declaration gets, because this is a declaration: a parameter
+            // of array type is a pointer to its first element. Nothing in the table needed it
+            // until `__builtin_va_list` arrived, which is an array of one on x86-64, and a
+            // prototype that kept the array would be one no argument could ever match.
+            types.push(rucc_types::adjust_parameter(&mut self.types, ty));
+        }
+        Some(self.types.function(FunctionType {
+            ret,
+            params: types,
+            variadic,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
+        }))
+    }
+
+    /// One type, written the way the table writes one.
+    ///
+    /// A type that ends in `x2`, `x4`, `x8` or `x16` is a GNU vector of that many lanes of the
+    /// type before it, which is how the vector builtins of clang for wasm are written. clang
+    /// writes `V16Sc` for the vector of 16 `signed char`, and the table writes `signed char x16`.
+    fn written_type(&mut self, text: &str) -> Option<TypeId> {
+        if let Some((lane, count)) = text.trim().rsplit_once(' ') {
+            if let Some(Ok(count)) = count.strip_prefix('x').map(str::parse::<u32>) {
+                let lane = self.written_type(lane)?;
+                return Some(self.types.vector(lane, count));
+            }
+        }
+        let stars = text.bytes().filter(|byte| *byte == b'*').count();
+        let words = text.trim_end_matches(['*', ' ']).split_whitespace();
+        let mut quals = Qualifiers::NONE;
+        let mut base = Vec::new();
+        for word in words {
+            match word {
+                "const" => quals = quals.with(Qualifiers::CONST),
+                "volatile" => quals = quals.with(Qualifiers::VOLATILE),
+                other => base.push(other),
+            }
+        }
+        // A qualifier in a signature is always on the thing pointed at, since every one in the
+        // table is there to promise that the callee does not write through the pointer.
+        let mut ty = self.base_type(&base.join(" "))?;
+        ty = self.types.qualified(ty, quals);
+        for _ in 0..stars {
+            ty = self.types.pointer(ty);
+        }
+        Some(ty)
+    }
+
+    /// The type a base type's words name, with no pointers and no qualifiers on it.
+    fn base_type(&mut self, words: &str) -> Option<TypeId> {
+        let kind = match words {
+            "void" => return Some(self.types.void()),
+            // What a builtin that asks a yes or no question answers with. gcc gives these the C
+            // `_Bool` and not an `int`, and a header that puts one straight into a `_Bool` field
+            // would take a conversion it does not need if this were wrong.
+            "_Bool" => return Some(self.types.boolean()),
+            "float" => return Some(self.types.float(FloatKind::Float)),
+            "double" => return Some(self.types.float(FloatKind::Double)),
+            "long double" => return Some(self.types.float(FloatKind::LongDouble)),
+            // Only where the target has them, so a decimal builtin elsewhere is a name nothing
+            // declared, which is how gcc treats it on the same target.
+            "_Decimal32" | "_Decimal64" | "_Decimal128" | "_Decimal64x"
+                if !self.cx.target.has_decimal_float =>
+            {
+                return None;
+            }
+            "_Decimal32" => return Some(self.types.float(FloatKind::Decimal32)),
+            "_Decimal64" => return Some(self.types.float(FloatKind::Decimal64)),
+            "_Decimal128" => return Some(self.types.float(FloatKind::Decimal128)),
+            "_Decimal64x" => return Some(self.types.float(FloatKind::Decimal64x)),
+            // The interchange types, also only where the target has them. `_Float32`,
+            // `_Float64` and `_Float32x` are on every target, and the other three are not.
+            "_Float16" => return self.interchange(FloatKind::Float16),
+            "_Float32" => return self.interchange(FloatKind::Float32),
+            "_Float64" => return self.interchange(FloatKind::Float64),
+            "_Float128" => return self.interchange(FloatKind::Float128),
+            "_Float32x" => return self.interchange(FloatKind::Float32x),
+            "_Float64x" => return self.interchange(FloatKind::Float64x),
+            // The complex types, which the conjugate family is written over and nothing else in
+            // the table uses. The keyword comes first here because that is the order the table
+            // writes it in, and a signature is not a declaration, so the order it would be
+            // allowed in a program is not the question.
+            "_Complex float" => return Some(self.types.complex_float(FloatKind::Float)),
+            "_Complex double" => return Some(self.types.complex_float(FloatKind::Double)),
+            "_Complex long double" => return Some(self.types.complex_float(FloatKind::LongDouble)),
+            // Not a fixed kind on any target. Whichever unsigned type is wide enough to hold a
+            // pointer is what a header would have made `size_t`, and it has to be the one
+            // `sizeof` produces or a program that hands one to the other converts for nothing.
+            "size_t" => return Some(self.size_type()),
+            // Its signed partner, which is the integer gcc's `__builtin_eh_return` takes its offset
+            // in: the type of the pointer's mode, which is `long` on LP64, `int` on i386 and `long
+            // long` on Windows, and so the one `ptrdiff_t` is on each of them.
+            "ptrdiff_t" => return Some(self.ptrdiff()),
+            // Not a fixed kind either, and for a different reason: `intmax_t` is the widest
+            // standard integer type, which is `long` where that is sixty four bits wide and `long
+            // long` where it is not. `rucc_pp::predef` writes `__INTMAX_TYPE__` out of the same
+            // rule, and a program that reads the macro and a program that calls
+            // `__builtin_imaxabs` have to be working in the same type.
+            "intmax_t" => return Some(self.types.int(self.widest_integer(true))),
+            "uintmax_t" => return Some(self.types.int(self.widest_integer(false))),
+            "uint16_t" => return Some(self.exact_unsigned(16)),
+            "uint32_t" => return Some(self.exact_unsigned(32)),
+            "uint64_t" => return Some(self.exact_unsigned(64)),
+            // The one word here that names a type the target chooses the shape of rather than
+            // the width of. It is what the `v` spellings of the `_chk` family take, and writing
+            // `void *` instead would be right on the one target whose list is an array of one
+            // and wrong on every other.
+            "__builtin_va_list" => return Some(self.va_list_type()),
+            // The stream the stdio builtins are handed, which is always written with a star after
+            // it and which `build.rs` refuses without one. gcc has no `FILE` here either: its
+            // `fileptr_type_node` is a copy of `void *`, and `__typeof__(__builtin_fputs)` on
+            // 16.2.0 prints `int(const char *, void *)`. So the word is the table saying which
+            // pointer it means and the type is the one gcc gives, which is what lets a program
+            // hand over the `FILE *` its own `stdio.h` declared without a conversion it would
+            // have to be told about.
+            "FILE" => return Some(self.types.void()),
+            "char" => IntKind::Char,
+            "signed char" => IntKind::SChar,
+            "unsigned char" => IntKind::UChar,
+            "short" | "signed short" | "short int" => IntKind::Short,
+            "unsigned short" => IntKind::UShort,
+            "int" | "signed" | "signed int" => IntKind::Int,
+            "unsigned" | "unsigned int" => IntKind::UInt,
+            "long" | "signed long" | "long int" => IntKind::Long,
+            "unsigned long" => IntKind::ULong,
+            "long long" | "signed long long" => IntKind::LongLong,
+            "unsigned long long" => IntKind::ULongLong,
+            _ => return None,
+        };
+        Some(self.types.int(kind))
+    }
+
+    /// An interchange floating type, or nothing where the target does not have it.
+    fn interchange(&mut self, kind: FloatKind) -> Option<TypeId> {
+        self.has_float_kind(kind).then(|| self.types.float(kind))
+    }
+
+    /// Whether the target has a floating type. gcc declares a builtin written over a type only
+    /// where the type is, so `__builtin_inff128` on a target with no `_Float128` is a name that
+    /// nothing declared.
+    pub(in crate::check) fn has_float_kind(&self, kind: FloatKind) -> bool {
+        let target = self.cx.target;
+        match kind {
+            FloatKind::Float16 => target.has_float16,
+            FloatKind::Fp16 => target.type_names().iter().any(|&(name, _)| name == "__fp16"),
+            FloatKind::BFloat16 => target.type_names().iter().any(|&(name, _)| name == "__bf16"),
+            FloatKind::Float128 => target.has_float128,
+            FloatKind::Float64x => target.float64x_format.is_some(),
+            FloatKind::Decimal32
+            | FloatKind::Decimal64
+            | FloatKind::Decimal128
+            | FloatKind::Decimal64x => target.has_decimal_float,
+            FloatKind::Float
+            | FloatKind::Float32
+            | FloatKind::Double
+            | FloatKind::Float32x
+            | FloatKind::Float64
+            | FloatKind::LongDouble => true,
+        }
+    }
+
+    /// The unsigned integer type that is exactly this many bits wide on this target.
+    ///
+    /// The table writes `uint16_t` rather than `unsigned short` because that is what gcc's
+    /// `__builtin_bswap16` takes, and the two are the same type on every target this compiles
+    /// for and need not be on one it does not have yet.
+    fn exact_unsigned(&self, bits: u32) -> TypeId {
+        let kinds = [IntKind::UChar, IntKind::UShort, IntKind::UInt, IntKind::ULong];
+        let kind = kinds.into_iter().find(|&kind| int_width(kind, self.cx.target) == bits);
+        self.types.int(kind.unwrap_or(IntKind::ULongLong))
+    }
+
+    /// Whether what is being called is a declaration of the library function a plain name is,
+    /// rather than something else the program gave the name to.
+    ///
+    /// The families whose plain names the compiler is allowed to know all have to ask this, and
+    /// they all have to ask it the same way, so it is asked once here and the caller says which
+    /// type it expects. `check/builtin/abs.rs` asks it about `abs` and `check/builtin/sign.rs`
+    /// asks it about `fabs`.
+    ///
+    /// Three questions. It has to be a function and not a pointer some object holds, because a
+    /// call through a pointer reaches whatever the pointer holds and no declaration decides that.
+    /// It has to have external linkage, because a `static` one is the program's own function and
+    /// the name outside the file is somebody else's problem. And its type has to be the one the
+    /// library gives the name, spelled with a prototype, because a program that declared `long
+    /// long llabs()` has not said what it takes and one that declared `int llabs(int)` has said
+    /// something else.
+    pub(in crate::check) fn callee_is_the_library_one(
+        &self,
+        callee: ExprId,
+        ret: TypeId,
+        params: &[TypeId],
+    ) -> bool {
+        let mut node = callee;
+        // The callee arrives having decayed from a function to a pointer to one, which is a
+        // conversion the language performed rather than anything the program wrote.
+        while let ExprKind::Convert { operand, .. } = self.tast[node].kind {
+            node = operand;
+        }
+        let ExprKind::Decl(decl) = self.tast[node].kind else {
+            return false;
+        };
+        let decl = &self.tast[decl];
+        if decl.kind != DeclKind::Function || decl.linkage != Linkage::External {
+            return false;
+        }
+        let TypeKind::Function(id) = self.types.kind(self.types.canonical(decl.ty)) else {
+            return false;
+        };
+        let signature = self.types.signature(id);
+        signature.prototyped
+            && !signature.variadic
+            && self.types.canonical(signature.ret) == ret
+            && signature.params.len() == params.len()
+            && signature
+                .params
+                .iter()
+                .zip(params)
+                .all(|(&got, &want)| self.types.canonical(got) == want)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_gnu::Kind;
+    use rucc_session::Std;
+    use rucc_target::{TargetInfo, Triple};
+    use rucc_types::TypeKind;
+
+    use super::*;
+    use crate::check::Context;
+
+    /// What a checker needs to exist, since it borrows all of it for as long as it lives.
+    struct Fixture {
+        ast: rucc_ast::Ast,
+        names: Interner,
+        target: TargetInfo,
+    }
+
+    impl Fixture {
+        fn new(triple: &str) -> Fixture {
+            let target = TargetInfo::new(triple.parse::<Triple>().expect("a triple"));
+            Fixture { ast: rucc_ast::Ast::new(), names: Interner::new(), target }
+        }
+
+        fn checker(&self) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+        }
+    }
+
+    /// How a built type is written, which is what these compare against.
+    fn spelled(checker: &Checker<'_>, ty: TypeId) -> String {
+        rucc_types::spell(&checker.types, checker.cx.names, ty)
+    }
+
+    #[test]
+    fn a_signature_becomes_the_type_it_is_written_as() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        let cases = [
+            ("int(unsigned int)", "int(unsigned int)"),
+            ("long(long, long)", "long(long, long)"),
+            ("void(void)", "void(void)"),
+            ("size_t(const char *)", "unsigned long(const char *)"),
+            ("void *(void *, const void *, size_t)", "void *(void *, const void *, unsigned long)"),
+            ("void(const void *, ...)", "void(const void *, ...)"),
+            ("double(double)", "double(double)"),
+            ("long double(long double)", "long double(long double)"),
+        ];
+        for (signature, written) in cases {
+            let ty = c.signature_type(signature).expect("a type");
+            assert_eq!(spelled(&c, ty), written, "for {signature}");
+        }
+    }
+
+    /// A lane type and then `x` and a count is a vector of that many lanes, as clang gives the
+    /// vector builtins of wasm.
+    #[test]
+    fn a_count_of_lanes_after_a_type_is_a_vector_of_that_type() {
+        let fixture = Fixture::new("wasm32-wasip1");
+        let mut c = fixture.checker();
+        let ty = c.signature_type("int(signed char x16)").expect("a type");
+        let TypeKind::Function(id) = c.types.kind(ty) else { panic!("a function") };
+        let param = c.types.signature(id).params[0];
+        let TypeKind::Vector { elem, len } = c.types.kind(param) else { panic!("a vector") };
+        assert_eq!(len, 16);
+        assert_eq!(spelled(&c, elem), "signed char");
+        let ty =
+            c.signature_type("unsigned short x8(unsigned short x8, short x8)").expect("a type");
+        let TypeKind::Function(id) = c.types.kind(ty) else { panic!("a function") };
+        let signature = c.types.signature(id);
+        let TypeKind::Vector { elem, len } = c.types.kind(signature.ret) else {
+            panic!("a vector")
+        };
+        assert_eq!((spelled(&c, elem), len), ("unsigned short".to_string(), 8));
+        let TypeKind::Vector { elem, .. } = c.types.kind(signature.params[1]) else { panic!() };
+        assert_eq!(spelled(&c, elem), "short");
+    }
+
+    /// `void` in a parameter list is a list with nothing in it rather than a parameter of no
+    /// type, and the difference shows up in the count and nowhere else.
+    #[test]
+    fn a_void_parameter_list_is_an_empty_one() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        let ty = c.signature_type("void(void)").expect("a type");
+        let TypeKind::Function(id) = c.types.kind(ty) else { panic!("a function") };
+        let signature = c.types.signature(id);
+        assert!(signature.params.is_empty());
+        assert!(signature.prototyped, "or a call would not be checked against it");
+        assert!(!signature.variadic);
+    }
+
+    /// The width the table asks for is a fact about the target, so the type it comes out as is
+    /// one too. `size_t` is the one that moves.
+    #[test]
+    fn the_target_decides_which_type_a_width_names() {
+        for (triple, written) in [
+            ("x86_64-unknown-linux-gnu", "unsigned long(const char *)"),
+            ("x86_64-pc-windows-msvc", "unsigned long long(const char *)"),
+        ] {
+            let fixture = Fixture::new(triple);
+            let mut c = fixture.checker();
+            let ty = c.signature_type("size_t(const char *)").expect("a type");
+            assert_eq!(spelled(&c, ty), written, "on {triple}");
+        }
+    }
+
+    /// The stream a stdio builtin is handed is a `void *`, which is the type gcc gives one rather
+    /// than a stand-in for a type this cannot say.
+    ///
+    /// `extern __typeof__(__builtin_fputs) f;` beside `extern int f(const char *, FILE *);` is two
+    /// conflicting declarations on gcc 16.2.0, and the note it prints about the first of them says
+    /// `int(const char *, void *)`. So a program hands over the `FILE *` its own `stdio.h`
+    /// declared and the conversion is the one C already allows into a `void *`, with nothing to
+    /// warn about at either end.
+    #[test]
+    fn a_builtin_that_is_handed_a_stream_takes_the_pointer_gcc_gives_it() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        let cases = [
+            ("int(const char *, FILE *)", "int(const char *, void *)"),
+            ("int(FILE *, const char *, ...)", "int(void *, const char *, ...)"),
+            (
+                "size_t(const void *, size_t, size_t, FILE *)",
+                "unsigned long(const void *, unsigned long, unsigned long, void *)",
+            ),
+        ];
+        for (signature, written) in cases {
+            let ty = c.signature_type(signature).expect("a type");
+            assert_eq!(spelled(&c, ty), written, "for {signature}");
+        }
+    }
+
+    #[test]
+    fn a_signature_the_reader_cannot_make_sense_of_is_no_type_rather_than_a_wrong_one() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        assert_eq!(c.signature_type("int"), None, "no parameter list at all");
+        assert_eq!(c.signature_type("int(unsigned int"), None, "unclosed");
+        assert_eq!(c.signature_type("struct tm *(void)"), None, "a word that is not in the set");
+    }
+
+    /// Every signature in the table is written out of the words the reader above takes. The
+    /// build checks the alphabet already, and this checks that the two agree on it, which is
+    /// the failure the build cannot see: a word spelled correctly that means nothing here.
+    #[test]
+    fn every_signature_in_the_table_builds_a_type() {
+        let fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let mut c = fixture.checker();
+        let mut built = 0;
+        for feature in rucc_gnu::features() {
+            if feature.kind != Kind::Builtin || feature.signature.is_empty() {
+                continue;
+            }
+            let ty = c.signature_type(feature.signature);
+            assert!(ty.is_some(), "{} has a signature this cannot read", feature.name);
+            built += 1;
+        }
+        assert!(built > 40, "the table lost its signatures, only {built} left");
+    }
+
+    /// The lookup is by the whole name including the prefix, because that prefix is part of the
+    /// name of a builtin rather than the armour a header puts around an attribute.
+    #[test]
+    fn only_a_name_the_table_has_is_declared() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let known = fixture.names.intern("__builtin_clzll");
+        let ordinary = fixture.names.intern("printf");
+        // In the table, and deliberately without a signature, since what it takes is whatever
+        // it was handed.
+        let untyped = fixture.names.intern("__builtin_constant_p");
+        let mut c = fixture.checker();
+        let decl = c.declare_builtin(known, Span::DUMMY).expect("in the table");
+        assert_eq!(spelled(&c, c.tast[decl].ty), "int(unsigned long long)");
+        assert_eq!(c.tast[decl].linkage, Linkage::External);
+        assert_eq!(c.tast[decl].state, Definition::Declared);
+        assert_eq!(c.declare_builtin(ordinary, Span::DUMMY), None);
+        assert_eq!(c.declare_builtin(untyped, Span::DUMMY), None);
+    }
+
+    /// The three widths of one of these are three names and not one, because a builtin is an
+    /// ordinary function as far as the type checker is concerned and C has no overloading.
+    #[test]
+    fn a_rounding_builtin_has_a_name_for_each_width() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let names: Vec<_> = ["__builtin_ceil", "__builtin_ceilf", "__builtin_ceill"]
+            .map(|name| fixture.names.intern(name))
+            .into();
+        let mut c = fixture.checker();
+        let spellings: Vec<_> = names
+            .into_iter()
+            .map(|name| {
+                let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+                spelled(&c, c.tast[decl].ty)
+            })
+            .collect();
+        assert_eq!(spellings, ["double(double)", "float(float)", "long double(long double)"]);
+    }
+
+    /// The library builtins are the family whose whole answer is the library function of the
+    /// same name, so what has to be right is both names at once: the one the program wrote,
+    /// which is what the declaration is looked up by and what a diagnostic will say, and the one
+    /// the library defines, which is what the call has to carry.
+    #[test]
+    fn every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let family: Vec<_> = rucc_gnu::features()
+            .iter()
+            .filter(|feature| !feature.library.is_empty())
+            .map(|feature| (fixture.names.intern(feature.name), feature))
+            .collect();
+        assert!(family.len() > 30, "the table lost the family, {} rows left", family.len());
+        // One that is a builtin and not a library function, to show that the answer comes from
+        // the row rather than from everything going through here.
+        let trap = fixture.names.intern("__builtin_trap");
+        let mut c = fixture.checker();
+        for (name, feature) in family {
+            let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+            let node = &c.tast[decl];
+            assert_eq!(node.name, Some(name), "{}", feature.name);
+            assert_eq!(node.kind, DeclKind::Function, "{}", feature.name);
+            assert_eq!(node.linkage, Linkage::External, "{}", feature.name);
+            assert_eq!(node.state, Definition::Declared, "{}", feature.name);
+            assert_eq!(library_name(feature.name), Some(feature.library), "{}", feature.name);
+        }
+        assert!(c.declare_builtin(trap, Span::DUMMY).is_some(), "in the table");
+        assert_eq!(library_name("__builtin_trap"), None, "nothing in the library is called that");
+    }
+
+    /// The `_chk` family is the one where the two names look least alike, and the rule about them
+    /// is the same rule as for the rest of the library builtins.
+    ///
+    /// `__builtin___memcpy_chk` with `__builtin_` taken off is `__memcpy_chk`, which is what glibc
+    /// defines, and the three underscores in the middle are two of the builtin's prefix and one of
+    /// the library's. It is worth a test because it reads like an exception and is not one, and
+    /// because a row that lost an underscore either way would be a call to a name no object file
+    /// has, which is the failure this whole mechanism exists to prevent.
+    #[test]
+    fn every_chk_builtin_calls_the_checking_function_the_library_defines() {
+        let family: Vec<_> =
+            rucc_gnu::features().iter().filter(|feature| feature.name.ends_with("_chk")).collect();
+        assert_eq!(family.len(), 16, "the table lost part of the family");
+        for feature in family {
+            let name = feature.name;
+            assert!(name.starts_with("__builtin___"), "{name} is not one of the checking builtins");
+            let plain = name.strip_prefix("__builtin_").expect("the prefix");
+            assert_eq!(feature.library, plain, "{name}");
+            assert_eq!(library_name(name), Some(feature.library), "{name}");
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert!(!feature.signature.is_empty(), "{name} is called, so it has to be declared");
+        }
+    }
+
+    /// Ten of the sixteen fold, and the plain function each of them folds to is a row of its own.
+    ///
+    /// The ten being rows matters rather than being a nicety: the fold puts the plain name on a
+    /// call, so a name the table does not carry would be one nothing here knows the meaning of and
+    /// nothing would fold a `strlen` of its answer either. The six that do not fold are the
+    /// formatted ones, and they are listed here by name rather than by counting, because getting
+    /// one of them into the folding set would turn a refused `%n` into an accepted one.
+    #[test]
+    fn ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not() {
+        let folding: Vec<_> = rucc_gnu::features()
+            .iter()
+            .filter(|feature| unchecked_name(feature.name).is_some())
+            .collect();
+        assert_eq!(folding.len(), 10, "the folding half of the family is ten names");
+        for feature in folding {
+            let plain = unchecked_name(feature.name).expect("just filtered on it");
+            assert_eq!(feature.library, format!("__{plain}_chk"), "{}", feature.name);
+            let prefixed = format!("__builtin_{plain}");
+            let row = rucc_gnu::lookup(Kind::Builtin, &prefixed).expect(&prefixed);
+            assert_eq!(library_name(&prefixed), Some(row.library), "{prefixed}");
+            assert_eq!(row.library, plain, "{prefixed}");
+        }
+        for formatted in ["sprintf", "snprintf", "vsprintf", "vsnprintf", "printf", "vprintf"] {
+            let name = format!("__builtin___{formatted}_chk");
+            assert_eq!(unchecked_name(&name), None, "{name} refuses a %n whatever the size is");
+        }
+        assert_eq!(unchecked_name("__builtin_memcpy"), None, "not a checking call at all");
+        assert_eq!(unchecked_name("memcpy"), None);
+        assert_eq!(unchecked_name("__builtin___nonesuch_chk"), None, "the shape is not a promise");
+    }
+
+    /// The question is asked of every name the walk to the IR is about to write down, so the
+    /// answer for a name that has nothing to do with the family has to be that it stands.
+    #[test]
+    fn an_ordinary_name_keeps_the_one_the_program_gave_it() {
+        assert_eq!(library_name("abort"), None, "the program's own function of that name");
+        assert_eq!(library_name("main"), None);
+        assert_eq!(library_name("__builtin_nonesuch"), None, "the prefix is not a promise");
+        assert_eq!(library_name("__builtin_va_start"), None, "a builtin and not a function");
+    }
+
+    /// What each one is declared as, spelled out for the shapes the rest of the family is made
+    /// of, since the walk above compares the table against itself and this compares it against
+    /// what the C library actually promises.
+    #[test]
+    fn a_library_builtin_is_declared_with_the_type_the_library_gives_the_function() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let cases = [
+            ("__builtin_abort", "void(void)"),
+            ("__builtin_malloc", "void *(unsigned long)"),
+            ("__builtin_abs", "int(int)"),
+            ("__builtin_memcmp", "int(const void *, const void *, unsigned long)"),
+            ("__builtin_strchr", "char *(const char *, int)"),
+            ("__builtin_printf", "int(const char *, ...)"),
+        ];
+        let names: Vec<_> =
+            cases.iter().map(|(name, _)| fixture.names.intern(name)).collect::<Vec<_>>();
+        let mut c = fixture.checker();
+        for (name, (spelling, written)) in names.into_iter().zip(cases) {
+            let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+            assert_eq!(spelled(&c, c.tast[decl].ty), written, "for {spelling}");
+        }
+    }
+
+    /// `__clear_cache` is the library's own name and is declared like the prefixed one, while a
+    /// reserved name that is not a library function, and the plain name under `-fno-builtin`, are
+    /// left for the program to declare.
+    #[test]
+    fn a_library_function_in_the_reserved_namespace_needs_no_declaration() {
+        let mut fixture = Fixture::new("aarch64-unknown-linux-gnu");
+        let plain = fixture.names.intern("__clear_cache");
+        let prefixed = fixture.names.intern("__builtin___clear_cache");
+        let other = fixture.names.intern("__nonesuch");
+        let mut c = fixture.checker();
+        let decl = c.declare_builtin(plain, Span::DUMMY).expect("gcc declares it");
+        assert_eq!(c.tast[decl].name, Some(plain));
+        assert_eq!(spelled(&c, c.tast[decl].ty), "void(void *, void *)");
+        let decl = c.declare_builtin(prefixed, Span::DUMMY).expect("in the table");
+        assert_eq!(spelled(&c, c.tast[decl].ty), "void(void *, void *)");
+        assert_eq!(library_name("__builtin___clear_cache"), Some("__clear_cache"));
+        assert_eq!(library_name("__clear_cache"), None, "the name stands");
+        assert!(c.declare_builtin(other, Span::DUMMY).is_none());
+        let mut cx = Context::new(&fixture.names, &fixture.target, Std::C23);
+        cx.builtins = false;
+        let mut c = Checker::new(&fixture.ast, cx);
+        assert!(c.declare_builtin(plain, Span::DUMMY).is_none(), "-fno-builtin takes it away");
+        assert!(c.declare_builtin(prefixed, Span::DUMMY).is_some(), "the prefix is always there");
+    }
+
+    /// The declaration a program did not write goes where C says the implementation made it,
+    /// which is the file scope, however deep in the program the first call was.
+    #[test]
+    fn a_builtin_first_called_inside_a_block_is_still_declared_at_the_file_scope() {
+        let mut fixture = Fixture::new("x86_64-unknown-linux-gnu");
+        let name = fixture.names.intern("__builtin_trap");
+        let mut c = fixture.checker();
+        c.scopes.push();
+        c.scopes.push();
+        let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
+        c.scopes.pop();
+        c.scopes.pop();
+        assert_eq!(c.scopes.lookup(name), Some(Binding::Decl(decl)));
+        assert!(c.tast.top_level().is_empty(), "the program declared nothing");
+    }
+}

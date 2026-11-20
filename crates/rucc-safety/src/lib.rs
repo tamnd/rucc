@@ -1,0 +1,3079 @@
+//! The memory safety monitor: check insertion over the IR.
+//!
+//! Design: `spec/safe-memory/06-instrumentation.md` section 6.3.
+//!
+//! The one decision this crate exists to make is *when* checks are inserted. Every sanitizer that
+//! came before instruments after the optimizer, so that the optimizer cannot delete its checks,
+//! and pays the full naive cost of every one of them forever. We insert before the optimizer and
+//! let it discharge what it can prove, which is only possible because a check is an instruction
+//! with defined semantics rather than a call the optimizer has no opinion about.
+//!
+//! # What is here so far
+//!
+//! The three checks milestone S1 in `spec/safe-memory/16-milestones.md` asks for: bounds and
+//! lifetime on every access, and a derivation check on every pointer computed from another
+//! pointer. Nothing is discharged, so a function comes out with a check in front of everything,
+//! which is the baseline every elimination claim at S4 is measured against.
+//!
+//! And the boundary, in [`mod@wrap`]: a call the program wrote to one of the C library functions
+//! `rucc-safe-rt` has a row for is pointed at that row's wrapper instead, so the judgements happen
+//! before the call rather than not at all. That is milestone S2 and
+//! `spec/safe-memory/10-boundaries.md` section 10.3 is what it implements.
+//!
+//! And the other end of it, in [`mod@lower`]: after the optimizer has run, every check still standing
+//! becomes a call to the runtime carrying the index of a row in a table this crate puts in the
+//! object. That module is where the reason S1's checks are calls rather than compares is argued.
+//!
+//! And the rest of the boundary, in [`mod@boundary`]: the places where a pointer crosses between
+//! this build and code nobody instrumented, which is a function of this file that somebody else can
+//! call and a call this file makes to a library that has no wrapper. Neither can be modelled, so
+//! each of them is counted instead, which is what section 10.2 says the honest answer to a question
+//! you cannot answer is.
+//!
+//! And what all of that came to, in [`mod@summary`]: the counts `--emit=safety-summary` prints,
+//! which are what `spec/safe-memory/10-boundaries.md` section 10.2 means by a trust set that is
+//! counted per build rather than asserted.
+//!
+//! And the first of the planes, in [`mod@plane`]: every store records what the bytes it wrote were
+//! stored through, which is the judgement C 6.5 says a store makes, and every copy carries whatever
+//! the bytes it read said over to the bytes it wrote, which is the other half of the same rule.
+//! Those two are every write the type plane has, and every read that names a type now asks the
+//! plane whether the bytes agree with it, which is judgement J3. The order was deliberate: a check
+//! against a plane that only some of the writes maintain reports on programs that are correct, so
+//! the writes went in first and the question went in once they were all in.
+//!
+//! And the second of them, over the same two writes: every store records that the bytes it wrote
+//! hold something, and every copy carries whether the bytes it read held anything over to the bytes
+//! it wrote. The init plane is one bit per byte, so a store records the same thing whatever it
+//! stored, and a copy is the reason padding a member by member fill never touched is still padding
+//! nothing wrote after the structure moves. Every read now asks whether anything ever wrote the
+//! bytes it is about to read, which is document 03's Y6, and the writes went in first for the
+//! reason the type plane's did.
+//!
+//! And the one check that is not about a single access, in [`mod@promise`]: a block that declares
+//! `restrict` pointers keeps a record of what each of them reached, and every access through one of
+//! them asks whether another got there first. That is judgement J8 and it is off unless the build
+//! asks for it with `-fsafety-restrict`, which is the only check here that is, and the reason is on
+//! [`rucc_session::Promise`].
+//!
+//! The padding rule of `spec/safe-memory/09-type-init-and-races.md` section 9.3 arrives here as one
+//! number. A store carries how much padding the member it went through owns, and the range it
+//! records is the wider of that and what it wrote, which is all of `-fsafety-init=nopadding`. How
+//! far the padding goes takes a record's layout and this crate reads IR, so the front end is what
+//! decides it and `MemInfo.owns` is how the answer travels.
+//!
+//! The two questions a read asks come apart in one place. A read the front end named no type for
+//! asks the type plane nothing, because the question there is which type the bytes hold, and it
+//! asks the init plane the same thing every other read does, because the question there is about
+//! the bytes rather than about the access. What no `load` in any program asks about is padding: a
+//! read compiled into a `load` reads a member and a member is never padding, so the reads that
+//! cover padding are `memcmp` of two structures, hashing one and handing one to `write`, every one
+//! of which is a call into the movement group of [`mod@wrap`]. Which is why the flag selects what a
+//! store records rather than what a read asks about: the reads that would need it are not `load`s.
+//!
+//! The race check is not here, because the epoch plane is not written at all and a check against a
+//! plane nobody maintains would either report on every access or on none. That is S6. Neither are
+//! the other plane writes: `meta_begin` and `meta_end` for an automatic instance need the escape
+//! analysis of document 08 section 8.4, and until that exists the only instances the runtime knows
+//! about are the ones the allocator reports, which is also why a store to a local records into a
+//! plane that is not there and costs a call that decides nothing.
+//!
+//! # Why the rank matters
+//!
+//! `rucc-safety` is rank 10, alongside `rucc-lower` and `rucc-opt`, so it can depend on neither.
+//! That is the constraint and not an inconvenience: it consumes IR and produces IR, it never sees
+//! the AST, and `rucc-driver` at rank 13 is what sequences it between the two.
+//! `spec/safe-memory/15-integration.md` section 15.1 argues it out.
+//!
+//! # Stability
+//!
+//! Every crate in the workspace is published, and publishing implies a promise. This one is
+//! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
+//! Depend on the `rucc` binary's behaviour, not on this.
+
+#![doc(html_root_url = "https://docs.rs/rucc-safety/0.30.15")]
+
+pub mod boundary;
+pub mod ending;
+pub mod format;
+pub mod frame;
+pub mod handover;
+pub mod leaks;
+pub mod local;
+pub mod lower;
+pub mod origin;
+pub mod plane;
+pub mod promise;
+pub mod slot;
+pub mod summary;
+pub mod wrap;
+
+pub use boundary::{Sites, WITNESS, witness};
+pub use lower::{Descriptor, SECTION, lower};
+pub use plane::Plane;
+pub use promise::{Kept, promise};
+pub use summary::{Frames, Summary, summarize};
+pub use wrap::{INTERPOSED, PREFIX, redirect};
+
+use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
+pub use rucc_session::{Leaks, Promise, Races, Subobject};
+
+/// How many checks a run of [`insert`] put in.
+///
+/// Reported rather than discarded because the number of checks a function starts with is the
+/// denominator of everything document 13 measures, and it is not recoverable later: by the time
+/// the optimizer has run, the checks that were discharged are gone and nothing says how many
+/// there were.
+///
+/// The three counts are kept apart rather than added up because they are discharged by different
+/// rules and at very different rates. Document 07 expects bounds to go away often, lifetime to go
+/// away when the instance does not escape, and derivation to survive, so one number would hide
+/// exactly the thing the measurement is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Accesses that were given a bounds check.
+    pub checked: usize,
+    /// Accesses that were given a lifetime check, which is the same set as `checked`.
+    pub live: usize,
+    /// Calls that end a storage instance and were given a check in front of them.
+    ///
+    /// Not filled in by [`insert`], which is the one count here that is not. It comes from
+    /// [`mod@ending`], a pass of its own for the reason that module gives, and the driver puts what
+    /// that returns in here so that a check class is reported beside the other check classes rather
+    /// than off to one side.
+    pub freed: usize,
+    /// Pointers computed from another pointer that were given a derivation check.
+    pub derived: usize,
+    /// Accesses that got nothing, because the pointer they go through is not a value this pass
+    /// can take the capability of.
+    pub skipped: usize,
+    /// Stores that recorded what the bytes they wrote were stored through.
+    ///
+    /// Not in `--emit=safety-summary` yet, which is the one count here that is not. The summary
+    /// reports a class as a pair, how many went in and how many are left, and nothing discharges a
+    /// plane write today, so the pair would be one number written twice. It goes in beside the
+    /// first rule that removes one.
+    pub judged: usize,
+    /// Copies that carried whatever the bytes they read said over to the bytes they wrote.
+    ///
+    /// Kept apart from `judged` for the reason the three check counts are kept apart. A store
+    /// records a type the compiler knows and a copy records one only the plane knows, so the two
+    /// are discharged by different rules: a store into storage nothing watches can be dropped by
+    /// looking at the store, and a copy cannot be looked at the same way.
+    pub carried: usize,
+    /// Accesses that asked the plane whether the bytes agree with the type they name.
+    ///
+    /// Fewer than `checked`, and the reason is in `ask`: an access the front end did not name a
+    /// type for has no question to put. Without `-fsafety-subobject` it is fewer again, because
+    /// only a read asks, and the reason a store asks only when somebody asked for it is on
+    /// [`rucc_session::Subobject`].
+    pub asked: usize,
+    /// Stores that recorded that the bytes they wrote hold what they wrote.
+    ///
+    /// The same set as `checked` minus the reads, and unlike `judged` it does not thin: a store
+    /// records into the init plane whatever it was storing through, because what the init plane
+    /// holds is whether anything was stored at all.
+    pub wrote: usize,
+    /// Reads that asked the plane whether anything ever wrote the bytes they are about to read.
+    ///
+    /// The same set as the reads in `checked`, and unlike `asked` it does not thin: the question is
+    /// whether the bytes hold anything at all, which is a question about every read whatever type
+    /// the front end did or did not name for it.
+    pub filled: usize,
+    /// Copies that carried whether the bytes they read held anything over to the bytes they wrote.
+    ///
+    /// The same set as `carried`, and counted beside it for the reason `wrote` is counted beside
+    /// `judged`: the two planes will be discharged by different rules, so the day one of them
+    /// thins the numbers have to be able to differ.
+    pub moved: usize,
+    /// Copies that carried the capability beside every pointer they moved over to the bytes they
+    /// wrote.
+    ///
+    /// The same set again, and counted apart from the two of them because it is not a plane write:
+    /// what it moves is the aux, which is the storage `saved` fills one word at a time. A build with
+    /// many of these and few of `saved` is a build whose pointers mostly travel inside structures
+    /// being copied whole, which is a different shape of program and worth being able to see.
+    pub relocated: usize,
+    /// Accesses that asked their block whether another `restrict` pointer of it got there first.
+    ///
+    /// Zero without `-fsafety-restrict`, and zero in the overwhelming majority of functions with
+    /// it, because the only accesses that ask are the ones the front end traced back to a
+    /// `restrict` declaration. [`mod@promise`] is where both of those are argued.
+    pub promised: usize,
+    /// Accesses of a pointer that asked whether another thread reached the same granule first.
+    ///
+    /// Zero without `-fsafety-races`. Every store that stamps also asks, so with `metadata` this
+    /// equals `stamped`, and `pointer` adds the loads, which is the one thing separating the two
+    /// modes. [`mod@rucc_session`]'s `Races` is where that is argued.
+    pub watched: usize,
+    /// Stores of a pointer that recorded which thread wrote it and how far that thread had counted.
+    ///
+    /// Zero without `-fsafety-races`, and far fewer than `wrote` with it, because the epoch plane
+    /// watches pointer shaped words and not every byte a program stores. [`mod@rucc_session`]'s
+    /// `Races` is where that is argued.
+    pub stamped: usize,
+    /// Halves of a synchronization edge put around an atomic, which is nought, one or two of them
+    /// per atomic depending on what the program asked that atomic to order.
+    ///
+    /// Zero without `-fsafety-races`, and zero with it in a program that uses no atomics, which is
+    /// most of them. Counted apart from `stamped` because it is not a plane write: the two of them
+    /// answer different questions and a build with a great many of one and none of the other is a
+    /// build somebody should be able to see.
+    pub edged: usize,
+    /// Stores of a pointer that wrote the pointer's capability into the slot beside it.
+    ///
+    /// A subset of `wrote`, and on ordinary code a small one, since most of what a program stores is
+    /// not a pointer. Counted apart from `stamped`, which is the other thing only a pointer store
+    /// does, because the two are paid for by different builds: that one is zero without
+    /// `-fsafety-races` and this one is not optional, being where the capability of everything read
+    /// back out of memory comes from.
+    pub saved: usize,
+    /// Reads of a pointer that took its capability out of the slot beside it.
+    ///
+    /// The one count here that is a saving rather than a cost. Every one of these is a `cap_of` that
+    /// did not go in, and a `cap_of` over a pointer nothing else produced is a walk of the lifetime
+    /// plane. What it becomes instead is a slot read, or the same walk when the word turns out to
+    /// have no slot, which is every local and every global today.
+    pub recalled: usize,
+    /// Blocks that opened a scope, which is one per `restrict` clique that has an access in it.
+    ///
+    /// Kept apart from `promised` because it is the part of the cost that is paid per call rather
+    /// than per access: two calls and a stack slot, against which a block that checks a thousand
+    /// accesses and a block that checks one look very different.
+    pub scoped: usize,
+}
+
+impl Counts {
+    /// Adds another function's counts to these.
+    fn add(&mut self, other: Counts) {
+        self.checked += other.checked;
+        self.live += other.live;
+        self.freed += other.freed;
+        self.derived += other.derived;
+        self.skipped += other.skipped;
+        self.judged += other.judged;
+        self.carried += other.carried;
+        self.asked += other.asked;
+        self.wrote += other.wrote;
+        self.filled += other.filled;
+        self.moved += other.moved;
+        self.relocated += other.relocated;
+        self.stamped += other.stamped;
+        self.saved += other.saved;
+        self.recalled += other.recalled;
+        self.watched += other.watched;
+        self.edged += other.edged;
+        self.promised += other.promised;
+        self.scoped += other.scoped;
+    }
+
+    /// Adds what the `restrict` walk of one function came to.
+    ///
+    /// A second function rather than a second [`Counts`] because that walk counts two things and
+    /// has no opinion about the other ten, and a conversion that filled in ten zeroes would let a
+    /// later count be lost by being added to a zero.
+    fn add_kept(&mut self, kept: Kept) {
+        self.promised += kept.promised;
+        self.scoped += kept.scoped;
+    }
+}
+
+/// Puts checks in every function a module defines.
+///
+/// The whole module rather than a function at a time, because that is the unit the driver hands
+/// around and because the pass has nothing to say about the order: no check depends on anything
+/// outside the function it is in. A declaration has no body and is skipped, for the same reason
+/// the back end skips it.
+///
+/// Whether this runs at all is `-fsafety=`, and the driver decides it. This crate does not read
+/// the flag, because a pass that decides for itself whether it runs is a pass whose effect cannot
+/// be read off the pipeline.
+pub fn run(module: &mut Module, subobject: Subobject, promise: Promise, races: Races) -> Counts {
+    // Before the walk, because the entries live in the module and a function is borrowed out of
+    // the module while its stores are being instrumented. It is also the reason this is the entry
+    // point rather than [`insert`]: there is one plane per module and every function records into
+    // the same one.
+    let plane = Plane::build(module);
+    // The one thing a pointer typed access cannot work out for itself, which is how wide it is.
+    let width = u64::from(module.datalayout.pointer_bits / 8);
+    let mut counts = Counts::default();
+    for id in module.funcs() {
+        if !module[id].is_declaration() {
+            counts.add(insert(&mut module[id], &plane, width, subobject, promise, races));
+        }
+    }
+    counts
+}
+
+/// Puts checks in front of every access and every derivation in a function.
+///
+/// Section 6.3: every `load` and `store` gets `check_bounds` and `check_live`, with the
+/// capability coming from the pointer operand, and every `ptr_add` gets `check_deriv` on the
+/// pointer it was computed from. The size and the alignment are the access's own, since a check
+/// that asked about a different number of bytes from the access it guards would be checking
+/// something the program does not do.
+///
+/// A capability belongs to a pointer rather than to an access, so two checks through the same
+/// pointer read one `cap_of` and a walk reads the one belonging to what it walked off.
+/// [`mod@origin`] is where it is made and where that is argued.
+///
+/// The two access checks are separate instructions rather than one fused check, which section
+/// 6.2.2 asks for and which matters more than it looks: the common case document 07 is built
+/// around is that the bounds check is discharged and the lifetime check is not, or the other way
+/// round for a local whose frame the compiler can see. One instruction would mean keeping both
+/// whenever either survived. Where both do survive, the backend fuses them behind one branch.
+///
+/// Nothing is discharged here. A `check_bounds` on a pointer whose bounds are statically obvious
+/// is still emitted, and the fact propagation in `rucc-opt` is what removes it. That split is the
+/// whole design: this pass is a walk anybody can read, and the deletions are rules that are
+/// verified.
+pub fn insert(
+    func: &mut Func,
+    plane: &Plane,
+    width: u64,
+    subobject: Subobject,
+    promise: Promise,
+    races: Races,
+) -> Counts {
+    let mut counts = Counts::default();
+    // One table for the whole function, because a capability belongs to a pointer and not to an
+    // access: two checks through the same pointer read the same one. [`mod@origin`] is where that
+    // is argued and where the placement that makes it sound is.
+    let mut origins = origin::Origins::new();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in insts {
+        match func[inst].opcode {
+            Opcode::Load | Opcode::Store => match pointer_of(func, inst) {
+                Some(pointer) => {
+                    let capability = check(func, &mut origins, inst, pointer, width);
+                    counts.checked += 1;
+                    counts.live += 1;
+                    if func[inst].opcode == Opcode::Store {
+                        // In front of the store, and only when the build asked for it. Every other
+                        // question at a store is a recording made afterwards, and this is the one
+                        // that can refuse, so it has to be asked while the bytes still say what
+                        // they said before.
+                        if subobject.asks() && ask(func, plane, inst, pointer, capability, width) {
+                            counts.asked += 1;
+                        }
+                        // Also in front, and in second so that it lands nearest the store of the
+                        // two that can refuse. It has to be on this side of the store for the
+                        // reason [`raced`] gives, and being the last question asked is what makes
+                        // the stamp it reads the one that was there when the store began.
+                        if races.records() && raced(func, inst, pointer, capability, width) {
+                            counts.watched += 1;
+                        }
+                        // First of everything that goes after the store, so it ends up furthest
+                        // from it. It is the only one of these that is not a plane write: the rest
+                        // record something about the bytes, keyed on the address, and this writes
+                        // the slot that sits beside the word. Nothing here reads what anything else
+                        // here wrote, so the order is a matter of what reads well rather than of
+                        // what is correct.
+                        if saved(func, &mut origins, inst, pointer, capability) {
+                            counts.saved += 1;
+                        }
+                        // The init plane's write goes in first so that the type plane's ends up in
+                        // front of it, since both are inserted after the store and the one that
+                        // goes in second is the one that lands nearer to it.
+                        if wrote(func, inst, pointer, width) {
+                            counts.wrote += 1;
+                        }
+                        if judge(func, plane, inst, pointer, width) {
+                            counts.judged += 1;
+                        }
+                        // Last, so that it ends up nearest the store of the three recordings, which
+                        // is where the one that is read by another thread belongs. The question
+                        // above it went in front of the store, so it reads the plane before this
+                        // overwrites what it read.
+                        if races.records() && stamped(func, inst, pointer, width) {
+                            counts.stamped += 1;
+                        }
+                    } else {
+                        // Both go in front of the read, and the one that goes in second is the one
+                        // that lands nearer to it, so this order prints the type question and then
+                        // the init question. Either order is correct: neither reads what the other
+                        // wrote and the read happens after both.
+                        if ask(func, plane, inst, pointer, capability, width) {
+                            counts.asked += 1;
+                        }
+                        if filled(func, inst, pointer, capability, width) {
+                            counts.filled += 1;
+                        }
+                        // Only under `-fsafety-races=pointer`, which is the mode that reports C2.
+                        // The other one watches what a store does and leaves a load alone.
+                        if races.reads() && raced(func, inst, pointer, capability, width) {
+                            counts.watched += 1;
+                        }
+                        // After the read, since what it is about is the value the read produced.
+                        // The only one of these that puts something in behind the access rather
+                        // than in front of it, and the only one that answers rather than asks.
+                        if recalled(func, &mut origins, inst, pointer, capability) {
+                            counts.recalled += 1;
+                        }
+                    }
+                }
+                None => counts.skipped += 1,
+            },
+            Opcode::Memcpy | Opcode::Memmove => {
+                // The two ends of a copy are two accesses of the same width, a read through one
+                // pointer and a write through the other, so each gets the pair an access of its own
+                // would get. The destination's pair goes in first and so stands first in the
+                // stream, which is the order a report reads best in when both ends are bad: the
+                // write is what the program was for and the read is how it got there. Both pairs
+                // carry the one payload the copy has, since the width is the same width twice and
+                // the two ends of a copy the front end wrote have the same type as each other.
+                for through in func.bulk(inst).into_iter().flat_map(|bulk| [bulk.to, bulk.with]) {
+                    if spanned(func, &mut origins, inst, through) {
+                        counts.checked += 1;
+                        counts.live += 1;
+                    } else {
+                        counts.skipped += 1;
+                    }
+                }
+                // The aux first of the three behind it, so that it ends up behind the two plane
+                // copies in the stream. Any order is right here, since none of the three reads what
+                // another writes and all three happen after the copy, and this one matches the
+                // order the wrapper around the library's own `memcpy` does its three in.
+                if relocation(func, inst) {
+                    counts.relocated += 1;
+                }
+                // Second for the reason a store's two are in the order they are in.
+                if moved(func, inst) {
+                    counts.moved += 1;
+                }
+                if carry(func, inst) {
+                    counts.carried += 1;
+                }
+            }
+            Opcode::Memset => {
+                // The two checks in front, in the order a store's two go in, because a fill is a
+                // write of as many bytes as it says through a pointer somebody handed it and a
+                // fill that runs off the end of an object is the overflow this build exists to
+                // report.
+                let filled = func.bulk(inst).map(|bulk| bulk.to);
+                if filled.is_some_and(|to| spanned(func, &mut origins, inst, to)) {
+                    counts.checked += 1;
+                    counts.live += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+                // Both plane writes go in behind it, and they go in together or not at all.
+                if recorded(func, plane, inst) {
+                    counts.wrote += 1;
+                    counts.judged += 1;
+                }
+            }
+            Opcode::PtrAdd => {
+                if derivation(func, &mut origins, inst) {
+                    counts.derived += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+            }
+            // The edges, which are nothing like the rest of this walk: they put no question and
+            // record nothing about the bytes the atomic touched. What they do is tell the epoch
+            // plane that two threads were ordered here, which is the one thing a plane made of
+            // per thread counters cannot work out for itself. Both modes emit them, because what
+            // separates the modes is which classes are reported and an edge reports nothing.
+            Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::AtomicRmw | Opcode::Cmpxchg
+                if races.records() =>
+            {
+                counts.edged += edges(func, inst);
+            }
+            // The same edge without a key. A fence is the other way a C program orders two
+            // threads without calling anything, and the reason it is a separate arm is that it
+            // has no address in it at all.
+            Opcode::Fence if races.records() => {
+                counts.edged += fenced(func, inst);
+            }
+            _ => {}
+        }
+    }
+    // Once every load has had its `cap_load` put behind it, so that a pointer arriving at a join
+    // is handed the capability its edge already has rather than one worked out from the address.
+    origins.join(func);
+    // Last, so that the check it puts in front of an access lands after the bounds check that is
+    // already there. It is its own walk rather than another arm above because what it puts in is
+    // not one check per access: the scopes are per function and the two calls that keep one go in
+    // the entry block and at every exit.
+    if promise.checks() {
+        counts.add_kept(promise::promise(func, width));
+    }
+    counts
+}
+
+/// The pointer an access goes through.
+///
+/// A `load` reads through its first operand and a `store` writes through its second, the value
+/// being written coming first because that is the order the text writes them in.
+fn pointer_of(func: &Func, access: Inst) -> Option<Value> {
+    let args = &func[func[access].args];
+    let at = match func[access].opcode {
+        Opcode::Load => 0,
+        Opcode::Store => 1,
+        _ => return None,
+    };
+    let &value = args.get(at)?;
+    func[value].ty.is_ptr().then_some(value)
+}
+
+/// Puts `check_bounds` and `check_live` immediately before one access, over the pointer's
+/// capability.
+///
+/// Gives back the capability the two checks read, so that a third check on the same access can read
+/// the same one rather than taking it again. An access with no payload gets nothing and answers
+/// nothing, which is the shape a caller has to handle anyway.
+///
+/// The capability comes out of `origins` rather than being taken here, so an access through a
+/// pointer some earlier access already asked about reads what that one read. Where it is made and
+/// why that is sound is [`mod@origin`].
+fn check(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    access: Inst,
+    pointer: Value,
+    width: u64,
+) -> Option<Value> {
+    let span = func.span(access);
+    let Extra::Mem(info) = func[access].extra else { return None };
+    let mut info = func[info];
+    info.size = covered(func, access, info.size, width);
+    // Not the padding after it. What a check is about is the bytes the access touches, and the
+    // padding is about what a store records rather than about what it reads or writes.
+    info.owns = 0;
+
+    let capability = origins.of(func, pointer, access);
+
+    // The check reads the same bytes the access does, so it carries the access's own payload
+    // rather than a copy of it that could later disagree.
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let bounds =
+        func.create_inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[], span);
+    func.insert_before(bounds, access);
+
+    // No payload on this one. Whether the capability still names whoever owns the address is a
+    // question about the pointer and not about how many bytes are being read through it.
+    let args = func.push_values(&[capability, pointer]);
+    let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
+    func.insert_before(live, access);
+
+    Some(capability)
+}
+
+/// Puts `check_bounds` and `check_live` immediately before one fill, over the bytes it covers.
+///
+/// The same two instructions [`check`] puts in front of a `load` or a `store`, and a separate
+/// function rather than a case in that one because of where the byte count comes from. That one
+/// takes it out of the access's payload, and half the fills in the IR hold their count in an
+/// operand instead, since an object whose length the program works out is zeroed by a fill of a
+/// length the program works out. `check_bounds` has an operand for exactly that, which
+/// `spec/safe-memory/07-check-elimination.md` section 7.4 put there for the one check that stands
+/// for a loop, and a fill is the other thing that needs it. The payload still travels either way,
+/// because it holds the alignment and what the front end named the bytes.
+///
+/// The lifetime check has no payload for the reason it has none in front of an access: whether the
+/// capability still names whoever owns the address is a question about the pointer rather than
+/// about how many bytes are going through it.
+fn spanned(func: &mut Func, origins: &mut origin::Origins, bulk: Inst, through: Value) -> bool {
+    let Some(length) = func.bulk(bulk).map(|bulk| bulk.length) else { return false };
+    let Extra::Mem(info) = func[bulk].extra else { return false };
+    let mut info = func[info];
+    // Not the padding after it, for the reason [`check`] gives about an access.
+    info.owns = 0;
+
+    let span = func.span(bulk);
+    let capability = origins.of(func, through, bulk);
+
+    let mut operands = vec![capability, through];
+    operands.extend(length);
+    let args = func.push_values(&operands);
+    let extra = Extra::Mem(func.add_mem(info));
+    let bounds =
+        func.create_inst(InstData { args, extra, ..InstData::new(Opcode::CheckBounds) }, &[], span);
+    func.insert_before(bounds, bulk);
+
+    let args = func.push_values(&[capability, through]);
+    let live = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckLive) }, &[], span);
+    func.insert_before(live, bulk);
+
+    true
+}
+
+/// Puts the two plane writes a fill owes in behind it, and says whether it did.
+///
+/// One function rather than two calls beside each other in the walk, because both read the same
+/// length and the length of a fill whose payload holds it is a constant that has to be made:
+/// asking for it twice would make it twice.
+///
+/// The init plane's write goes in first so that the type plane's ends up in front of it, since both
+/// are inserted after the same instruction and the one that goes in second is the one that lands
+/// nearer to it. That is the order a store's two are in, and it is a matter of what reads well
+/// rather than of what is correct, since neither reads what the other wrote.
+fn recorded(func: &mut Func, plane: &Plane, fill: Inst) -> bool {
+    let Some(to) = func.bulk(fill).map(|bulk| bulk.to) else { return false };
+    let Some((made, length)) = copied(func, fill) else { return false };
+    scrubbed(func, fill, made, to, length);
+    untyped(func, plane, fill, made, to, length);
+    true
+}
+
+/// Puts a `meta_init` immediately after one fill, recording that the bytes it covered hold
+/// something.
+///
+/// What [`wrote`] does for a store, said about a range the fill already carries rather than about a
+/// width worked out from a type. A fill writes a byte into every one of those bytes, so every one
+/// of them holds what was written, and a plane that went on saying otherwise is what made
+/// `struct S s = {0};` leave a zeroed object the monitor thought was never written.
+///
+/// The length and the instruction to go in after are handed over rather than worked out, because
+/// the type plane's write beside this one reads the same length and a second [`copied`] would make
+/// a second constant for it.
+fn scrubbed(func: &mut Func, fill: Inst, made: Inst, to: Value, length: Value) {
+    let span = func.span(fill);
+    let args = func.push_values(&[to, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInit) };
+    let written = func.create_inst(data, &[], span);
+    func.insert_after(written, made);
+}
+
+/// Puts a `meta_type` immediately after one fill, recording that the bytes it covered hold no type.
+///
+/// The type-plane operation `spec/safe-memory/06-instrumentation.md` section 6.3 asks a fill for,
+/// and the entry is the untyped one every time rather than whatever the front end named. A fill
+/// writes a byte over a range and a byte is not a value of any type, so C 6.5 leaves the bytes with
+/// no effective type at all and the plane's untyped entry is the one that says so.
+///
+/// What it is really for is taking away what was there before. Without it the plane goes on
+/// describing an object that has been filled over, so a program that stores a `float` through a
+/// piece of allocated storage, fills the whole thing and reads it back as an `int` is refused for
+/// reading bytes at a type they do not hold, which is over-reporting and is the direction
+/// `spec/safe-memory/09-type-init-and-races.md` section 9.1 says this design does not go in. The
+/// untyped entry is compatible with every access, so what it costs is a question that is not asked.
+fn untyped(func: &mut Func, plane: &Plane, fill: Inst, made: Inst, to: Value, length: Value) {
+    let span = func.span(fill);
+    let args = func.push_values(&[to, length]);
+    let extra = Extra::Node(plane.entry(None));
+    let data = InstData { args, extra, ..InstData::new(Opcode::MetaType) };
+    let judged = func.create_inst(data, &[], span);
+    func.insert_after(judged, made);
+}
+
+/// Puts a `meta_type` immediately after one store, recording what its bytes were stored through.
+///
+/// The judgement of C 6.5: a store through an lvalue of type `T` sets the effective type of what it
+/// wrote to `T`, and the plane is where that is written down. What the store names is the aliasing
+/// node the walk put on it, and [`Plane::entry`] is the translation from that to the entry the
+/// plane holds, including the two cases that are not a type.
+///
+/// After the store rather than before it, which is the one thing about the placement that matters.
+/// The bytes are stored through that type once the store has happened, and a plane that said so
+/// first would be describing a store that the bounds check in front of it may yet refuse.
+///
+/// The length is a value rather than a field of the payload because that is the shape the opcode
+/// has, and it is a `meta_type` over a range because one store writes a run of bytes. Where the
+/// value comes from is [`extent`].
+fn judge(func: &mut Func, plane: &Plane, store: Inst, pointer: Value, width: u64) -> bool {
+    let Extra::Mem(info) = func[store].extra else { return false };
+    let size = covered(func, store, func[info].size, width);
+    // A store whose width nothing states covers no bytes anybody can name, and a plane write over
+    // nothing is an instruction with no effect.
+    if size == 0 {
+        return false;
+    }
+    let node = plane.entry(func[info].tbaa);
+
+    let span = func.span(store);
+    let (made, length) = extent(func, store, size);
+    let args = func.push_values(&[pointer, length]);
+    let data = InstData { args, extra: Extra::Node(node), ..InstData::new(Opcode::MetaType) };
+    let judged = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the store, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `check_type` immediately before one read, asking whether the bytes agree with the type
+/// they are about to be read as.
+///
+/// Judgement J3, and the half of the type plane that decides something. The two writes record what
+/// a store and a copy left behind, and this is the question they were recorded for: the effective
+/// type rule of C 6.5 says an object's stored value may only be read through a type compatible with
+/// the one it was stored through, and the plane is where the compiler wrote down which that was.
+///
+/// # Why only a read
+///
+/// A store does not ask, it answers. The plane covers storage the allocator reported and nothing
+/// else, which is exactly the storage C gives no declared type, and the effective type of such an
+/// object is whatever the last store through it set. So a store cannot disagree with the plane: it
+/// is what makes the plane say what it says, and a check in front of one would refuse the reuse of
+/// a buffer that the standard permits.
+///
+/// # Why a read that names no type asks nothing
+///
+/// An access whose payload carries no aliasing node is an access the front end did not say the type
+/// of, which is a copy of an aggregate, an array, or anything else reached by address. That is not
+/// the same as reading bytes nothing has been stored through, and the plane's untyped entry means
+/// the second one. Asking with it would refuse every read of a structure whose members had been
+/// stored through their own types, which is every correct program that has one.
+///
+/// The check goes in front of the read, behind the bounds and lifetime checks that are also in
+/// front of it. A question about what the bytes say is worth asking only once somebody owns them,
+/// and what the runtime answers for an address no region covers is nothing rather than a refusal.
+fn ask(
+    func: &mut Func,
+    plane: &Plane,
+    read: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+    width: u64,
+) -> bool {
+    let Some(capability) = capability else { return false };
+    let Extra::Mem(at) = func[read].extra else { return false };
+    let mut info = func[at];
+    let Some(node) = info.tbaa else { return false };
+    info.size = covered(func, read, info.size, width);
+    // A read whose width nothing states reads no bytes anybody can name, the same way a store of
+    // none writes none.
+    if info.size == 0 {
+        return false;
+    }
+    // The payload the check carries is the access's, with the aliasing node replaced by the plane
+    // entry for it, because the plane and the aliasing tree are two vocabularies and the question is
+    // put in the plane's.
+    info.tbaa = Some(plane.entry(Some(node)));
+    // As in `access_checks`, and here it could never be anything else: a read carries no padding.
+    info.owns = 0;
+
+    let span = func.span(read);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckType) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, read);
+    true
+}
+
+/// Puts a `meta_type_copy` immediately after one copy, carrying what its source said to its
+/// destination.
+///
+/// The other half of the judgement C 6.5 describes. A copy does not store through a type, so there
+/// is no type for the compiler to record: what the copied bytes are is whatever the bytes they came
+/// from were, and the only place that is written down is the plane over the source. So this names
+/// two ranges and no node, and the runtime moves the entries across.
+///
+/// Without it the destination would keep whatever the bytes there said before the copy, which is
+/// the thing that makes a check against the plane unusable. A structure copied into a fresh
+/// allocation would come out untyped at best and, once the allocation had been reused, wrong at
+/// worst, and the very next read of a field would be refused on a program that is correct.
+///
+/// After the copy rather than before it, for the same reason a store's judgement goes after the
+/// store. The bytes say the new thing once the copy has happened. Reading the source's plane
+/// afterwards is the same answer as reading it before, overlap included, because a copy writes no
+/// plane entries of its own.
+fn carry(func: &mut Func, copy: Inst) -> bool {
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
+
+    let span = func.span(copy);
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaTypeCopy) };
+    let carried = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the copy, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(carried, made);
+    true
+}
+
+/// Puts a `meta_init` immediately after one store, recording that its bytes hold what it wrote.
+///
+/// The judgement of `spec/safe-memory/09-type-init-and-races.md` section 9.2, and the write the
+/// init plane is made of. An instance beginning is the only thing that makes a byte unwritten, and
+/// this is the only thing that makes one written again, so between the two of them the plane holds
+/// exactly the bytes the monitor watched a store land on.
+///
+/// After the store, and for the same reason the type plane's judgement goes after one: the bytes
+/// hold what was written once the store has happened, and saying so first would be describing a
+/// store the bounds check in front of it may yet refuse.
+///
+/// # Where the padding rule lives
+///
+/// Section 9.3 says a store that writes an object as a whole initializes it as a whole, padding
+/// included, and that a member by member fill leaves the padding alone. Nothing here implements
+/// that, and nothing has to. Both arrive as a range and the range is the access's own width: a
+/// store through a member of a structure is a `store` of the member's width and names the member,
+/// and a structure assigned whole, a `= {0}`, a `memset` and a `memcpy` are all a copy of `sizeof`
+/// bytes and name the object. The rule falls out of what the front end already lowered rather than
+/// out of anything this pass knows about structures, which is what keeps it one rule rather than a
+/// special case per shape.
+///
+/// # Why this does not thin
+///
+/// A store records into the init plane whatever type it was storing through, including the two
+/// cases the type plane has no entry for. What the init plane holds is whether anything was stored
+/// at all, and the answer to that does not depend on what the store thought it was writing, so
+/// every store that covers a byte records it.
+fn wrote(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
+    let Extra::Mem(info) = func[store].extra else { return false };
+    // The padding after a member, where the front end was asked to say how far it goes. That is
+    // the whole of `-fsafety-init=nopadding` and it is a number rather than a mode here, because
+    // what the padding is takes a record's layout and this pass reads IR.
+    let size = covered(func, store, func[info].size, width).max(u64::from(func[info].owns));
+    // A store whose width nothing states writes no bytes anybody can name, the same way the type
+    // plane's judgement over one records nothing.
+    if size == 0 {
+        return false;
+    }
+
+    let span = func.span(store);
+    let (made, length) = extent(func, store, size);
+    let args = func.push_values(&[pointer, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInit) };
+    let judged = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the store, since both go in the same place and
+    // the one that goes in second ends up in front.
+    func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `check_init` in front of one read, asking whether anything ever wrote the bytes it is
+/// about to read.
+///
+/// Document 03's Y6, and the class MSan exists for. The two writes are in, a store recording that
+/// the bytes it wrote hold something and a copy carrying whether the bytes it read held anything,
+/// so the plane now says something true about every byte a program wrote and this is the question
+/// those writes were recorded for.
+///
+/// # Why every read and not only the ones that named a type
+///
+/// [`ask`] passes over a read the front end named no type for, because a question about which type
+/// bytes hold has nothing to ask when the access names none. This one has no such case: the plane
+/// holds one bit per byte and the bit says whether anything was ever stored there, which is a fact
+/// about the bytes and not about the access, so a read of an aggregate by address asks it just as a
+/// read of an `int` does.
+///
+/// # Padding
+///
+/// It does not come up here and that is worth writing down, because section 9.3 is where the
+/// padding rule lives and this is the check the rule is about. A read compiled into a `load` reads
+/// a member, and a member is never padding, so no `load` in any program covers a byte a
+/// member-by-member fill left alone. The reads that do cover padding are `memcmp` of two
+/// structures, hashing one, and handing one to `write`, and every one of those is a call into the
+/// movement group of `crate::wrap` rather than a `load`. That is where `-fsafety-init=padding` will
+/// have something to select, and it is why the flag is not here.
+///
+/// # Why a whole width and not a byte
+///
+/// The payload's size, the same one [`ask`] uses, so a read that straddles the end of what was
+/// written is refused on the first byte nothing wrote rather than on the byte the address names.
+/// A read of four bytes where two were written is a read of memory that was never written, and
+/// reporting it at the access is the only place a report means anything.
+fn filled(
+    func: &mut Func,
+    read: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+    width: u64,
+) -> bool {
+    let Some(capability) = capability else { return false };
+    let Extra::Mem(at) = func[read].extra else { return false };
+    let mut info = func[at];
+    info.size = covered(func, read, info.size, width);
+    // A read whose width nothing states reads no bytes anybody can name, as in [`ask`].
+    if info.size == 0 {
+        return false;
+    }
+    // The plane holds no types, so whatever the access named is not a thing this question is in
+    // terms of, and carrying it would suggest the check compares against it.
+    info.tbaa = None;
+
+    let span = func.span(read);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckInit) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, read);
+    true
+}
+
+/// Puts a `cap_copy` immediately after one copy, carrying the capability beside every pointer it
+/// moved.
+///
+/// The third of the three, and the one about the aux rather than about a plane. A pointer written
+/// to memory leaves its capability in the slot beside it, and a copy of a structure moves the
+/// pointer without touching the slot, so a copy with nothing here leaves every pointer in the
+/// destination described by whatever the slot said before. On fresh storage that is nothing, and
+/// the first access through the copied pointer is refused on a program that is correct. On storage
+/// the allocator has handed out before it is worse and quieter, because the slot holds an older
+/// instance's answer and a pointer that really is stale inherits a version that says it is live.
+///
+/// `struct point *a = b;` does not need this and does not get it: an assignment of one pointer is a
+/// `store` and [`saved`] puts a `cap_store` behind it. What needs it is `*a = *b;` of a structure
+/// with a pointer in it, which the front end turns into a `memcpy` of the whole object, and there
+/// the pointers being moved are bytes rather than values and no `store` ever sees them.
+///
+/// The library's own `memcpy` has had this all along. The wrapper in
+/// `runtime/rucc-safe-rt/src/effects.rs` calls the same three, so what this closes is the
+/// difference between a copy the program wrote by hand and one the compiler wrote for it, which is
+/// tamnd/rucc#1471.
+fn relocation(func: &mut Func, copy: Inst) -> bool {
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
+
+    let span = func.span(copy);
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::CapCopy) };
+    let carried = func.create_inst(data, &[], span);
+    func.insert_after(carried, made);
+    true
+}
+
+/// Puts a `meta_init_copy` immediately after one copy, carrying whether its source held anything
+/// over to its destination.
+///
+/// The other half of the same write, and the thing that makes an infoleak visible rather than what
+/// hides it. A copy writes no values of its own: whether a destination byte holds anything is
+/// whether the byte it came from did, and the only place that is written down is the plane over the
+/// source. So this names two ranges and a length and nothing else, exactly as the type plane's
+/// carriage does.
+///
+/// A structure filled member by member and then handed whole to `write` or to a socket is the case
+/// worth stating. Marking the destination written would lose it, because the bytes that leave the
+/// program would be bytes the plane had just been told were fine, and those are exactly the bytes
+/// of CWE-200. Carrying the source's answer keeps the padding unwritten all the way to the
+/// boundary, which is where the read that matters happens.
+fn moved(func: &mut Func, copy: Inst) -> bool {
+    let Some(bulk) = func.bulk(copy) else { return false };
+    let (to, from) = (bulk.to, bulk.with);
+    let Some((made, length)) = copied(func, copy) else { return false };
+
+    let span = func.span(copy);
+    let args = func.push_values(&[to, from, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaInitCopy) };
+    let carried = func.create_inst(data, &[], span);
+    func.insert_after(carried, made);
+    true
+}
+
+/// The constant a plane write over a range reads its length from, put in just after `at`.
+///
+/// Gives back the instruction as well as the value, because the caller inserts itself after the
+/// constant rather than after `at`: both go in the same place, and the one that goes in second ends
+/// up in front of the one that went in first.
+///
+/// Written in sixty four bits here and put into the target's width by [`lower::lower`], which is
+/// where the only thing that knows the target's width is.
+fn extent(func: &mut Func, at: Inst, size: u64) -> (Inst, Value) {
+    let span = func.span(at);
+    let word = Type::int(64);
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
+    func.insert_after(made, at);
+    let length = func[made].results().next().expect("a constant created with one result has one");
+    (made, length)
+}
+
+/// How long the copy at `at` is, as a value, and what a plane write over it goes in after.
+///
+/// The same pair [`extent`] hands back and for the same reason, except that this one asks the copy
+/// rather than being told a number. A copy whose length the program works out hands its own operand
+/// over and there is no constant to make, so what the caller goes in after is the copy itself,
+/// which puts the write in the same place either way.
+///
+/// `None` for a copy that moves no bytes, which the verifier refuses, so it is a shape that does
+/// not arise rather than a case being handled.
+fn copied(func: &mut Func, at: Inst) -> Option<(Inst, Value)> {
+    let bulk = func.bulk(at)?;
+    if let Some(length) = bulk.length {
+        return Some((at, length));
+    }
+    let Extra::Mem(info) = func[at].extra else { return None };
+    let size = func[info].size;
+    if size == 0 {
+        return None;
+    }
+    Some(extent(func, at, size))
+}
+
+/// How many bytes an access covers.
+///
+/// An ordinary `load` or `store` leaves the `size` field of its payload at zero and takes its width
+/// from the type instead, which is fine for an access and no use at all to a check: a check is
+/// asked how many bytes are being touched and has no type of its own to read. So the width is
+/// worked out here and written into the copy of the payload the check carries, and an access that
+/// did fill the field in keeps what it said.
+///
+/// `width` is the target's pointer width in bytes, and it is a parameter because a pointer is the
+/// one type in the IR that has no width of its own. Reading a zero off `Type::PTR` and passing it
+/// on is what made every check over a pointer decide over a single byte, which is #953.
+fn covered(func: &Func, access: Inst, stated: u64, width: u64) -> u64 {
+    if stated != 0 {
+        return stated;
+    }
+    // A `load` produces the value and a `store` takes it as its first operand.
+    let ty = match func[access].opcode {
+        Opcode::Load => func[access].results().next().map(|value| func[value].ty),
+        Opcode::Store => func[func[access].args].first().map(|&value| func[value].ty),
+        _ => None,
+    };
+    ty.map_or(0, |ty| {
+        if ty.is_ptr() {
+            return width;
+        }
+        u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes())
+    })
+}
+
+/// Puts a `meta_epoch` immediately after one store, recording which thread wrote a pointer.
+///
+/// The recording half of `spec/safe-memory/09-type-init-and-races.md` section 9.5, which is
+/// judgement J9 of document 04 and document 03's C1 through C4. The plane holds one stamp per
+/// eight bytes, the stamp names a thread and the step that thread had reached, and everything the
+/// race classes decide is a comparison against a stamp some store left here.
+///
+/// After the store, for the reason the other two recordings go after one: the bytes hold what was
+/// written once the store has happened, and the check that reads the plane back has to run before
+/// this one so that it is asking about somebody else's write rather than about this one.
+///
+/// # Why only a store of a pointer
+///
+/// Because the plane's granule is a pointer and the classes are about pointers. Section 9.5 is the
+/// section where a race produces a wrong *pointer* rather than a wrong number, which is what makes
+/// it worth watching at a cost a program can carry in production: a torn integer is a wrong answer
+/// and a torn pointer is a memory safety failure. Recording every store instead would put two
+/// threads writing neighbouring bytes of one granule into the plane as each other's strangers, and
+/// neighbouring bytes are exactly what a granule holding no pointer is made of.
+///
+/// So the thinning is the same shape as the type plane's and lands in a different place: that one
+/// records a store whose type the plane has a name for, and this one records a store whose value is
+/// a pointer. A store through a `void *` variable is one. A `memcpy` that happens to move pointers
+/// is not, and that is a lost report rather than a wrong answer, since a copy does not say what the
+/// bytes it moved were.
+fn stamped(func: &mut Func, store: Inst, pointer: Value, width: u64) -> bool {
+    if !pointer_valued(func, store) {
+        return false;
+    }
+
+    let span = func.span(store);
+    let (made, length) = extent(func, store, width);
+    let args = func.push_values(&[pointer, length]);
+    let data = InstData { args, ..InstData::new(Opcode::MetaEpoch) };
+    let judged = func.create_inst(data, &[], span);
+    // After the constant it reads rather than after the store, as [`wrote`] does and for the same
+    // reason: both go in the same place and the one that goes in second ends up in front.
+    func.insert_after(judged, made);
+    true
+}
+
+/// Puts a `cap_store` immediately after one store of a pointer, so the capability goes with it.
+///
+/// The writing half of `spec/safe-memory/06-instrumentation.md` section 6.2.2, and the half that
+/// makes [`recalled`] able to answer. A pointer in a register has its capability in another register
+/// and a pointer in memory has nowhere to keep one, so the aux slot beside the word is where it
+/// goes, and this is the instruction that puts it there.
+///
+/// It is the expensive half, which is worth saying plainly. Nothing discharges an aux write today,
+/// so this is a call at every store of a pointer, and the capability it writes is one the stored
+/// pointer may not have had, in which case asking for it here is what makes it exist. What buys that
+/// back is on the other side: a pointer read out of memory stops being a walk of the lifetime plane
+/// and becomes a slot read, and a program that keeps its pointers in structures reads them far more
+/// often than it stores them.
+///
+/// Four operands, and the shape is the call's, which tamnd/rucc#1080 is where that was decided. The
+/// container's capability comes first because finding the slot starts from the object the word is
+/// in, then the address of the word, then the pointer that was written, then that pointer's own
+/// capability, which is the thing being written down.
+///
+/// A store whose value is not a pointer has nothing to write and no slot to write it in. A store the
+/// access could not be given a capability for is left alone as well, since the container is where
+/// the slot is found and there is no second way to find it.
+fn saved(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    store: Inst,
+    pointer: Value,
+    container: Option<Value>,
+) -> bool {
+    let Some(container) = container else { return false };
+    if !pointer_valued(func, store) {
+        return false;
+    }
+    let Some(&value) = func[func[store].args].first() else { return false };
+
+    let held = origins.of(func, value, store);
+    let span = func.span(store);
+    let args = func.push_values(&[container, pointer, value, held]);
+    let data = InstData { args, ..InstData::new(Opcode::CapStore) };
+    let made = func.create_inst(data, &[], span);
+    func.insert_after(made, store);
+    true
+}
+
+/// Puts a `cap_load` immediately after one read of a pointer, and makes that the pointer's own.
+///
+/// The reading half of section 6.2.2. Without it a pointer read out of memory has no producer but
+/// `cap_of`, which lowers to a walk of the lifetime plane linear in the size of the object, and a
+/// C program of any size keeps its pointers in structures and reads them back. That walk is the cost
+/// tamnd/rucc#1241 is about and this is the second of the three producers that take it away.
+///
+/// It answers a question the walk cannot, which matters more than the speed. Recovering from an
+/// address says which instance owns those bytes now. The slot says which instance the pointer was
+/// written for. A pointer stored in a structure, freed, and the storage handed to somebody else has
+/// those two disagree, and the version in the slot is what makes `check_live` refuse at the first
+/// access through it rather than pass because the address landed inside a live object.
+///
+/// Three operands rather than four: the container, the word, and the value that came out of it, with
+/// the capability being what comes back instead of what goes in.
+///
+/// [`origin::Origins::seed`] is what stops a second producer being made for the same value. The load
+/// is the definition of the pointer, so this sits exactly where [`mod@origin`] would have put a
+/// `cap_of`, and everything downstream that asks for the pointer's capability gets this one.
+fn recalled(
+    func: &mut Func,
+    origins: &mut origin::Origins,
+    load: Inst,
+    pointer: Value,
+    container: Option<Value>,
+) -> bool {
+    let Some(container) = container else { return false };
+    let Some(value) = func[load].results().next() else { return false };
+    if !func[value].ty.is_ptr() {
+        return false;
+    }
+
+    let span = func.span(load);
+    let args = func.push_values(&[container, pointer, value]);
+    let data = InstData { args, ..InstData::new(Opcode::CapLoad) };
+    let made = func.create_inst(data, &[Type::CAP], span);
+    func.insert_after(made, load);
+    let Some(held) = func[made].results().next() else { return false };
+    origins.seed(value, held);
+    true
+}
+
+/// Whether what an access carries is a pointer, which is the one thing the epoch plane watches.
+///
+/// A `store` carries it as its first operand, the value being written coming before the place it
+/// goes. A `load` carries it as its result. The plane's granule is eight bytes because a pointer is
+/// eight bytes, so a granule two threads both reach is a granule holding no pointer, and watching
+/// anything wider than this would put two threads writing neighbouring members of one structure
+/// into the plane as each other's strangers.
+fn pointer_valued(func: &Func, access: Inst) -> bool {
+    let carried = match func[access].opcode {
+        Opcode::Store => func[func[access].args].first().map(|&value| func[value].ty),
+        Opcode::Load => func[access].results().next().map(|value| func[value].ty),
+        _ => None,
+    };
+    carried.is_some_and(Type::is_ptr)
+}
+
+/// Puts a `check_race` immediately before one access, asking whether another thread reached these
+/// bytes with nothing ordering that against this thread.
+///
+/// Judgement J9, and the reading half of section 9.5. The plane holds one stamp per granule saying
+/// which thread last stored a pointer there and how far that thread had counted, and a stamp this
+/// thread has not got past is a write no synchronization edge puts before this access. Which class
+/// that is depends on which side asked: a store finding one is C3, two threads writing the same
+/// slot with nothing between them, and a load finding one is C2, the pointer word race. One check
+/// covers both because the comparison is the same from either side.
+///
+/// In front of the access, and at a store that puts it in front of the `meta_epoch` that goes
+/// after. That order is the whole of what makes the question answerable: [`stamped`] overwrites the
+/// stamp this reads, so a check on the other side of the store would be asking about the write it
+/// was called for.
+///
+/// Only an access that carries a pointer, which [`pointer_valued`] argues. So this is not one check
+/// per access the way the bounds check is, and on ordinary code it is a small fraction of them.
+fn raced(
+    func: &mut Func,
+    access: Inst,
+    pointer: Value,
+    capability: Option<Value>,
+    width: u64,
+) -> bool {
+    let Some(capability) = capability else { return false };
+    if !pointer_valued(func, access) {
+        return false;
+    }
+    let Extra::Mem(at) = func[access].extra else { return false };
+    let mut info = func[at];
+    info.size = covered(func, access, info.size, width);
+    // An access whose width nothing states touches no bytes anybody can name, as in [`filled`].
+    if info.size == 0 {
+        return false;
+    }
+    // Neither field means anything to this question. The plane holds stamps rather than types, and
+    // the alignment conjunct of J1 is the bounds check's to make.
+    info.tbaa = None;
+    info.align = 1;
+    info.owns = 0;
+
+    let span = func.span(access);
+    let args = func.push_values(&[capability, pointer]);
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { args, extra, ..InstData::new(Opcode::CheckRace) };
+    let asked = func.create_inst(data, &[], span);
+    func.insert_before(asked, access);
+    true
+}
+
+/// Puts a `meta_release` in front of an atomic, a `meta_acquire` after it, or both, or neither.
+///
+/// The synchronization edges of `spec/safe-memory/09-type-init-and-races.md` section 9.5, for the
+/// one kind of edge that cannot be interposed. Every other edge the monitor knows about is a
+/// `pthread` call and `rucc_safe_rt::sync` wraps it. A C11 release store is a machine instruction,
+/// so there is no call to wrap and the compiler is the only thing in the build that can say an
+/// ordering happened here.
+///
+/// This matters more than a missing recording does, and in the opposite direction. Everywhere else
+/// in this pass, instrumentation nobody wrote costs recall: a store that was not stamped is a race
+/// that is not found. Here it costs precision. The epoch plane is a counter per thread and nothing
+/// else, so two threads that really were ordered, by an edge this pass did not emit, are two
+/// threads whose clocks say they are concurrent, and the check reports a race in a program that
+/// has none. That is why these go in before the check is ever on by default.
+///
+/// Which side the marker lands on is which side the ordering is on. A release publishes everything
+/// the thread has already done, so the clock has to be written down while that is still true, which
+/// is in front of the atomic. An acquire takes an ordering from whatever the atomic just read, so
+/// it is not there to be taken until the atomic has run, which puts it after. An `acq_rel` or a
+/// `seq_cst` read-modify-write is both, and gets one of each.
+///
+/// No thinning by what the atomic carries, unlike [`stamped`] and [`raced`]. A release on an atomic
+/// `int` is the ordinary publication pattern, the flag being set is not the pointer, and refusing
+/// to record that edge because no pointer went through it would lose exactly the ordering the
+/// pointers stored before it depend on.
+///
+/// A `fence` goes through [`fenced`] instead, because it has no address in it to be the key.
+fn edges(func: &mut Func, atomic: Inst) -> usize {
+    let Some(pointer) = keyed(func, atomic) else { return 0 };
+    let order = match func[atomic].extra {
+        Extra::Mem(at) => func[at].order,
+        Extra::Rmw(_, at) => func[at].order,
+        _ => return 0,
+    };
+
+    let span = func.span(atomic);
+    let mut put = 0;
+    if order.is_release() {
+        let args = func.push_values(&[pointer]);
+        let data = InstData { args, ..InstData::new(Opcode::MetaRelease) };
+        let made = func.create_inst(data, &[], span);
+        func.insert_before(made, atomic);
+        put += 1;
+    }
+    if order.is_acquire() {
+        let args = func.push_values(&[pointer]);
+        let data = InstData { args, ..InstData::new(Opcode::MetaAcquire) };
+        let made = func.create_inst(data, &[], span);
+        func.insert_after(made, atomic);
+        put += 1;
+    }
+    put
+}
+
+/// Puts a `meta_fence_release` in front of a fence, a `meta_fence_acquire` after it, or both.
+///
+/// The other way a C program orders two threads without calling anything, and the harder half of
+/// [`edges`]. A fence orders against every other thread rather than against one object, so there is
+/// no address in it to file the edge under and the markers it gets take no operands. The relaxed
+/// atomic that usually sits next to a fence in the source is not the key either: what the fence
+/// orders is everything the thread did, not that one word, and keying on the word would miss every
+/// other pair the fence really ordered.
+///
+/// So the runtime keeps one cell for all of them, and that orders more pairs of threads than the
+/// program did. `rucc_safe_rt::sync` carries the argument for why that is the safe direction, which
+/// is the same argument the stale entries there already rest on: a thread put further ahead than it
+/// needed to be reports fewer races, never a race that is not there. Given that a missing edge is
+/// the one kind of missing instrumentation that costs precision, too much ordering beats none.
+///
+/// Which side the marker lands on is the same question as in [`edges`] and has the same answer.
+fn fenced(func: &mut Func, fence: Inst) -> usize {
+    let Extra::Order(order) = func[fence].extra else { return 0 };
+
+    let span = func.span(fence);
+    let mut put = 0;
+    if order.is_release() {
+        let made = func.create_inst(InstData::new(Opcode::MetaFenceRelease), &[], span);
+        func.insert_before(made, fence);
+        put += 1;
+    }
+    if order.is_acquire() {
+        let made = func.create_inst(InstData::new(Opcode::MetaFenceAcquire), &[], span);
+        func.insert_after(made, fence);
+        put += 1;
+    }
+    put
+}
+
+/// The address an atomic operates on, which is the key its edge is filed under.
+///
+/// The same shape as [`pointer_of`] and a different set of opcodes: an `atomic_store` writes
+/// through its second operand for the reason an ordinary store does, and the other three take the
+/// object first because nothing comes before it.
+fn keyed(func: &Func, atomic: Inst) -> Option<Value> {
+    let args = &func[func[atomic].args];
+    let at = match func[atomic].opcode {
+        Opcode::AtomicStore => 1,
+        Opcode::AtomicLoad | Opcode::AtomicRmw | Opcode::Cmpxchg => 0,
+        _ => return None,
+    };
+    let &value = args.get(at)?;
+    func[value].ty.is_ptr().then_some(value)
+}
+
+/// Puts `check_deriv` immediately after one `ptr_add`, over the capability of what it walked off.
+///
+/// Judgement J2, which is the one that catches a pointer walking off its object *before* anything
+/// is read through it. C says computing such a pointer is already undefined, and catching it here
+/// rather than at the eventual access is what lets the report name the loop that ran too far
+/// instead of whatever unrelated line finally dereferenced the result.
+///
+/// The check is handed the pointer the derivation produced, so it goes immediately after the
+/// derivation rather than in front of it like the access checks. That is what section 6.2.2's
+/// third operand means: the judgement is about where the derived pointer landed, and there is
+/// nothing to decide before it has landed.
+///
+/// The fourth operand is the stride, which is how wide one element of whatever is being stepped
+/// over is. Document 03 section 3.1 widened S5's window to `[lo - stride, hi]`, so the runtime
+/// cannot decide the low end without it, and it is a value rather than a constant because a walk
+/// over a variable length array steps by a width the program computes.
+fn derivation(func: &mut Func, origins: &mut origin::Origins, add: Inst) -> bool {
+    let Some(&base) = func[func[add].args].first() else { return false };
+    if !func[base].ty.is_ptr() {
+        return false;
+    }
+    let Some(derived) = func[add].results().next() else { return false };
+
+    let span = func.span(add);
+    let width = stride(func, add);
+    let capability = origins.of(func, base, add);
+    let args = func.push_values(&[capability, base, derived, width]);
+    let check = func.create_inst(InstData { args, ..InstData::new(Opcode::CheckDeriv) }, &[], span);
+    func.insert_after(check, add);
+    true
+}
+
+/// How wide one element of the thing a `ptr_add` steps over is.
+///
+/// C computes a byte offset before the pointer arithmetic happens, so `ptr_add` takes bytes and the
+/// element width is not in it. What is in it is the shape the frontend left behind, because this
+/// pass runs before the optimizer and the offset operand is still exactly what lowering emitted:
+/// `mul index, k` for a constant width, `mul index, w` for one the program computes, either of them
+/// under a `sub 0, ...` for a walk that goes backwards, and the bare index when the width is one.
+///
+/// So the width is read back off that shape. Getting it wrong is not a soundness question: the
+/// stride only decides how far below an object a derivation may land before it is refused, and an
+/// access below the object is refused by judgement J1 either way. A shape nobody recognises answers
+/// one byte, which is the strict reading of C and is where this check was before the window moved.
+fn stride(func: &mut Func, add: Inst) -> Value {
+    // The offset is the one operand of a `ptr_add` that is an integer, so its type is the width an
+    // address is computed in and is the type the check's fourth operand has to have.
+    let Some(&offset) = func[func[add].args].get(1) else { return one(func, add, Type::int(64)) };
+    let word = func[offset].ty;
+    // A walk that goes backwards negates the offset rather than the width, so the shape underneath
+    // is the same one a forward walk has.
+    let forwards = match operand_of(func, offset, Opcode::Sub, 0) {
+        Some(zero) if is_zero(func, zero) => operand_of(func, offset, Opcode::Sub, 1),
+        _ => None,
+    };
+    let scaled = forwards.unwrap_or(offset);
+    match operand_of(func, scaled, Opcode::Mul, 1) {
+        // The width is the right operand because `step` builds the multiply that way round, with
+        // the index on the left and the size of one element on the right.
+        Some(width) if func[width].ty == word => width,
+        _ => one(func, add, word),
+    }
+}
+
+/// Operand `index` of the instruction that produced `value`, when that instruction is `opcode`.
+fn operand_of(func: &Func, value: Value, opcode: Opcode, index: usize) -> Option<Value> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != opcode {
+        return None;
+    }
+    func[func[inst].args].get(index).copied()
+}
+
+/// Whether a value is a constant zero, which is the left half of how a backwards walk is spelled.
+fn is_zero(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    match func[inst].extra {
+        Extra::Imm(imm) if func[inst].opcode == Opcode::IConst => func[imm].bits() == 0,
+        _ => false,
+    }
+}
+
+/// A stride of one byte, which is what a shape this pass does not recognise answers.
+fn one(func: &mut Func, at: Inst, ty: Type) -> Value {
+    let span = func.span(at);
+    let extra = Extra::Imm(func.add_imm(Imm::int(1, ty)));
+    let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[ty], span);
+    func.insert_before(made, at);
+    func[made].results().next().expect("a constant created with one result has one")
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_ir::{
+        Block, Builder, Flags, IntPred, MemInfo, MemOrder, Meta, MetaNode, PlaneNode, Restrict,
+        RmwOp, Signature, TbaaNode, print_func, verify_func,
+    };
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
+    use super::*;
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// A module to record into, and the plane entries it holds.
+    ///
+    /// The plane is the module's, so a test that instruments a bare function still has to have one
+    /// to hand. It is empty of types here, since the functions these tests build name none.
+    fn planed(names: &mut Interner, unit: &str) -> (Module, Plane) {
+        let mut module = Module::new(names.intern(unit), &target());
+        let plane = Plane::build(&mut module);
+        (module, plane)
+    }
+
+    /// A function that loads through its parameter and stores what it read back.
+    fn one_of_each(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("both"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        let args = b.func().push_values(&[loaded, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[loaded]);
+        func
+    }
+
+    /// The same shape, with the two accesses said to go through two `restrict` pointers of a block.
+    fn promising(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("kernel"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict { clique: 1, base: 1 },
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let read = MemInfo { restrict: Restrict { clique: 1, base: 2 }, ..info };
+        let loaded = b.load(i32_, from, read, Flags::default());
+        b.store(loaded, to, info, Flags::default());
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn the_restrict_checks_wait_until_the_build_asks_for_them() {
+        // The one check in this crate that is off by default. What it costs is paid by the blocks
+        // that declare `restrict` pointers and nobody else, and what it reports includes programs
+        // the standard permits, so which it is is the build's decision. `rucc_session::Promise` is
+        // where that is argued.
+        let mut names = Interner::new();
+        let (_, plane) = planed(&mut names, "kernel.c");
+
+        let mut quiet = promising(&mut names);
+        let counts = insert(&mut quiet, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!((counts.promised, counts.scoped), (0, 0));
+
+        let mut asked = promising(&mut names);
+        let counts = insert(&mut asked, &plane, 8, Subobject::Off, Promise::Blocks, Races::Off);
+        assert_eq!((counts.promised, counts.scoped), (2, 1));
+    }
+
+    #[test]
+    fn every_access_gets_a_bounds_check_and_a_lifetime_check() {
+        let mut names = Interner::new();
+        let mut func = one_of_each(&mut names);
+        let (module, plane) = planed(&mut names, "both.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 2, live: 2, judged: 1, wrote: 1, filled: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            // The plane writes are after the store and not in front of it. The bytes were stored
+            // through that type, and were stored at all, once the store has happened, and the
+            // check in front of it may yet refuse the store both of them are about.
+            //
+            // One `cap_of` for two accesses, because both go through the same pointer and a
+            // capability is about the pointer. `origin` is where that is argued.
+            "func @both(ptr) -> i32, linkage(external) {\n\
+             block0(%0: ptr):\n    \
+             %1 = cap_of %0\n    \
+             check_bounds %1, %0, size 4, align 4\n    \
+             check_live %1, %0\n    \
+             check_init %1, %0, size 4, align 4\n    \
+             %2 = load.i32 %0, size 4, align 4\n    \
+             check_bounds %1, %0, size 4, align 4\n    \
+             check_live %1, %0\n    \
+             store %2 -> %0, size 4, align 4\n    \
+             %3 = iconst.i64 4\n    \
+             meta_type %0, %3, tbaa !1\n    \
+             %4 = iconst.i64 4\n    \
+             meta_init %0, %4\n    \
+             return %2\n\
+             }\n"
+        );
+    }
+
+    /// A function that loads a pointer through its parameter.
+    ///
+    /// The payload states no size, which is what the front end emits: a load takes its width from
+    /// the type it produces, and for a pointer that is the one type with no width of its own.
+    fn one_pointer_read(names: &mut Interner) -> Func {
+        let mut func = Func::new(
+            names.intern("deref"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        b.ret(&[loaded]);
+        func
+    }
+
+    /// A function that writes one of its pointer parameters through the other.
+    fn one_pointer_write(names: &mut Interner) -> Func {
+        let mut func =
+            Func::new(names.intern("keep"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let value = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        // The value first and the place second, which is the order the opcode is written in.
+        let args = b.func().push_values(&[value, at]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    /// The same function writing a number, which is the one thing that differs from a pointer.
+    fn one_number_write(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("set"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let value = func.append_param(entry, i32_);
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[value, at]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    /// The same function reading a number, so the two answers differ in one thing.
+    fn one_number_read(names: &mut Interner) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("count"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+        func
+    }
+
+    #[test]
+    fn an_access_that_reads_a_pointer_is_checked_over_the_targets_pointer_width() {
+        // A pointer is the one type in the IR with no width of its own, so the width has to come
+        // from the target. Answering zero is what left a bounds check over a pointer deciding
+        // about a single byte and left the init question out of it altogether, which was #953.
+        let mut names = Interner::new();
+        let mut func = one_pointer_read(&mut names);
+        let (module, plane) = planed(&mut names, "deref.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 1, live: 1, filled: 1, recalled: 1, ..Counts::default() }
+        );
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_bounds %1, %0, size 8, align 8\n"), "{printed}");
+        assert!(printed.contains("check_init %1, %0, size 8, align 8\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_of_a_pointer_writes_its_capability_into_the_slot_beside_it() {
+        // The other end of the aux pair. Four operands, and the order is the call's: the capability
+        // of the object the word is in, the address of the word, the pointer written there, and
+        // that pointer's own capability, which is the thing being written down. It comes last of
+        // what goes in behind the store because it went in first, which is what puts it furthest.
+        let mut names = Interner::new();
+        let mut func = one_pointer_write(&mut names);
+        let (module, plane) = planed(&mut names, "keep.c");
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.saved, 1);
+        assert_eq!(counts.recalled, 0);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("cap_store %3, %0, %1, %2\n    return\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_of_something_that_is_not_a_pointer_writes_no_capability() {
+        // There is nothing to write down and no slot for it. The aux is beside a pointer sized word
+        // holding a pointer, and a number stored there is what makes the slot say so instead.
+        let mut names = Interner::new();
+        let mut func = one_number_write(&mut names);
+        let (_module, plane) = planed(&mut names, "keep.c");
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.saved, 0);
+    }
+
+    #[test]
+    fn a_pointer_width_of_four_is_what_a_thirty_two_bit_target_gets() {
+        // The number is the target's and not this crate's, so a build for a target where a pointer
+        // is four bytes asks about four.
+        let mut names = Interner::new();
+        let mut func = one_pointer_read(&mut names);
+        let (module, plane) = planed(&mut names, "deref.c");
+        insert(&mut func, &plane, 4, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_bounds %1, %0, size 4, align 8\n"), "{printed}");
+    }
+
+    /// A module with one aliasing node under the root, and the plane built over it.
+    ///
+    /// Two nodes rather than one, because the root is the character type and a type of its own has
+    /// to hang under something. What comes back is the module, the plane, and the node for `int`.
+    fn typed(names: &mut Interner, unit: &str) -> (Module, Plane, Meta) {
+        let mut module = Module::new(names.intern(unit), &target());
+        let root = names.intern("char");
+        let root =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: root, parent: None, offset: 0 }));
+        let int = names.intern("int");
+        let int =
+            module.add_meta(MetaNode::Tbaa(TbaaNode { name: int, parent: Some(root), offset: 0 }));
+        let plane = Plane::build(&mut module);
+        (module, plane, int)
+    }
+
+    /// A function that reads through its parameter as an `int`, naming that type on the access.
+    fn reading(names: &mut Interner, node: Option<Meta>) -> Func {
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("read"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: node,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let loaded = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[loaded]);
+        func
+    }
+
+    #[test]
+    fn a_read_asks_the_plane_whether_the_bytes_agree_with_the_type_it_reads_them_as() {
+        // Judgement J3, which is what the two plane writes were recorded for. The question is put
+        // in the plane's vocabulary rather than the aliasing tree's, so what the check carries is
+        // the entry for `int` and not the node for it.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "read.c");
+        let mut func = reading(&mut names, Some(int));
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).asked, 1);
+
+        let printed = print_func(&module, &func, &names);
+        let entry = plane.entry(Some(int));
+        assert_eq!(module[entry], MetaNode::Plane(PlaneNode::Type(int)));
+        // Four bytes, which the payload does not say and the type of the value read does, and the
+        // check is in front of the read rather than after it.
+        let wanted = format!("check_type %1, %0, size 4, align 4, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+        let asked = printed.find(&wanted).expect("the check is there");
+        let read = printed.find("load.i32").expect("and so is the read");
+        assert!(asked < read, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_front_end_named_no_type_for_asks_nothing() {
+        // An aggregate, an array, or anything else reached by address. The plane's untyped entry
+        // means bytes nothing has stored through, which is a different statement from the front
+        // end not having said what the access is through, and asking with it would refuse every
+        // read of a structure whose members were stored through their own types.
+        let mut names = Interner::new();
+        let (module, plane, _) = typed(&mut names, "copy.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).asked, 0);
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    /// A function that writes through its parameter as an `int`, naming that type on the access.
+    fn writing(names: &mut Interner, node: Option<Meta>) -> Func {
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: node,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_store_asks_the_plane_too_once_the_build_has_said_the_member_matters() {
+        // Row S4, which is a write that leaves one member and lands in the next. Read literally a
+        // store like that is a program retyping storage it owns, which C 6.5 permits, so the
+        // question is only put when somebody asked for it to be put.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "member.c");
+        let mut func = writing(&mut names, Some(int));
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Members, Promise::Off, Races::Off);
+        assert_eq!((counts.asked, counts.judged), (1, 1));
+
+        let printed = print_func(&module, &func, &names);
+        let entry = plane.entry(Some(int));
+        let wanted = format!("check_type %2, %0, size 4, align 4, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+        // In front of the store, because the bytes say what they said before it runs, and the
+        // recording this pass makes afterwards is what would make the answer yes.
+        let asked = printed.find(&wanted).expect("the check is there");
+        let wrote = printed.find("store %1").expect("and so is the store");
+        let recorded = printed.find("meta_type").expect("and so is the recording");
+        assert!(asked < wrote && wrote < recorded, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_the_front_end_named_no_type_for_asks_nothing_whatever_the_build_asked() {
+        // The same reason a read of one does not. An access with no aliasing node is one the front
+        // end did not say the type of, which is not the same as bytes nothing has been stored
+        // through, and the plane has no way to tell the question apart from the answer.
+        let mut names = Interner::new();
+        let (module, plane, _) = typed(&mut names, "aggregate.c");
+        let mut func = writing(&mut names, None);
+
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Members, Promise::Off, Races::Off).asked,
+            0
+        );
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_answers_the_question_rather_than_asking_it() {
+        // The plane covers storage the allocator reported, which is the storage C gives no declared
+        // type, and the effective type of one of those is whatever the last store set. So a store
+        // cannot disagree with the plane unless the build asked it to, and a check in front of one
+        // by default would refuse the reuse of a buffer that the standard permits.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "write.c");
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int),
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!((counts.judged, counts.asked), (1, 0));
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_type"), "{printed}");
+    }
+
+    #[test]
+    fn a_store_records_the_type_it_stored_through() {
+        // The judgement of C 6.5, which is the half of the type plane the compiler makes rather
+        // than asks. The access names a type, so the entry the store records is that type rather
+        // than the distinguished value a store that names nothing records.
+        let mut names = Interner::new();
+        let (module, plane, int) = typed(&mut names, "typed.c");
+
+        let i32_ = Type::int(32);
+        let mut func =
+            Func::new(names.intern("record"), Signature::new().with_params(&[Type::PTR, i32_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i32_);
+        let info = MemInfo {
+            size: 0,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: Some(int),
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).judged,
+            1
+        );
+
+        let printed = print_func(&module, &func, &names);
+        // Four bytes, which the payload does not say and the type of the value stored does.
+        assert!(printed.contains("%3 = iconst.i64 4\n"), "{printed}");
+        // The entry for `int`, which is the node the plane made for the node the access named.
+        let entry = plane.entry(Some(int));
+        assert_eq!(module[entry], MetaNode::Plane(PlaneNode::Type(int)));
+        let wanted = format!("meta_type %0, %3, tbaa !{}\n", entry.index());
+        assert!(printed.contains(&wanted), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_records_that_the_bytes_it_wrote_hold_something() {
+        // The init plane's half of the same store. One bit per byte and nothing else, so the write
+        // carries a range and no type, and the range is the width of the value stored rather than
+        // anything the payload says. A store of eight bytes makes eight bytes readable however it
+        // came to be written.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "wrote.c");
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).wrote, 1);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("%4 = iconst.i64 8\n    meta_init %0, %4\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_store_of_a_pointer_records_which_thread_wrote_it_and_a_store_of_a_number_does_not() {
+        // Section 9.5's recording half, and the thinning that is the whole reason it is affordable.
+        // The plane holds one stamp per eight bytes because eight bytes is what a pointer comes in,
+        // so a granule two threads share is one holding no pointer and one no race class asks
+        // about. Recording every store would put those two threads in the plane as each other's
+        // strangers, which is a report about a program doing nothing wrong.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "stamp.c");
+
+        let i64_ = Type::int(64);
+        let mut func = Func::new(
+            names.intern("stamp"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR, i64_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let q = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let args = b.func().push_values(&[q, p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        let args = b.func().push_values(&[v, p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.wrote, 2, "the init plane takes both, since both wrote bytes");
+        assert_eq!(counts.stamped, 1, "and the epoch plane takes the one that wrote a pointer");
+        assert_eq!(counts.watched, 1, "which is also the one that asks what was there before");
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("meta_epoch").count(), 1, "{printed}");
+        assert!(printed.contains("meta_epoch %0, %"), "{printed}");
+
+        // In front of the store and the recording behind it, which is the order the reading half
+        // depends on: the recording overwrites the stamp the check reads, so a check on the other
+        // side of the store would be asking about the write it was called for.
+        assert_eq!(printed.matches("check_race").count(), 1, "{printed}");
+        let asked = printed.find("check_race").expect("the check is in there");
+        let stamp = printed.find("meta_epoch").expect("so is the recording");
+        assert!(asked < stamp, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn nothing_records_into_the_epoch_plane_unless_the_build_asked_for_it() {
+        // The default, and the reason it is the default is not cost. Every ordering the monitor has
+        // was carried by an edge somebody interposed, and the atomics are not a call, so until the
+        // compiler emits those edges a program that hands a pointer between threads through one
+        // would be reported for doing nothing wrong. This is the one plane where instrumentation
+        // nobody wrote costs a false report rather than a missed one.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "quiet.c");
+
+        let mut func =
+            Func::new(names.intern("quiet"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let q = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[q, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!((counts.stamped, counts.watched), (0, 0));
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("meta_epoch"), "{printed}");
+        assert!(!printed.contains("check_race"), "{printed}");
+    }
+
+    #[test]
+    fn a_read_of_a_pointer_asks_about_races_only_in_the_mode_that_reports_them() {
+        // The one thing separating the two modes. A store asking is C3, two threads writing the
+        // same slot, and a read asking is C2, the pointer word race, which section 9.5 lists apart
+        // from the rest because it is reported in its own right. Tier E carries `metadata` and not
+        // that, so a build wanting every race a read can see asks for it by name.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "read.c");
+
+        let mut quiet = one_pointer_read(&mut names);
+        let counts = insert(&mut quiet, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.watched, 0);
+        assert!(!print_func(&module, &quiet, &names).contains("check_race"));
+
+        let mut asking = one_pointer_read(&mut names);
+        let counts = insert(&mut asking, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.watched, 1);
+
+        // Over the target's pointer width rather than over one byte, which is what #953 was about
+        // and is the reason the width is a parameter of this pass at all.
+        let printed = print_func(&module, &asking, &names);
+        assert!(printed.contains("check_race %1, %0, size 8, align 1"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &asking, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_of_a_number_asks_nothing_even_in_the_mode_that_watches_reads() {
+        // The same thinning the recording makes, from the other side. A granule two threads both
+        // reach is a granule holding no pointer, so nothing ever stamped it and a check over it
+        // would be a load of the plane that can only answer no.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "number.c");
+
+        let mut func = one_number_read(&mut names);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.watched, 0);
+        assert!(!print_func(&module, &func, &names).contains("check_race"));
+    }
+
+    /// An atomic store, an atomic load and an atomic read-modify-write in one function.
+    ///
+    /// Each takes the ordering it is given, so one builder covers every case the edges have an
+    /// opinion about: which side a marker lands on, and whether one lands at all.
+    fn three_atomics(names: &mut Interner, store: MemOrder, load: MemOrder, rmw: MemOrder) -> Func {
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("atomics"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let extra = Extra::Mem(b.func().add_mem(MemInfo { order: store, ..info }));
+        let args = b.func().push_values(&[v, p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicStore) }, &[]);
+
+        let extra = Extra::Mem(b.func().add_mem(MemInfo { order: load, ..info }));
+        let args = b.func().push_values(&[p]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicLoad) }, &[i64_]);
+
+        let at = b.func().add_mem(MemInfo { order: rmw, ..info });
+        let args = b.func().push_values(&[p, v]);
+        let extra = Extra::Rmw(RmwOp::Add, at);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::AtomicRmw) }, &[i64_]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_release_publishes_in_front_of_its_atomic_and_an_acquire_takes_after_it() {
+        // The edges of section 9.5 that are not a call and so have nowhere to be interposed. Which
+        // side a marker lands on is which side the ordering is on: a release publishes everything
+        // the thread has already done, so the clock has to be written down while that is still
+        // true, and an acquire takes an ordering from what the atomic just read, which is not there
+        // to be taken until the atomic has run.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "edges.c");
+
+        let mut func =
+            three_atomics(&mut names, MemOrder::Release, MemOrder::Acquire, MemOrder::Relaxed);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "the release and the acquire, and not the relaxed one");
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("meta_release").count(), 1, "{printed}");
+        assert_eq!(printed.matches("meta_acquire").count(), 1, "{printed}");
+        assert!(printed.contains("meta_release %0\n    atomic_store"), "{printed}");
+        assert!(printed.contains("= atomic_load"), "{printed}");
+        let read = printed.find("atomic_load").expect("the load is in there");
+        let took = printed.find("meta_acquire").expect("and so is the edge it takes");
+        assert!(read < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_modify_write_that_orders_both_ways_carries_both_halves_of_an_edge() {
+        // `acq_rel` and `seq_cst` publish and take, which is what makes a lock built out of one
+        // compare and exchange a lock this can follow. One marker each side, since the two are
+        // about different moments and collapsing them would put the publication after the read.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "both.c");
+
+        let mut func =
+            three_atomics(&mut names, MemOrder::Relaxed, MemOrder::Relaxed, MemOrder::AcqRel);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "one of each, around the one atomic that orders anything");
+
+        let printed = print_func(&module, &func, &names);
+        let published = printed.find("meta_release").expect("the publishing half is in there");
+        let changed = printed.find("atomic_rmw").expect("so is the atomic");
+        let took = printed.find("meta_acquire").expect("and so is the taking half");
+        assert!(published < changed && changed < took, "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_relaxed_atomic_is_no_edge_and_neither_is_any_atomic_in_a_build_that_is_not_watching() {
+        // Relaxed is atomic and is not an ordering. It says the word does not tear and it says
+        // nothing about what happened either side of it, so an edge taken there would be an
+        // ordering that does not exist, and inventing one hides the races it covers up.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "relaxed.c");
+
+        let mut loose =
+            three_atomics(&mut names, MemOrder::Relaxed, MemOrder::Relaxed, MemOrder::Relaxed);
+        let counts = insert(&mut loose, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 0);
+        let printed = print_func(&module, &loose, &names);
+        assert!(
+            !printed.contains("meta_release") && !printed.contains("meta_acquire"),
+            "{printed}"
+        );
+
+        // And nothing at all without the flag, which is where every other part of this plane is.
+        let mut off =
+            three_atomics(&mut names, MemOrder::SeqCst, MemOrder::SeqCst, MemOrder::SeqCst);
+        let counts = insert(&mut off, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.edged, 0);
+        let printed = print_func(&module, &off, &names);
+        assert!(
+            !printed.contains("meta_release") && !printed.contains("meta_acquire"),
+            "{printed}"
+        );
+    }
+
+    /// One fence with the ordering it is given, and nothing else in the function.
+    fn one_fence(names: &mut Interner, order: MemOrder) -> Func {
+        let mut func = Func::new(names.intern("fenced"), Signature::new());
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        b.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_fence_carries_the_same_edge_as_an_atomic_with_no_object_to_key_it_on() {
+        // The other way a C program orders two threads without calling anything. A fence orders
+        // against every other thread rather than against one object, so the markers take no
+        // operands: there is no address in a fence that could be the key, and the relaxed atomic
+        // beside it in the source is not the key either, since what the fence orders is everything
+        // the thread did rather than that one word.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "fence.c");
+
+        let mut func = one_fence(&mut names, MemOrder::SeqCst);
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Metadata);
+        assert_eq!(counts.edged, 2, "seq_cst publishes and takes, so one of each");
+
+        let printed = print_func(&module, &func, &names);
+        assert!(
+            printed.contains(
+                "meta_fence_release
+    fence"
+            ),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "fence seq_cst
+    meta_fence_acquire"
+            ),
+            "{printed}"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_release_fence_publishes_and_an_acquire_fence_takes_and_neither_does_the_other() {
+        // The halves apart, which is the shape a fence is usually written in: a release fence
+        // after the record is filled and an acquire fence before it is read.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "halves.c");
+
+        let mut publishing = one_fence(&mut names, MemOrder::Release);
+        let counts =
+            insert(&mut publishing, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 1);
+        let printed = print_func(&module, &publishing, &names);
+        assert!(printed.contains("meta_fence_release"), "{printed}");
+        assert!(!printed.contains("meta_fence_acquire"), "{printed}");
+
+        let mut taking = one_fence(&mut names, MemOrder::Acquire);
+        let counts = insert(&mut taking, &plane, 8, Subobject::Off, Promise::Off, Races::Pointer);
+        assert_eq!(counts.edged, 1);
+        let printed = print_func(&module, &taking, &names);
+        assert!(printed.contains("meta_fence_acquire"), "{printed}");
+        assert!(!printed.contains("meta_fence_release"), "{printed}");
+
+        // And nothing at all without the flag, the same as every other part of this plane.
+        let mut off = one_fence(&mut names, MemOrder::SeqCst);
+        let counts = insert(&mut off, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.edged, 0);
+        assert!(!print_func(&module, &off, &names).contains("meta_fence"));
+    }
+
+    #[test]
+    fn a_store_that_owns_the_padding_after_it_records_that_too() {
+        // `-fsafety-init=nopadding`, which by the time it gets here is a number on the store and
+        // nothing else. A `char` member with three bytes of padding behind it owns four, so the
+        // record it is in comes out whole once the other member is written and the ordinary reads
+        // of one, which are a `memcmp` or a hash or a `write`, are not refused. Working out what
+        // the padding is takes a record's layout, which the front end has and this pass does not,
+        // and that is why the number arrives rather than the mode.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "owns.c");
+
+        let byte = Type::int(8);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, byte]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, byte);
+        let info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 4,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).wrote, 1);
+
+        let printed = print_func(&module, &func, &names);
+        // Four rather than the one byte the store wrote.
+        assert!(printed.contains("%4 = iconst.i64 4\n    meta_init %0, %4\n"), "{printed}");
+        // And the bounds check is still about the one byte the store touches, since the padding
+        // is what a store records and not what it writes.
+        assert!(printed.contains("check_bounds %2, %0, size 1"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_asks_whether_anything_ever_wrote_the_bytes_it_is_about_to_read() {
+        // Document 03's Y6. The question carries the access's width and no type, because the plane
+        // holds one bit per byte and the bit says whether anything was stored there at all.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "ask.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).filled,
+            1
+        );
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_init %1, %0, size 4, align 4\n"), "{printed}");
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_front_end_named_no_type_for_still_asks_the_init_plane() {
+        // The one place the two questions a read asks come apart. A read with no type on it has
+        // nothing to ask the type plane, because the question there is which type the bytes hold,
+        // and it has the same thing to ask the init plane as any other read, because the question
+        // there is about the bytes rather than about the access.
+        let mut names = Interner::new();
+        let (_module, plane) = planed(&mut names, "untyped.c");
+        let mut func = reading(&mut names, None);
+
+        let counts = insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+        assert_eq!(counts.asked, 0);
+        assert_eq!(counts.filled, 1);
+    }
+
+    #[test]
+    fn a_store_asks_the_init_plane_nothing() {
+        // A store writes the bytes it is about to write, so whether anything wrote them before is
+        // not a question about it. Asking would refuse the first write to every fresh instance,
+        // which is every program.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "store.c");
+
+        let i64_ = Type::int(64);
+        let mut func =
+            Func::new(names.intern("write"), Signature::new().with_params(&[Type::PTR, i64_]));
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let v = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[v, p]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        b.ret(&[]);
+
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).filled,
+            0
+        );
+
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("check_init"), "{printed}");
+    }
+
+    #[test]
+    fn a_read_tells_the_init_plane_nothing() {
+        // A read is a question and not a judgement. Whether the bytes it read hold anything is
+        // what the plane already says, and a read that wrote the plane would make every read of
+        // storage nothing ever wrote look like a read of storage something did.
+        let mut names = Interner::new();
+        let (module, plane) = planed(&mut names, "read.c");
+        let mut func = reading(&mut names, None);
+
+        assert_eq!(insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off).wrote, 0);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(!printed.contains("meta_init"), "{printed}");
+    }
+
+    /// A function that copies a fixed number of bytes from one of its parameters to the other.
+    fn one_copy(names: &mut Interner, opcode: Opcode) -> Func {
+        let mut func =
+            Func::new(names.intern("move"), Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+
+        let info = MemInfo {
+            size: 24,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, from]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(opcode) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_copy_carries_whatever_the_bytes_it_read_said() {
+        // The other half of the judgement C 6.5 describes. A copy does not store through a type, so
+        // there is nothing here for the compiler to name: what the copied bytes are is whatever the
+        // bytes they came from were, and the plane over the source is the only place that is
+        // written down. Without this the destination would go on saying whatever was there before.
+        let mut names = Interner::new();
+        let mut func = one_copy(&mut names, Opcode::Memcpy);
+        let (module, plane) = planed(&mut names, "move.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            // The four checks in front and the three copies behind, which is where a store's two
+            // and a store's judgement go for the same reasons.
+            "func @move(ptr, ptr), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr):\n    \
+             %2 = cap_of %1\n    \
+             %3 = cap_of %0\n    \
+             check_bounds %3, %0, size 24, align 8\n    \
+             check_live %3, %0\n    \
+             check_bounds %2, %1, size 24, align 8\n    \
+             check_live %2, %1\n    \
+             memcpy %0, %1, size 24, align 8\n    \
+             %4 = iconst.i64 24\n    \
+             meta_type_copy %0, %1, %4\n    \
+             %5 = iconst.i64 24\n    \
+             meta_init_copy %0, %1, %5\n    \
+             %6 = iconst.i64 24\n    \
+             cap_copy %0, %1, %6\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_ranges_may_overlap_is_carried_the_same_way() {
+        // `memmove` is `memcpy` with the overlap allowed, and the overlap is the runtime's problem
+        // rather than this pass's: a copy writes no plane entries of its own, so the entries over
+        // the source are the same ones whichever end the bytes were moved from.
+        let mut names = Interner::new();
+        let mut func = one_copy(&mut names, Opcode::Memmove);
+        let (module, plane) = planed(&mut names, "overlap.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+        );
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_bounds %3, %0, size 24, align 8\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %1, size 24, align 8\n"), "{printed}");
+        assert!(printed.contains("meta_type_copy %0, %1, %4\n"), "{printed}");
+        assert!(printed.contains("meta_init_copy %0, %1, %5\n"), "{printed}");
+        assert!(printed.contains("cap_copy %0, %1, %6\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_copy_of_a_length_the_program_works_out_carries_it_with_the_length_it_was_given() {
+        // The three plane writes are the same three, and the count is the copy's own operand
+        // rather than a constant made beside it, because there is no constant to make. They go in
+        // after the copy, which is where the constant ones go in too.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("move"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR, Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+        let length = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, from, length]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memcpy) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "move.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 2, live: 2, carried: 1, moved: 1, relocated: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @move(ptr, ptr, i64), linkage(external) {\n\
+             block0(%0: ptr, %1: ptr, %2: i64):\n    \
+             %3 = cap_of %1\n    \
+             %4 = cap_of %0\n    \
+             check_bounds %4, %0, %2, align 8\n    \
+             check_live %4, %0\n    \
+             check_bounds %3, %1, %2, align 8\n    \
+             check_live %3, %1\n    \
+             memcpy %0, %1, %2, align 8\n    \
+             meta_type_copy %0, %1, %2\n    \
+             meta_init_copy %0, %1, %2\n    \
+             cap_copy %0, %1, %2\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_fill_is_checked_over_the_bytes_it_covers_and_records_that_it_wrote_them() {
+        // Issue 1552. A fill went through this pass and came out with nothing at all in front of
+        // it or behind it, so a `struct S s = {0};` was a write nothing bounded and a zeroed
+        // object the init plane went on calling unwritten. The count is in the payload here, so
+        // the bounds check reads it there and the two plane writes read a constant made beside
+        // the fill.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("zero"),
+            Signature::new().with_params(&[Type::PTR, Type::int(8)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let byte = func.append_param(entry, Type::int(8));
+
+        let info = MemInfo {
+            size: 24,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, byte]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memset) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "zero.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 1, live: 1, wrote: 1, judged: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @zero(ptr, i8), linkage(external) {\n\
+             block0(%0: ptr, %1: i8):\n    \
+             %2 = cap_of %0\n    \
+             check_bounds %2, %0, size 24, align 4\n    \
+             check_live %2, %0\n    \
+             memset %0, %1, size 24, align 4\n    \
+             %3 = iconst.i64 24\n    \
+             meta_type %0, %3, tbaa !1\n    \
+             meta_init %0, %3\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_fill_of_a_length_the_program_works_out_is_checked_over_that_length() {
+        // The other form, and the reason the bounds check in front of a fill is not the one
+        // [`check`] puts in front of an access: there is no number in the payload to read, so the
+        // count travels as the third operand `check_bounds` has for a length nobody knew when the
+        // access was parsed, and the two plane writes read the fill's own operand.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("zero"),
+            Signature::new().with_params(&[Type::PTR, Type::int(8), Type::int(64)]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let byte = func.append_param(entry, Type::int(8));
+        let length = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 0,
+            align: 1,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[to, byte, length]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Memset) }, &[]);
+        b.ret(&[]);
+
+        let (module, plane) = planed(&mut names, "zero.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 1, live: 1, wrote: 1, judged: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @zero(ptr, i8, i64), linkage(external) {\n\
+             block0(%0: ptr, %1: i8, %2: i64):\n    \
+             %3 = cap_of %0\n    \
+             check_bounds %3, %0, %2, align 1\n    \
+             check_live %3, %0\n    \
+             memset %0, %1, %2, align 1\n    \
+             meta_type %0, %2, tbaa !1\n    \
+             meta_init %0, %2\n    \
+             return\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_walk_over_elements_hands_the_check_the_width_of_one() {
+        // The low end of judgement J2's window is one element below the object, so the check has
+        // to be told how wide an element is. C computed a byte offset before the arithmetic
+        // happened, so the width is not in the `ptr_add`, and what is in it is the multiply the
+        // frontend left behind. This pass runs before the optimizer, so that shape is still there.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("walk"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let width = b.iconst(Type::int(64), 24);
+        let bytes = b.binary(Opcode::Mul, n, width, Flags::NSW);
+        let args = b.func().push_values(&[p, bytes]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        let (module, plane) = planed(&mut names, "walk.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = cap_of %0\n    \
+             %3 = iconst.i64 24\n    \
+             %4 = mul.nsw %1, %3\n    \
+             %5 = ptr_add %0, %4\n    \
+             check_deriv %2, %0, %5, %3\n    \
+             return %5\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_goes_backwards_is_still_a_walk_over_elements() {
+        // Which is the case the whole widening is for. A walk backwards negates the byte offset
+        // rather than the width, so the multiply is one instruction further down and the width is
+        // the same one. Missing it here would mean `&a[-1]` getting a one byte window and being
+        // refused, which is the report this change exists to stop.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("back"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let width = b.iconst(Type::int(64), 24);
+        let bytes = b.binary(Opcode::Mul, n, width, Flags::NSW);
+        let zero = b.iconst(Type::int(64), 0);
+        let back = b.binary(Opcode::Sub, zero, bytes, Flags::NONE);
+        let args = b.func().push_values(&[p, back]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        let (module, plane) = planed(&mut names, "back.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(printed.contains("check_deriv %2, %0, %7, %3\n"), "{printed}");
+    }
+
+    #[test]
+    fn a_pointer_computed_from_another_pointer_is_checked_where_it_is_computed() {
+        // Judgement J2. The pointer that walked off its object is caught at the arithmetic, not
+        // at whatever line eventually reads through it, which is what lets the report name the
+        // loop that ran too far. Note where the check sits: after the ptr_add, because it is
+        // handed the pointer the ptr_add produced.
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("walk"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[Type::PTR]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p, n]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        b.ret(&[moved]);
+
+        let (module, plane) = planed(&mut names, "walk.c");
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts { derived: 1, ..Counts::default() }
+        );
+
+        assert_eq!(
+            print_func(&module, &func, &names),
+            // The stride is one, because the offset here is a block parameter and nothing about
+            // it says what it is a count of. That is the answer a shape this pass does not
+            // recognise gets, and it is the strict reading of C.
+            "func @walk(ptr, i64) -> ptr, linkage(external) {\n\
+             block0(%0: ptr, %1: i64):\n    \
+             %2 = cap_of %0\n    \
+             %3 = iconst.i64 1\n    \
+             %4 = ptr_add %0, %1\n    \
+             check_deriv %2, %0, %4, %3\n    \
+             return %4\n\
+             }\n"
+        );
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_walk_and_the_access_through_it_read_the_capability_of_what_it_walked_off() {
+        // One capability for the whole walk, and it is the base's rather than the derived
+        // pointer's. That is the cheap answer and it is also the right one: asking about an
+        // interior pointer means recovering whichever object the plane says that address is in,
+        // and for a pointer that has already run off the end of its own object that is somebody
+        // else's, which is a bounds check that passes where it should refuse.
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("through"),
+            Signature::new().with_params(&[Type::PTR, Type::int(64)]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p, n]);
+        let moved = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let args = b.func().push_values(&[moved]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[read]);
+
+        let (module, plane) = planed(&mut names, "through.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
+        assert!(printed.contains("check_deriv %2, %0, %4, %3\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %4, size 4, align 4\n"), "{printed}");
+    }
+
+    /// A loop through a block parameter, `head(x)`, that reads four bytes at `x` and goes round
+    /// again four bytes along, entered with `into` pointers from as many blocks as there are.
+    ///
+    /// The entry block takes one pointer parameter for each and branches on a counter to reach
+    /// them, so a single one is the plain `for (x = p; ...; x++)` walk and two are a join of two
+    /// different objects.
+    fn looping(names: &mut Interner, into: usize) -> Func {
+        let i32_ = Type::int(32);
+        let i64_ = Type::int(64);
+        let mut params = vec![Type::PTR; into];
+        params.push(i64_);
+        let mut func = Func::new(
+            names.intern("loop"),
+            Signature::new().with_params(&params).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let pointers: Vec<Value> = (0..into).map(|_| func.append_param(entry, Type::PTR)).collect();
+        let n = func.append_param(entry, i64_);
+        let arms: Vec<Block> = (0..into).map(|_| func.create_block()).collect();
+        let head = func.create_block();
+        let done = func.create_block();
+        let x = func.append_param(head, Type::PTR);
+        let i = func.append_param(head, i64_);
+
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i64_, 0);
+        match arms.as_slice() {
+            [only] => {
+                b.jump(*only, &[]);
+            }
+            [first, second] => {
+                let taken = b.icmp(IntPred::Slt, n, zero);
+                b.br_if(taken, *first, &[], *second, &[]);
+            }
+            _ => unreachable!("one or two ways in"),
+        }
+        for (&arm, &pointer) in arms.iter().zip(&pointers) {
+            let mut b = Builder::new(&mut func, arm);
+            let zero = b.iconst(i64_, 0);
+            b.jump(head, &[pointer, zero]);
+        }
+
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, head);
+        let args = b.func().push_values(&[x]);
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        let four = b.iconst(i64_, 4);
+        let args = b.func().push_values(&[x, four]);
+        let next = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let one = b.iconst(i64_, 1);
+        let more = b.binary(Opcode::Add, i, one, Flags::NSW);
+        let again = b.icmp(IntPred::Slt, more, n);
+        b.br_if(again, head, &[next, more], done, &[]);
+        Builder::new(&mut func, done).ret(&[read]);
+        func
+    }
+
+    #[test]
+    fn a_walk_round_a_loop_carries_the_capability_it_started_with() {
+        // Every edge into the loop header hands it a pointer off one object, so one capability is
+        // taken where that object came in and every check round the loop names it. Before, the
+        // header's parameter took a `cap_of` of its own, which lowers to a walk of the plane every
+        // time round.
+        let mut names = Interner::new();
+        let mut func = looping(&mut names, 1);
+        let (module, plane) = planed(&mut names, "loop.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
+        assert!(printed.contains("%2 = cap_of %0\n"), "{printed}");
+        assert!(printed.contains("check_bounds %2, %5, size 4, align 4\n"), "{printed}");
+        assert!(printed.contains("check_deriv %2, %5, %10, %9\n"), "{printed}");
+        assert!(!printed.contains(": cap"), "no parameter was left carrying it\n{printed}");
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_join_of_two_objects_carries_whichever_capability_came_in() {
+        // Two ways into the loop with two different objects, so no one capability is right for
+        // every edge. The header gets a parameter for it and each edge passes the capability of
+        // the pointer it passes, which is the one `slot` later gives a slot of its own.
+        let mut names = Interner::new();
+        let mut func = looping(&mut names, 2);
+        let (module, plane) = planed(&mut names, "join.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert_eq!(printed.matches("cap_of").count(), 2, "{printed}");
+        assert_eq!(printed.matches(": cap)").count(), 1, "{printed}");
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_pointer_read_out_of_memory_takes_its_capability_at_the_read() {
+        // Out of the slot beside the word it came from, which is a `cap_load` and not a `cap_of`.
+        // Reading the pointer and reading its capability is one event, so the producer sits behind
+        // the load the way the fallback used to, and what changed is which producer it is rather
+        // than where it goes.
+        //
+        // The container's capability is the first operand, because the slot is found from the
+        // object the word lives in, and the one the outer access already took is the one used. So
+        // this function asks the plane once, for the parameter, and the pointer it reads through
+        // that parameter costs a slot read instead of a second walk.
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("indirect"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let info = MemInfo {
+            size: 0,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let held = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR);
+        let args = b.func().push_values(&[held]);
+        let info = MemInfo { size: 4, align: 4, ..info };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let read = b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, i32_);
+        b.ret(&[read]);
+
+        let (module, plane) = planed(&mut names, "indirect.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        let printed = print_func(&module, &func, &names);
+        assert!(
+            printed.contains("%2 = load %0, align 8\n    %3 = cap_load %1, %0, %2\n"),
+            "{printed}"
+        );
+        assert!(printed.contains("check_bounds %3, %2, size 4, align 4\n"), "{printed}");
+        assert_eq!(printed.matches("cap_of").count(), 1, "{printed}");
+    }
+
+    #[test]
+    fn what_it_produces_is_a_function_the_verifier_believes() {
+        // The point of inserting checks as IR is that everything downstream may treat them as
+        // IR, which is only true if the result is a module the verifier accepts.
+        let mut names = Interner::new();
+        let mut func = one_of_each(&mut names);
+        let (module, plane) = planed(&mut names, "both.c");
+        insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
+
+        if let Err(errors) = verify_func(&module, &func, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn every_definition_in_a_module_is_walked_and_the_declarations_are_not() {
+        let mut names = Interner::new();
+        let one = one_of_each(&mut names);
+        let mut two = one_of_each(&mut names);
+        two.name = names.intern("other");
+        // A declaration of a function defined somewhere else. There is no body to put a check in
+        // and reaching for one would be a crash rather than a wrong answer.
+        let declared = Func::new(
+            names.intern("elsewhere"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::int(32)]),
+        );
+
+        let mut module = Module::new(names.intern("two.c"), &target());
+        module.add_func(one);
+        module.add_func(two);
+        module.add_func(declared);
+
+        assert_eq!(
+            run(&mut module, Subobject::Off, Promise::Off, Races::Off),
+            Counts { checked: 4, live: 4, judged: 2, wrote: 2, filled: 2, ..Counts::default() }
+        );
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_function_with_no_accesses_is_left_alone() {
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(names.intern("nothing"), Signature::new().with_returns(&[i32_]));
+        let entry = func.create_block();
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i32_, 0);
+        b.ret(&[zero]);
+
+        let (_module, plane) = planed(&mut names, "nothing.c");
+        let before = func.counts();
+        assert_eq!(
+            insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off),
+            Counts::default()
+        );
+        assert_eq!(func.counts(), before);
+    }
+}

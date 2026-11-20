@@ -1,0 +1,525 @@
+//! What an access to an `_Atomic` object reaches the assembler as, end to end.
+//!
+//! Design: `spec/07-types-and-semantics.md` section 7.9.
+//!
+//! The golden case in `tests/golden/atomics.c` holds the IR the walk produces, which is where the
+//! decision between one instruction and a loop is made. What is left is the other end: whether the
+//! machine the IR is selected for has the instruction the walk assumed, and whether the ordering
+//! the IR asked for is the ordering the assembly asks the processor for. Neither is visible from
+//! the IR, so this runs the compiler over C and reads the assembly it writes.
+//!
+//! The refusals are here as well, because the point of one is what a user is told, and what a user
+//! is told is only visible from outside the crate that decides it.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// The target is written down rather than taken from the host, so that the instructions this
+/// compares are the same instructions on every machine that runs the suite.
+const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// The fixture, written under a directory of its own so that two of these running at once do not
+/// write the same file.
+fn fixture(what: &str, source: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rucc-atomics-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    path
+}
+
+/// What the compiler wrote for that source, and whether it agreed to write anything.
+fn compile(what: &str, source: &str) -> (bool, String, String) {
+    compile_with(what, source, &[])
+}
+
+/// The same with more arguments ahead of the file.
+fn compile_with(what: &str, source: &str, args: &[&str]) -> (bool, String, String) {
+    let path = fixture(what, source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .args(["-S", "-o", "-"])
+        .args(args)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    let wrote = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out.status.success(), wrote, said)
+}
+
+/// The assembly the compiler writes for source it accepts.
+fn asm(what: &str, source: &str) -> String {
+    let (ok, wrote, said) = compile(what, source);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    wrote
+}
+
+/// What the compiler said about source it refuses.
+fn refusal(what: &str, source: &str) -> String {
+    let (ok, _, said) = compile(what, source);
+    assert!(!ok, "the compiler accepted a fixture it has no code for:\n{said}");
+    said
+}
+
+/// A store of a whole word is already atomic on this machine and the ordering is what costs an
+/// instruction: nothing after the store may be seen before it, and only a fence says so. A load
+/// needs nothing, because this machine does not reorder a load ahead of the loads before it.
+#[test]
+fn a_plain_write_is_a_store_and_a_fence_and_a_plain_read_is_a_load() {
+    let text = asm(
+        "plain",
+        "\
+_Atomic int g;
+void put(int v) { g = v; }
+int get(void) { return g; }
+",
+    );
+    let put = text.split("put:").nth(1).expect("the writer is in the listing");
+    let put = put.split("get:").next().expect("the two functions are apart");
+    assert!(put.contains("movl\t%edi"), "{put}");
+    assert!(put.contains("mfence"), "{put}");
+    let get = text.split("\nget:").nth(1).expect("the reader is in the listing");
+    assert!(!get.contains("mfence"), "{get}");
+    assert!(!get.contains("lock"), "{get}");
+}
+
+/// The five operators the machine has an instruction for come out as that instruction, at the
+/// width the object has rather than the width the arithmetic was written at.
+#[test]
+fn an_operator_the_machine_has_is_one_locked_instruction() {
+    let text = asm(
+        "rmw",
+        "\
+_Atomic int g;
+_Atomic char c;
+void add(int v) { g += v; }
+void mask(int v) { g &= v; }
+void narrow(int v) { c += v; }
+",
+    );
+    assert!(text.contains("xaddl"), "{text}");
+    assert!(text.contains("xaddb"), "{text}");
+    assert!(text.contains("lock"), "{text}");
+}
+
+/// One it has no instruction for is the loop, which is the only other thing it can be: read the
+/// object, work out the answer, and put it back if nothing else got there first.
+#[test]
+fn an_operator_the_machine_does_not_have_is_a_compare_and_exchange_loop() {
+    let text = asm(
+        "loop",
+        "\
+_Atomic int g;
+void multiply(int v) { g *= v; }
+",
+    );
+    assert!(text.contains("cmpxchgl"), "{text}");
+    assert!(text.contains("lock"), "{text}");
+}
+
+/// The loop goes round again when the exchange did not go through, and the machine says whether it
+/// did in the zero flag. So the branch at the bottom is a jump on that flag straight after the
+/// `cmpxchg`, and not a `sete` into a byte and a `testb` of the byte, which is what gcc writes too.
+#[test]
+fn the_loop_branches_on_the_flag_the_exchange_left() {
+    let (ok, text, said) = compile_with(
+        "loop-flag",
+        "\
+_Atomic int g;
+void multiply(int v) { g *= v; }
+",
+        &["-O2"],
+    );
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(text.contains("cmpxchgl"), "{text}");
+    assert!(!text.contains("sete"), "{text}");
+    assert!(!text.contains("testb"), "{text}");
+}
+
+/// A float has no locked arithmetic anywhere, so it is the loop as well, with the object
+/// exchanged as the integer of its width and the addition done on the value that integer holds.
+#[test]
+fn a_float_is_exchanged_as_the_integer_of_its_width() {
+    let text = asm(
+        "float",
+        "\
+_Atomic float f;
+void grow(float v) { f += v; }
+",
+    );
+    assert!(text.contains("addss"), "{text}");
+    assert!(text.contains("cmpxchgl"), "{text}");
+}
+
+/// A step of an atomic pointer is a number of elements, and the instruction adds a number of
+/// bytes, so the scaling happens before the machine ever sees it.
+#[test]
+fn a_step_of_an_atomic_pointer_is_scaled_before_the_instruction() {
+    let text = asm(
+        "pointer",
+        "\
+int room[8];
+int * _Atomic p;
+void walk(void) { p = room; p += 3; }
+",
+    );
+    assert!(text.contains("xaddq"), "{text}");
+    assert!(text.contains(",4)"), "{text}");
+}
+
+/// A width the machine has no instruction for is a call into the runtime's table of locks, which
+/// is what gcc does with one. The table is libatomic's, under libatomic's names, so an object rucc
+/// compiled and an object gcc compiled in one program are under the same lock.
+#[test]
+fn a_width_with_no_instruction_is_a_call_into_the_table() {
+    let text = asm(
+        "wide",
+        "\
+_Atomic __int128 w;
+void put(__int128 v) { w = v; }
+__int128 get(void) { return w; }
+void add(__int128 v) { w += v; }
+",
+    );
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// `long double` is the other way to reach that width on this machine, and it is the one that
+/// shows the copy is of the object rather than of the value: ten bytes of value in sixteen bytes
+/// of object, and what the lock is around is all sixteen.
+#[test]
+fn a_long_double_is_a_call_as_well() {
+    let text = asm(
+        "long-double",
+        "\
+_Atomic long double ld;
+void put(long double v) { ld = v; }
+long double get(void) { return ld; }
+",
+    );
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_load"), "{text}");
+}
+
+/// An object the walk has no single value for is a copy rather than a read, and a copy of one
+/// under the lock is what the runtime's routines are for: they take an address and a count of
+/// bytes and never ask what is in there. Twelve bytes is not a width any instruction has, so both
+/// ends of this are a call.
+#[test]
+fn a_structure_too_wide_for_an_instruction_is_a_call() {
+    let text = asm(
+        "struct",
+        "\
+struct S { int a, b, c; };
+_Atomic struct S big;
+struct S get(void) { return big; }
+void put(struct S v) { big = v; }
+",
+    );
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+}
+
+/// One that does fit is the instruction, because `_Atomic` raises the alignment of an object to
+/// its own size wherever that is a power of two, so eight bytes of structure sits on eight and the
+/// machine reaches all of it at once. What moves is the representation rather than a value, so it
+/// goes through the integer of that width and the two `int`s are never named.
+#[test]
+fn a_structure_an_instruction_reaches_is_that_instruction() {
+    let text = asm(
+        "narrow-struct",
+        "\
+struct P { int a, b; };
+_Atomic struct P pair;
+struct P get(void) { return pair; }
+void put(struct P v) { pair = v; }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("movq"), "{text}");
+    assert!(text.contains("mfence"), "{text}");
+}
+
+/// A complex object is the same copy, and sixteen bytes of it is the call.
+#[test]
+fn a_complex_object_is_copied_the_same_way() {
+    let text = asm(
+        "complex",
+        "\
+_Atomic _Complex double z;
+_Complex double get(void) { return z; }
+void put(_Complex double v) { z = v; }
+",
+    );
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+}
+
+/// The exchange and the compare and exchange over one that fits are the instructions too, at the
+/// width of the whole object. These used to be refused by name with E0519, because the two
+/// builtins had no way to take a structure, and `<stdatomic.h>` could not hand one over either.
+#[test]
+fn a_structure_an_instruction_reaches_is_exchanged_by_that_instruction() {
+    let text = asm(
+        "narrow-exchange",
+        "\
+#include <stdatomic.h>
+struct P { int a, b; };
+_Atomic struct P pair;
+struct P swap(struct P v) { return atomic_exchange(&pair, v); }
+_Bool cas(struct P *e, struct P d) { return atomic_compare_exchange_strong(&pair, e, d); }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("xchgq"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
+/// One that does not fit is the runtime's generic routine for each, with the size first and every
+/// value by address, which is the call gcc 16.2.0 makes for the same source. A failed compare and
+/// exchange writing what it found back over the expected value is the routine's own business.
+#[test]
+fn a_structure_too_wide_for_an_instruction_is_exchanged_by_a_call() {
+    let text = asm(
+        "wide-exchange",
+        "\
+#include <stdatomic.h>
+struct B { long v[4]; };
+_Atomic struct B big;
+struct B swap(struct B v) { return atomic_exchange(&big, v); }
+_Bool cas(struct B *e, struct B d) { return atomic_compare_exchange_weak(&big, e, d); }
+",
+    );
+    assert!(text.contains("call\t__atomic_exchange"), "{text}");
+    assert!(text.contains("call\t__atomic_compare_exchange"), "{text}");
+    assert!(text.contains("movl\t$32, %edi") || text.contains("movq\t$32, %rdi"), "{text}");
+}
+
+/// A structure of two `int`s with no qualifier on it is aligned to four, and the generic builtins
+/// over one are still the instructions at the width of the whole object, because gcc resolves the
+/// four by the size alone. gcc 16.2.0 swaps it with `xchgq` and compares and exchanges it with
+/// `lock cmpxchgq` at -O0 and at -O2, so a program that uses them links without libatomic there,
+/// and calling the generic routines here made the same program fail to link.
+#[test]
+fn the_generic_builtins_over_a_structure_short_of_its_size_are_the_instructions() {
+    let text = asm(
+        "under-aligned",
+        "\
+struct pair { int a, b; };
+struct pair p, q, r;
+void ld(void) { __atomic_load(&p, &q, __ATOMIC_SEQ_CST); }
+void st(void) { __atomic_store(&p, &q, __ATOMIC_SEQ_CST); }
+void ex(void) { __atomic_exchange(&p, &q, &r, __ATOMIC_SEQ_CST); }
+int ce(void) { return __atomic_compare_exchange(&p, &q, &r, 0, 5, 5); }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("xchgq"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
+/// `__atomic_is_lock_free` answers by the rule the builtins go by, the size alone, and the
+/// constant `__atomic_always_lock_free` still reads the alignment off the pointer's type, which
+/// is gcc's split between the two.
+#[test]
+fn only_the_constant_lock_free_question_asks_about_the_alignment() {
+    let text = asm(
+        "lock-free-align",
+        "\
+struct pair { int a, b; };
+struct pair p;
+int is(void) { return __atomic_is_lock_free(sizeof p, &p); }
+int always(void) { return __atomic_always_lock_free(sizeof p, &p); }
+",
+    );
+    assert!(!text.contains("call"), "{text}");
+    let (is, always) = text.split_once("always:").expect("both functions are there");
+    assert!(is.contains("$1"), "{text}");
+    assert!(!always.contains("$1"), "{text}");
+}
+
+/// The rest of the header after it stopped using the `_n` builtins, over the objects every program
+/// has, which is still one instruction each and no call.
+#[test]
+fn the_shipped_header_still_reaches_one_instruction_for_a_scalar() {
+    let text = asm(
+        "header-scalar",
+        "\
+#include <stdatomic.h>
+int get(atomic_int *p) { return atomic_load(p); }
+void put(atomic_int *p, int v) { atomic_store_explicit(p, v, memory_order_release); }
+int swap(atomic_int *p, int v) { return atomic_exchange(p, v); }
+_Bool cas(_Atomic(int *) *p, int **e, int *d) { return atomic_compare_exchange_strong(p, e, d); }
+",
+    );
+    assert!(!text.contains("call"), "{text}");
+    assert!(text.contains("xchgl"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
+/// A member of one is refused, 6.5.2.3p5, and the reason is the lock: what an access to an atomic
+/// object takes the lock around is the whole object, so four bytes out of the middle of one are
+/// not under it and are not atomic. gcc refuses the same expression.
+#[test]
+fn a_member_of_an_atomic_structure_is_refused() {
+    let said = refusal(
+        "member",
+        "\
+struct S { int a, b, c; };
+_Atomic struct S big;
+int first(void) { return big.a; }
+",
+    );
+    assert!(said.contains("accessing a member"), "{said}");
+    assert!(said.contains("E0502"), "{said}");
+}
+
+/// The builtins go to the same table at that width, which is what makes the operators and the
+/// names in the header agree about an object too wide for an instruction.
+#[test]
+fn a_builtin_at_that_width_is_a_call_as_well() {
+    let text = asm(
+        "wide-builtin",
+        "\
+_Atomic __int128 w;
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+void put(__int128 v) { __atomic_store_n(&w, v, __ATOMIC_RELEASE); }
+__int128 swap(__int128 v) { return __atomic_exchange_n(&w, v, __ATOMIC_ACQ_REL); }
+__int128 bump(__int128 v) { return __atomic_add_fetch(&w, v, __ATOMIC_SEQ_CST); }
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&w, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+",
+    );
+    assert!(text.contains("__atomic_load"), "{text}");
+    assert!(text.contains("__atomic_store"), "{text}");
+    assert!(text.contains("__atomic_exchange"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// The ordering a builtin was written with travels to the call, unlike the operators, which are
+/// sequentially consistent because the language says so. None of the four routines reads the
+/// argument today and all four take one, so the truth goes in rather than a five.
+#[test]
+fn the_ordering_a_builtin_named_reaches_the_call() {
+    let text = asm(
+        "wide-order",
+        "\
+_Atomic __int128 w;
+__int128 get(void) { return __atomic_load_n(&w, __ATOMIC_ACQUIRE); }
+",
+    );
+    assert!(text.contains("$2,"), "{text}");
+    assert!(!text.contains("$5,"), "{text}");
+}
+
+/// The older family is the same routine with the value expected put into a slot first, and
+/// `__sync_val_compare_and_swap` reads that slot afterwards to find what was there. The routine
+/// writes the object's own bytes over the slot when it fails and leaves them alone when it does
+/// not, and what it leaves alone is the value that was expected, which is what the object held.
+#[test]
+fn the_older_exchange_reads_what_it_expected_back_out() {
+    let text = asm(
+        "wide-sync",
+        "\
+_Atomic __int128 w;
+__int128 was(__int128 old, __int128 new) { return __sync_val_compare_and_swap(&w, old, new); }
+_Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+",
+    );
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// With `cx16` the older family is `lock cmpxchg16b` at sixteen bytes, as gcc's `-mcx16` makes it.
+/// A read modify write and a store are a loop around it, and nothing calls libatomic.
+#[test]
+fn with_cx16_the_older_names_are_the_instruction() {
+    let source = "\
+__int128 w;
+__int128 was(__int128 old, __int128 new) { return __sync_val_compare_and_swap(&w, old, new); }
+_Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+__int128 add(__int128 v) { return __sync_fetch_and_add(&w, v); }
+__int128 nand(__int128 v) { return __sync_nand_and_fetch(&w, v); }
+__int128 take(__int128 v) { return __sync_lock_test_and_set(&w, v); }
+void drop(void) { __sync_lock_release(&w); }
+";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = compile_with("cx16-sync", source, &["-mcx16", level]);
+        assert!(ok, "{said}");
+        assert_eq!(text.matches("lock; cmpxchg16b").count(), 6, "{level}: {text}");
+        assert!(!text.contains("call"), "{level}: {text}");
+    }
+}
+
+/// The C11 names call libatomic at sixteen bytes even with `cx16`, which is what gcc does too, so
+/// `__atomic_always_lock_free(16, 0)` stays false and the answer agrees with the code.
+#[test]
+fn with_cx16_the_c11_names_still_call() {
+    let source = "\
+__int128 w;
+__int128 swap(__int128 v) { return __atomic_exchange_n(&w, v, __ATOMIC_SEQ_CST); }
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&w, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+";
+    let (ok, text, said) = compile_with("cx16-c11", source, &["-mcx16"]);
+    assert!(ok, "{said}");
+    assert!(text.contains("__atomic_exchange"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// The attribute is enough on its own, and only for the function that carries it.
+#[test]
+fn a_function_built_for_cx16_uses_the_instruction_and_its_neighbour_does_not() {
+    let text = asm(
+        "cx16-attr",
+        "\
+__int128 w;
+__attribute__((target(\"cx16\"))) _Bool fast(__int128 old, __int128 new) {
+  return __sync_bool_compare_and_swap(&w, old, new);
+}
+_Bool slow(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+",
+    );
+    let (fast, slow) = text.split_once("slow:").expect("both functions are written");
+    assert!(fast.contains("lock; cmpxchg16b"), "{text}");
+    assert!(!fast.contains("call"), "{text}");
+    assert!(slow.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!slow.contains("cmpxchg16b"), "{text}");
+}
+
+/// A bit-field cannot carry the qualifier, because 6.7.2.1p5 says what a bit-field's type may be
+/// and an atomic type is not one of them. gcc refuses the same declaration.
+#[test]
+fn a_bit_field_cannot_be_atomic() {
+    let said = refusal("bit-field", "struct B { _Atomic int m : 3; };\nstruct B b;\n");
+    assert!(said.contains("has atomic type"), "{said}");
+    assert!(said.contains("E0700"), "{said}");
+}
+
+/// The shipped header, which is the other half of this: the names C11 gives these operations are
+/// macros over the `__atomic_` builtins, and a program that includes it gets the same instruction
+/// a program that wrote the operator gets.
+#[test]
+fn the_shipped_header_reaches_the_same_instructions() {
+    let text = asm(
+        "header",
+        "\
+#include <stdatomic.h>
+int add(atomic_int *p) { return atomic_fetch_add(p, 2); }
+void fence(void) { atomic_thread_fence(memory_order_seq_cst); }
+int flag(atomic_flag *f) { return atomic_flag_test_and_set(f); }
+",
+    );
+    assert!(text.contains("xaddl"), "{text}");
+    assert!(text.contains("mfence"), "{text}");
+    assert!(text.contains("lock"), "{text}");
+}

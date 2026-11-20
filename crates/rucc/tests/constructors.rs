@@ -1,0 +1,285 @@
+//! What `__attribute__((constructor))` and `__attribute__((destructor))` reach the assembler as,
+//! end to end: one pointer wide entry per function, in the section the format's startup code calls
+//! what it finds in.
+//!
+//! Design: `spec/13-gnu-compat.md` section 13.4.
+//!
+//! The unit tests underneath cover one step each: `rucc-sema` reads the attribute and its priority,
+//! `rucc-asm` writes the section directive with the type a startup list carries, and `rucc-object`
+//! writes the section header. What is left is the trip itself, which is only visible from the
+//! outside, so this runs the compiler over C and reads the listing it writes.
+//!
+//! Three targets rather than one, because the section name is the whole of what changes between
+//! them and a name that is wrong is a program whose constructors quietly do not run.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// The fixture, written under a directory of its own so that two of these running at once do not
+/// write the same file.
+fn fixture(what: &str, source: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rucc-ctor-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    path
+}
+
+/// What the compiler wrote for that source on that target, and whether it agreed to write anything.
+fn compile(what: &str, target: &str, level: &str, source: &str) -> (bool, String, String) {
+    let path = fixture(what, source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={target}"))
+        .args([level, "-S", "-o", "-"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    let wrote = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out.status.success(), wrote, said)
+}
+
+/// The assembly the compiler writes for source it accepts.
+fn asm(what: &str, target: &str, source: &str) -> String {
+    asm_at(what, target, "-O0", source)
+}
+
+/// [`asm`] at the optimization level `level`.
+fn asm_at(what: &str, target: &str, level: &str, source: &str) -> String {
+    let (ok, wrote, said) = compile(what, target, level, source);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    wrote
+}
+
+/// One of each, with a body, which is the whole of what the attributes ask for.
+const BOTH: &str = "\
+static int state;
+
+__attribute__((constructor)) static void setup(void) {
+    state = 1;
+}
+
+__attribute__((destructor)) static void teardown(void) {
+    state = 0;
+}
+
+int reads(void) { return state; }
+";
+
+#[test]
+fn an_elf_file_gets_an_entry_in_each_of_the_two_arrays() {
+    let text = asm("elf", "x86_64-unknown-linux-gnu", BOTH);
+    assert!(text.contains("\t.section\t.init_array,\"aw\",@init_array\n"), "{text}");
+    assert!(text.contains("\t.section\t.fini_array,\"aw\",@fini_array\n"), "{text}");
+    // The address of the function rather than a copy of anything, which is what the startup code
+    // calls. It is a relocation because where the function lands is the linker's answer.
+    assert!(text.contains("\t.quad\tsetup\n"), "no entry for the constructor:\n{text}");
+    assert!(text.contains("\t.quad\tteardown\n"), "no entry for the destructor:\n{text}");
+    // The body is still written, and the attribute is the only thing that keeps it: nothing in the
+    // file calls either function and both are `static`.
+    assert!(text.contains("\nsetup:\n"), "{text}");
+    assert!(text.contains("\nteardown:\n"), "{text}");
+}
+
+#[test]
+fn a_priority_goes_in_the_section_name_and_sorts_ahead_of_one_without() {
+    let text = asm(
+        "priority",
+        "x86_64-unknown-linux-gnu",
+        "\
+__attribute__((constructor)) void last(void) {}
+__attribute__((constructor(101))) void first(void) {}
+",
+    );
+    // The number is in the name because an ELF linker sorts the numbered sections by it and puts
+    // the whole run of them in front of the unnumbered one, whichever order the files were linked
+    // in. Five digits, which is what gcc writes and what makes the sort the linker does textual.
+    assert!(text.contains("\t.section\t.init_array.00101,\"aw\",@init_array\n"), "{text}");
+    assert!(text.contains("\t.section\t.init_array,\"aw\",@init_array\n"), "{text}");
+    // And in this file as well, which is what the other two formats rely on: they have no sorting
+    // and run the entries in the order the section holds them.
+    let numbered = text.find(".init_array.00101").expect("the numbered entry");
+    let plain = text.find(".section\t.init_array,").expect("the unnumbered entry");
+    assert!(numbered < plain, "the numbered entry was written second:\n{text}");
+}
+
+#[test]
+fn two_at_one_priority_run_in_the_order_of_the_file_also_when_optimized() {
+    // gcc runs `early` first and `undo_early` last, at each level. When it optimizes, it writes
+    // the variables of the unit newest first, and rucc does the same, but the entries of the
+    // constructors and destructors are not variables in gcc and keep the order of the file. An
+    // ELF linker keeps the order of the entries in one section, and the C runtime walks
+    // `.init_array` from its start and `.fini_array` from its end.
+    for level in ["-O0", "-O2"] {
+        let text = asm_at(
+            "order",
+            "x86_64-unknown-linux-gnu",
+            level,
+            "\
+__attribute__((constructor)) void early(void) {}
+__attribute__((constructor)) void late(void) {}
+__attribute__((destructor)) void undo_early(void) {}
+__attribute__((destructor)) void undo_late(void) {}
+",
+        );
+        let at = |name: &str| {
+            text.find(&format!("\t.quad\t{name}\n")).unwrap_or_else(|| panic!("{name}:\n{text}"))
+        };
+        assert!(at("early") < at("late"), "{level}: late is first:\n{text}");
+        assert!(at("undo_early") < at("undo_late"), "{level}: undo_late is first:\n{text}");
+    }
+}
+
+#[test]
+fn a_declaration_with_the_attribute_and_no_definition_under_it_emits_nothing() {
+    // Which is what lets a header write the attribute: the file that includes it and never defines
+    // the function has nothing to put in the array, since an entry is an address.
+    let text = asm(
+        "declared",
+        "x86_64-unknown-linux-gnu",
+        "\
+__attribute__((constructor)) void elsewhere(void);
+
+int calls(void) { return 0; }
+",
+    );
+    assert!(
+        !text.contains(".init_array"),
+        "an entry for something this file defines nothing of:\n{text}"
+    );
+}
+
+#[test]
+fn a_windows_file_gets_an_entry_the_c_runtime_walks() {
+    let text = asm(
+        "coff",
+        "x86_64-pc-windows-msvc",
+        "\
+__attribute__((constructor)) void setup(void) {}
+__attribute__((constructor(101))) void sooner(void) {}
+",
+    );
+    // COFF has no section types and no sorting of its own. What it has is the `$`: the linker
+    // gathers the sections whose names match up to it and orders them by what follows, so the CRT
+    // walking from `.CRT$XCA` to `.CRT$XCZ` finds them in name order.
+    assert!(text.contains("\t.section\t.CRT$XCU,\"dw\"\n"), "{text}");
+    assert!(text.contains("\t.section\t.CRT$XCA00101,\"dw\"\n"), "{text}");
+    assert!(text.contains("\t.quad\tsetup\n"), "{text}");
+}
+
+#[test]
+fn a_darwin_file_gets_an_entry_dyld_calls() {
+    let text = asm(
+        "macho",
+        "x86_64-apple-darwin",
+        "\
+__attribute__((constructor)) void setup(void) {}
+",
+    );
+    // The section attribute is what makes dyld call what is in it, and it is part of the name here
+    // because a Mach-O section directive carries the segment, the section and the attributes.
+    assert!(text.contains("\t.section\t__DATA,__mod_init_func,mod_init_funcs\n"), "{text}");
+    assert!(text.contains("\t.quad\t_setup\n"), "{text}");
+}
+
+#[test]
+fn a_windows_destructor_is_handed_to_atexit_from_a_constructor() {
+    let text = asm(
+        "coff-dtor",
+        "x86_64-windows-gnu",
+        "\
+__attribute__((destructor(200))) void teardown(void) {}
+",
+    );
+    // COFF has no run-down list, so the destructor is registered from the run-up one at its own
+    // priority, and atexit running the last one it was given first is what puts them in order.
+    assert!(text.contains("\t.section\t.CRT$XCA00200,\"dw\"\n"), "{text}");
+    assert!(text.contains("\t.quad\t__rucc_atexit.teardown\n"), "{text}");
+    assert!(text.contains("atexit"), "{text}");
+}
+
+#[test]
+fn a_wasm_file_lists_its_constructors_by_priority_and_registers_its_destructors() {
+    let text = asm(
+        "wasm",
+        "wasm32-wasip1",
+        "\
+__attribute__((constructor(200))) void first(void) {}
+__attribute__((constructor)) void second(void) {}
+__attribute__((destructor)) void teardown(void) {}
+",
+    );
+    // A wasm object lists its constructors in the `linking` section, each with a priority, and
+    // the text writes each one as an entry in `.init_array`, as clang does. A constructor with no
+    // number has the priority 65535, which is the plain section.
+    let entry = |section: &str, name: &str| {
+        format!("\t.section\t{section},\"\",@\n\t.p2align\t2, 0x0\n\t.int32\t{name}\n")
+    };
+    assert!(text.contains(&entry(".init_array.200", "first")), "{text}");
+    assert!(text.contains(&entry(".init_array", "second")), "{text}");
+    // wasm has no run-down list either, so the destructor is registered from a constructor, as
+    // on COFF.
+    assert!(text.contains("\t.int32\t__rucc_atexit.teardown\n"), "{text}");
+    assert!(text.contains("\tcall\tatexit\n"), "{text}");
+}
+
+#[test]
+fn a_destructor_is_refused_on_darwin_which_has_nowhere_to_put_one() {
+    // Refused rather than dropped. The whole point of the attribute is that something else calls
+    // the function, and a program that quietly does not get its call has no way of noticing until
+    // whatever the function was to undo is left undone.
+    let (ok, _, said) = compile(
+        "refused",
+        "x86_64-apple-darwin",
+        "-O0",
+        "\
+__attribute__((destructor)) void teardown(void) {}
+",
+    );
+    assert!(!ok, "darwin wrote a destructor entry");
+    assert!(said.contains("E0519"), "{said}");
+    assert!(said.contains("'destructor'"), "{said}");
+}
+
+#[test]
+fn a_priority_outside_the_range_is_an_error_and_a_reserved_one_is_a_warning() {
+    let (ok, _, said) = compile(
+        "range",
+        "x86_64-unknown-linux-gnu",
+        "-O0",
+        "\
+__attribute__((constructor(70000))) void late(void) {}
+",
+    );
+    assert!(!ok, "a priority wider than the field was taken");
+    assert!(said.contains("0 to 65535"), "{said}");
+    // The low hundred are the C library's, so a program may ask for one and is told that it did.
+    // gcc warns about it without being asked and so does this.
+    let (ok, text, said) = compile(
+        "reserved",
+        "x86_64-unknown-linux-gnu",
+        "-O0",
+        "\
+__attribute__((constructor(50))) void early(void) {}
+",
+    );
+    assert!(ok, "a reserved priority was refused:\n{said}");
+    assert!(said.contains("reserved for the implementation"), "{said}");
+    assert!(text.contains("\t.section\t.init_array.00050,\"aw\",@init_array\n"), "{text}");
+}
+
+#[test]
+fn the_attribute_on_something_that_is_not_a_function_is_ignored() {
+    let (ok, text, said) = compile(
+        "object",
+        "x86_64-unknown-linux-gnu",
+        "-O0",
+        "\
+__attribute__((constructor)) int not_a_function;
+",
+    );
+    assert!(ok, "{said}");
+    assert!(said.contains("E0703"), "{said}");
+    assert!(!text.contains(".init_array"), "an object was put in the array:\n{text}");
+}

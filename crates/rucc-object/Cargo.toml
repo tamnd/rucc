@@ -1,0 +1,31 @@
+[package]
+name = "rucc-object"
+description = "ELF, Mach-O, COFF and wasm object writers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rucc-base.workspace = true
+rucc-target.workspace = true
+rucc-tuple.workspace = true
+# The writer itself, blessed for this crate by spec/18-package-layout.md section 18.3. Only the
+# writing half is asked for, and nothing that reads a compressed section, so what it brings with
+# it is four crates rather than the dozen the default features would.
+object = { workspace = true, features = ["write"] }
+
+# The reading half, for the tests, which check what was written by parsing it back rather than by
+# comparing it against a byte string somebody typed. A test that reads its own output through an
+# independent parser is the same idea as the differential disassembly one layer down.
+[dev-dependencies]
+object = { workspace = true, features = ["read", "write"] }

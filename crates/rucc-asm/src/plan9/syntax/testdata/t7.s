@@ -1,0 +1,80 @@
+#define	N	(4*2)
+#include "inc7.h"
+K = 3
+TEXT	f(SB), $-8
+TEXT	g(SB), 1, $16
+	MOV	$0x123456789, R1
+	MOV	$-1, R2
+	MOVW	$(1<<31), R3
+	ADD	R1<<3, R2, R3
+	ADD	R1>>3, R2
+	SUB	R1->2, R2, R3
+	ADD	R1@>5, R2, R3
+	ADD	R1.UXTW, R2, R3
+	ADD	R1.SXTX<<2, R2, R3
+	ADD	$K, RSP, R3
+	CMP	$4, R1
+	MOV	(R1)(R2), R3
+	MOV	(R1)[R2.SXTW], R3
+	MOV	8(R1)!, R3
+	MOV	(R1)8!, R3
+	MOV	x+8(FP), R4
+	MOV	y-8(SP), R4
+	MOV	z<>+4(SB), R4
+	MOV	R(3), R5
+	MOVK	$1, R1
+	MOVK	$1<<16, R1
+	MOVK	$7<<(N*2), R1
+	CSEL	EQ, R1, R2, R3
+	CSET	NE, R1
+	CINC	LT, R1, R2
+	CCMN	GE, $2, R1, $3
+	TBZ	$3, R1, l1
+	CBZ	R1, l1
+l1:	BEQ	l1
+	B	(R3)
+	BL	g(SB)
+	B	2(PC)
+	ADR	l1, R1
+	ADR	$f(SB), R2
+	BFM	$3, $4, R1, R2
+	EXTR	$3, R1, R2, R3
+	MADD	R1, R2, R3, R4
+	FADDD	F1, F2
+	FADDD	F1, F2, F3
+	FADDD	$1.5, F2
+	FMOVD	$-0.25, F1
+	FCMPD	F1, F2
+	FCCMPD	EQ, F1, F2, $3
+	FCSELD	EQ, F1, F2, F3
+	FMOVD	F(3), F4
+	SYS	$1
+	SYS	R2, 0,7,5,1
+	SYSL	$0, R2
+	DMB	$11
+	MSR	R1, NZCV
+	MRS	DAIF, R2
+	MSR	R1, SPR(0x1234)
+	STXR	R1, (R2), R3
+	MOVP	R1, R2, (R3)
+	WORD	$0x1234
+	DWORD	$f(SB)
+	FMOVD	V1, F2
+	MOV	V(4), V5
+	NOP
+	NOP	R1
+	NOP	F1
+	NOP	,R1
+	RETURN
+	ERET
+	SVC
+	SVC	$0
+	RET	R30
+GLOBL	z<>+0(SB), $8
+DATA	z<>+0(SB)/8, $"abcdefgh"
+DATA	w+0(SB)/4, $(10/3)
+DATA	w+0(SB)/4, $(10%3)
+DATA	w+0(SB)/4, $(-1>>1)
+DATA	w+0(SB)/4, $(~0^5|2&3)
+DATA	w+0(SB)/8, $2.5
+	END

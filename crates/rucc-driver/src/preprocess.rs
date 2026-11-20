@@ -1,0 +1,692 @@
+//! Running phase 4 and writing what came out, which is what `-E` asks for.
+//!
+//! Design: `spec/04-driver-and-cli.md` sections 4.3 and 4.4, and `spec/05-preprocessor.md`.
+//!
+//! This is the first phase the driver actually runs, so it is also where the file system
+//! implementation lives. Everything below the driver reads through the [`FileSystem`] trait,
+//! and [`OsFileSystem`] is the one implementation of it that talks to the disk. Keeping it
+//! here rather than in `rucc-session` is what keeps the layer rule true: a preprocessor test
+//! is a map from path to bytes and cannot accidentally read the machine it runs on.
+
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+
+use rucc_base::hash::{Map, Set};
+use rucc_diag::{Diagnostic, Severity, SourceBytes, SourceMap};
+use rucc_pp::{Context, Dependency, Predef, Preprocessor, PrintOptions};
+use rucc_session::{FileSystem, Options, Session};
+
+/// The file system the compiler reads through when it is a compiler rather than a library.
+///
+/// It remembers what it was told for as long as it lives, which is one run of the driver. A
+/// guarded header is still searched for every time it is included, because the guard is a fact
+/// about the file the search finds, and the search reads every path it tries. On `c4.c` that was
+/// `bits/types.h` read from the disk 18 times and `features.h` 15 times, 128 opens for 79 files,
+/// and 290 failed opens for 159 paths that were not there. So a path that was read is not read
+/// again and a path that was not there is not asked about again. Nothing in one run writes a header
+/// another part of it reads, which is what makes that safe. tamnd/rucc#3052.
+#[derive(Debug, Default)]
+pub struct OsFileSystem {
+    /// What each path read as, or the error number it was not found with.
+    ///
+    /// By the bytes of the path rather than by the path, because hashing a [`Path`] splits it
+    /// into its components first, and two spellings of one path that miss each other here are
+    /// only a second read.
+    read: Mutex<Map<OsString, Result<SourceBytes, i32>>>,
+    /// Every directory [`OsFileSystem::directory`] has resolved, by the spelling it was asked
+    /// about.
+    directories: Mutex<Map<OsString, Option<PathBuf>>>,
+    /// What is in each directory a file was not found in, by its spelling.
+    ///
+    /// The cache above stops a path being asked about twice, but an include search asks about
+    /// a different path in every directory on the list, and most of them are not there. On a
+    /// duktape file that was 529 failed opens out of 704, and most of those were for names under
+    /// a directory that does not exist, such as `./bits/types/` once for every header glibc keeps
+    /// there. A directory that has missed once is read, and after that a name its listing does
+    /// not have is not there, and nor is anything under a directory it does not have.
+    listings: Mutex<Map<OsString, Listing>>,
+}
+
+/// What [`OsFileSystem`] knows about the names in one directory.
+///
+/// Every answer that a file is not there carries the error number a real open gave for the miss
+/// that led to it, so the message for it is the one the system would have given.
+#[derive(Debug)]
+enum Listing {
+    /// A file was not found in it once. Reading the whole directory is a few calls, which is
+    /// more than one failed open, so it waits for the second file looked for there.
+    Missed(i32),
+    /// The directory is not there, so nothing under it is.
+    Missing(i32),
+    /// A hash of each name in it, lowercased in ASCII so that a file system that ignores case
+    /// cannot make a name look absent when it is there. Two names with one hash only means an
+    /// open that finds nothing, and keeping hashes rather than names is one allocation a name
+    /// fewer for a directory that can have a thousand.
+    Names(Set<u64>, i32),
+    /// It could not be listed, so every file in it is asked about with an open.
+    Unlisted,
+}
+
+impl Listing {
+    /// Lists `dir`, which has had `code` from a file that was not found in it.
+    fn read(dir: &Path, code: i32) -> Listing {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut names = Set::default();
+                for entry in entries {
+                    let Ok(entry) = entry else { return Listing::Unlisted };
+                    names.insert(folded(entry.file_name().as_encoded_bytes()));
+                }
+                Listing::Names(names, code)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Listing::Missing(e.raw_os_error().unwrap_or(code))
+            }
+            Err(_) => Listing::Unlisted,
+        }
+    }
+
+    /// The error number for `name`, when this says it is not there.
+    ///
+    /// A name that is not ASCII is always looked for, since a file system may fold its case or
+    /// its normal form in ways a byte compare cannot follow.
+    fn lacks(&self, name: &OsStr) -> Option<i32> {
+        match self {
+            Listing::Missing(code) => Some(*code),
+            Listing::Names(names, code) => {
+                let name = name.as_encoded_bytes();
+                (name.is_ascii() && !names.contains(&folded(name))).then_some(*code)
+            }
+            Listing::Missed(_) | Listing::Unlisted => None,
+        }
+    }
+}
+
+/// A hash of a name with its ASCII letters lowercased.
+fn folded(name: &[u8]) -> u64 {
+    name.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+        (hash ^ u64::from(b.to_ascii_lowercase())).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The directory a path is in and its last component, with a bare name in `.`.
+///
+/// Cut at the last slash in the bytes rather than through [`Path::parent`] and
+/// [`Path::file_name`], which take the path apart into components from the end, and that was
+/// most of the cost of asking. Only called on Unix, where the slash is the one separator. A
+/// spelling that ends in a slash, a `.` or a `..` gives `None`, and is opened as it always was.
+fn split(path: &Path) -> Option<(&Path, &OsStr)> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let (dir, name) = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(0) => (&bytes[..1], &bytes[1..]),
+        Some(at) => (&bytes[..at], &bytes[at + 1..]),
+        None => (&b"."[..], bytes),
+    };
+    if matches!(name, b"" | b"." | b"..") {
+        return None;
+    }
+    // SAFETY: both halves come from cutting an encoded `OsStr` at an ASCII byte, or are ASCII
+    // themselves, which is what the encoding allows to be turned back into an `OsStr`.
+    unsafe {
+        Some((
+            Path::new(OsStr::from_encoded_bytes_unchecked(dir)),
+            OsStr::from_encoded_bytes_unchecked(name),
+        ))
+    }
+}
+
+impl OsFileSystem {
+    /// A file system that has read nothing yet.
+    #[must_use]
+    pub fn new() -> OsFileSystem {
+        OsFileSystem::default()
+    }
+
+    /// A directory with its links and `..` resolved, from the disk the first time and from
+    /// memory after that.
+    fn directory(&self, dir: &Path) -> Option<PathBuf> {
+        let mut known = self.directories.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(resolved) = known.get(dir.as_os_str()) {
+            return resolved.clone();
+        }
+        let resolved = std::fs::canonicalize(dir).ok();
+        known.insert(dir.as_os_str().to_owned(), resolved.clone());
+        resolved
+    }
+
+    /// The error number opening `path` would fail with, when the directories already listed say
+    /// it is not there.
+    ///
+    /// Only on Unix, where a name in a directory is the bytes of the name. Elsewhere a name can
+    /// reach a file it does not spell, through a short name or a trailing dot, and every path is
+    /// opened.
+    fn absent(&self, path: &Path) -> Option<i32> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let (dir, name) = split(path)?;
+        let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
+        match listings.get(dir.as_os_str()) {
+            Some(Listing::Missed(code)) => {
+                let listing = Listing::read(dir, *code);
+                listings.insert(dir.as_os_str().to_owned(), listing);
+            }
+            Some(_) => {}
+            None => {
+                // Nothing has been looked for here yet, but the directory above may already
+                // say this one is not there, which is every `bits` on the path but the one
+                // that has it.
+                let (up, below) = split(dir)?;
+                let code = listings.get(up.as_os_str())?.lacks(below)?;
+                listings.insert(dir.as_os_str().to_owned(), Listing::Missing(code));
+                return Some(code);
+            }
+        }
+        listings.get(dir.as_os_str())?.lacks(name)
+    }
+
+    /// Notes that a file was not found in its directory, with the error number it gave.
+    fn missed(&self, path: &Path, code: i32) {
+        if !cfg!(unix) {
+            return;
+        }
+        if let Some((dir, _)) = split(path) {
+            self.listings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(dir.as_os_str().to_owned())
+                .or_insert(Listing::Missed(code));
+        }
+    }
+}
+
+impl FileSystem for OsFileSystem {
+    fn read(&self, path: &Path) -> io::Result<SourceBytes> {
+        // Bytes rather than a string. A source file that is not valid UTF-8 is a file this
+        // compiler still has to have an opinion about, and phase 1 is where that opinion
+        // belongs, not here. Whether the bytes are a mapping or a buffer is `map`'s decision
+        // and is invisible from here.
+        //
+        // Only a file that is not there is remembered as an error, by its number, so that the
+        // message for it the second time is the message the system gave the first time. Any
+        // other error is asked about again, since it may not be one the next time.
+        if let Some(known) =
+            self.read.lock().unwrap_or_else(PoisonError::into_inner).get(path.as_os_str())
+        {
+            return known.clone().map_err(io::Error::from_raw_os_error);
+        }
+        let read = match self.absent(path) {
+            Some(code) => Err(io::Error::from_raw_os_error(code)),
+            None => crate::map::read(path),
+        };
+        let known = match &read {
+            Ok(bytes) => Ok(bytes.clone()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match e.raw_os_error() {
+                Some(code) => {
+                    self.missed(path, code);
+                    Err(code)
+                }
+                None => return read,
+            },
+            Err(_) => return read,
+        };
+        self.read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.as_os_str().to_owned(), known);
+        read
+    }
+
+    fn identity(&self, path: &Path) -> PathBuf {
+        // `canonicalize` is the portable spelling of what GCC does with the device and inode
+        // pair: it resolves the relative part, the `..` and the symlinks, so that every route
+        // to one header gives one answer. It fails only if the file is not there, and this is
+        // asked about files that have just been read, so the fallback is for a file that was
+        // deleted between the two calls and it does not matter what it says.
+        //
+        // The directory is resolved once and remembered, and only the last component is asked
+        // about after that. Resolving the whole path is one `readlink` per component, every
+        // header sits in one of a few directories, and on a file that includes the C library
+        // that was 577 calls, every one of them for a component that was not a link. A header
+        // that is a link itself is resolved in full. tamnd/rucc#3052.
+        //
+        // A bare name is in the current directory, and that is a directory like any other, so it
+        // is resolved once too rather than once per header found next to a source file. A path
+        // that is not there at all is not handed to `canonicalize`, which could only fail on it
+        // after a `getcwd` and a `readlink`, and that is every `<built-in>` and `<builtin>` name.
+        let resolved = match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) => match std::fs::symlink_metadata(path) {
+                Ok(meta) if !meta.file_type().is_symlink() => {
+                    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+                    self.directory(dir).map(|dir| dir.join(name))
+                }
+                Ok(_) => None,
+                Err(_) => return rucc_session::path_key(path),
+            },
+            _ => None,
+        };
+        resolved
+            .or_else(|| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| rucc_session::path_key(path))
+    }
+}
+
+/// What preprocessing one file produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preprocessed {
+    /// The text to write, empty when the file could not be read.
+    pub text: String,
+    /// The diagnostics, already rendered, one per line, in the order they were reported.
+    pub messages: Vec<String>,
+    /// How many of them were errors.
+    pub errors: u32,
+    /// Every file an `#include` found, for the `-M` family.
+    ///
+    /// Collected whatever the command line asked for, because the cost of it is one path per
+    /// header and a field that is only filled in under a flag is a field that is wrong the first
+    /// time somebody reads it under a different one.
+    pub deps: Vec<Dependency>,
+}
+
+impl Preprocessed {
+    /// Whether anything went wrong badly enough that the output should not be used.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.errors > 0
+    }
+}
+
+/// Preprocesses one file and renders the result.
+///
+/// `name` is the path as the user wrote it, which is the name the output and every diagnostic
+/// about the file use. It is not canonicalised, because a message naming a path nobody typed
+/// is a message that is harder to act on.
+///
+/// `assembly` is whether the file is assembly on its way to the assembler, a `.S` or anything
+/// under `-x assembler-with-cpp`. Such a file is read the way gcc reads it: `__ASSEMBLER__` is
+/// defined, a `$` is not part of a name, a `#` line that is not a directive is text, and an
+/// apostrophe with no partner is not an error.
+#[must_use]
+pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSystem) -> Preprocessed {
+    let mut sess = Session::new(opts.clone());
+    let bytes = match fs.read(Path::new(name)) {
+        Ok(bytes) => bytes,
+        Err(e) => return failure(format!("{name}: {e}")),
+    };
+    let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
+        return failure(format!("{name}: the source map has no room left for this file"));
+    };
+
+    let mut pp = Preprocessor::with_prefix_map(opts.prefix_map.macros.clone());
+    let predef = Predef { assembler: assembly, ..Predef::for_options(opts) };
+    let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
+    let lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions, opts.trigraphs);
+    cx.lex = if assembly { lex.for_assembly() } else { lex.for_kencc(opts.kencc) };
+    cx.pedantic = opts.pedantic;
+    cx.generated_headers = opts.deps.generated;
+    cx.kencc = opts.kencc && !opts.ansi_preprocessor && !assembly;
+    if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
+        return failure(format!("{name}: the source map has no room left for the built in macros"));
+    }
+    let mut tokens = Vec::new();
+    if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
+        return failure(format!("{name}: the source map has no room left for the command line"));
+    }
+    tokens.append(&mut pp.run(file, &mut cx));
+    // `-dM` replaces the output rather than adding to it. The run still happens, and it has
+    // to: the table at the end is the one the file left behind, so a `#define` inside an
+    // `#ifdef` that was false is correctly absent.
+    let text = if opts.dumps.macros {
+        pp.dumped(&sess.interner)
+    } else {
+        rucc_pp::print(
+            file,
+            &tokens,
+            pp.line_directives(),
+            &sess.sources,
+            &sess.interner,
+            PrintOptions { line_markers: opts.line_markers },
+        )
+    };
+
+    let mut messages = Vec::new();
+    let mut errors = 0;
+    for diag in pp.take_diagnostics() {
+        // `-w` and `-Wsystem-headers`, for the reason they are read here in the compiler proper.
+        if rucc_diag::dropped(&diag, &sess.sources, opts.warnings, opts.system_header_warnings)
+            || opts.named_warnings.silenced(&diag)
+        {
+            continue;
+        }
+        let promoted = opts.named_warnings.promoted(&diag, opts.warnings_are_errors);
+        if diag.severity.is_fatal() || promoted {
+            errors += 1;
+        }
+        messages.push(render(&diag, &sess.sources, promoted));
+    }
+    Preprocessed { text, messages, errors, deps: pp.dependencies().to_vec() }
+}
+
+/// A result that is nothing but one message, for the failures that happen before there is
+/// anything to preprocess.
+fn failure(message: String) -> Preprocessed {
+    Preprocessed {
+        text: String::new(),
+        messages: vec![format!("rucc: error: {message}")],
+        errors: 1,
+        deps: Vec::new(),
+    }
+}
+
+/// One diagnostic as the lines it prints.
+///
+/// GCC's shape: the position, the severity, the message, then the code, then any notes
+/// underneath. The chain of includes that reached the file comes first, because a diagnostic
+/// in a header three levels down is unactionable without the path that got there.
+pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
+    let mut out = String::new();
+    let mut chain = sources.include_stack(diag.span.lo);
+    chain.reverse();
+    for (at, from) in chain.iter().enumerate() {
+        let lead = if at == 0 { "In file included from" } else { "                 from" };
+        out.push_str(&format!("{lead} {}:\n", sources.render_position(from.lo)));
+    }
+    out.push_str(&line(diag, sources, warnings_are_errors));
+    for child in &diag.children {
+        out.push('\n');
+        out.push_str(&line(child, sources, false));
+    }
+    out
+}
+
+/// The one line a diagnostic or one of its notes prints.
+fn line(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
+    let severity = if diag.severity == Severity::Warning && warnings_are_errors {
+        // Not a relabelling for its own sake. A build that turned warnings into errors and
+        // then reads "warning" next to a failed compilation has to go looking for why it
+        // failed, and the answer is right here.
+        "error"
+    } else {
+        diag.severity.as_str()
+    };
+    let position = if diag.span.is_dummy() {
+        "rucc".to_owned()
+    } else {
+        sources.render_position(diag.span.lo)
+    };
+    match diag.code {
+        Some(code) => format!("{position}: {severity}: {} [{code}]", diag.message),
+        None => format!("{position}: {severity}: {}", diag.message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_session::MemoryFileSystem;
+    use rucc_target::Triple;
+
+    use super::*;
+
+    fn options() -> Options {
+        Options::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap())
+    }
+
+    /// The path an include search produces for `name` under `dir`.
+    ///
+    /// The search joins the two with the platform's separator, so an expectation with a slash
+    /// written into it is an expectation about Unix rather than about the preprocessor, and it
+    /// fails on Windows for a reason that has nothing to do with what the test is checking.
+    fn at(dir: &str, name: &str) -> String {
+        Path::new(dir).join(name).display().to_string()
+    }
+
+    fn run(opts: &Options, files: &[(&str, &str)]) -> Preprocessed {
+        let mut fs = MemoryFileSystem::new();
+        for (path, text) in files {
+            fs.insert(*path, (*text).to_owned().into_bytes());
+        }
+        preprocess(opts, files[0].0, false, &fs)
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_says_so_and_produces_nothing() {
+        let fs = MemoryFileSystem::new();
+        let result = preprocess(&options(), "/nope.c", false, &fs);
+        assert!(result.failed());
+        assert!(result.messages[0].contains("/nope.c"), "{:?}", result.messages);
+        assert!(result.text.is_empty());
+    }
+
+    #[test]
+    fn assembly_is_read_as_assembly_and_c_as_c() {
+        let mut fs = MemoryFileSystem::new();
+        let src = "#ifdef __ASSEMBLER__\n# it's a comment\n#define N 3\nmovq $N, %rax\n#endif\n";
+        fs.insert("/a.S", src.as_bytes().to_vec());
+        let asm = preprocess(&options(), "/a.S", true, &fs);
+        assert!(!asm.failed(), "{:?}", asm.messages);
+        assert!(asm.text.contains("# it's a comment\n"), "{}", asm.text);
+        assert!(asm.text.contains("movq $3, %rax"), "{}", asm.text);
+
+        // Read as C the same bytes produce nothing, because nobody told them they were assembly.
+        let c = preprocess(&options(), "/a.S", false, &fs);
+        assert!(!c.failed(), "{:?}", c.messages);
+        assert!(!c.text.contains("movq"), "{}", c.text);
+    }
+
+    #[test]
+    fn a_warning_about_a_header_that_came_with_the_machine_is_not_printed() {
+        // micropython is what found this. It defines `_DIRENT_HAVE_D_TYPE` in its own
+        // configuration header and glibc defines it again in `bits/dirent.h`, gcc says nothing
+        // because the second one is in a system header, and the build runs with warnings as
+        // errors, so without this rule it stops on a line nobody in the project wrote.
+        let mut opts = options();
+        opts.search.push_system("/usr/include");
+        opts.search.push_bracket("/project");
+        let files = [
+            ("/main.c", "#define N 1\n#include <sys.h>\n#include \"own.h\"\n"),
+            ("/usr/include/sys.h", "#define N 2\n#include <inner.h>\n"),
+            ("/usr/include/inner.h", "#define N 3\n"),
+            ("/project/own.h", "#define N 4\n"),
+        ];
+
+        // One message, about the project's own header. The system one and the header it pulled in
+        // are both quiet, and the second of those is the propagation: `inner.h` was found in the
+        // same directory, but a header a system header includes is a system header whichever
+        // directory answers for it.
+        let result = run(&opts, &files);
+        assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("own.h"), "{:?}", result.messages);
+        assert_eq!(result.errors, 0);
+
+        // `-Wsystem-headers` is how somebody porting a header hears all of it.
+        opts.system_header_warnings = true;
+        let result = run(&opts, &files);
+        assert_eq!(result.messages.len(), 3, "{:?}", result.messages);
+
+        // `-w` beats it, because a warning that was never raised cannot be asked for back.
+        opts.warnings = false;
+        let result = run(&opts, &files);
+        assert_eq!(result.messages, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_output_is_the_expanded_text_with_a_line_marker_on_top() {
+        let result = run(&options(), &[("/main.c", "#define N 2\nint a[N];\n")]);
+        assert_eq!(result.messages, Vec::<String>::new());
+        assert_eq!(result.text, "# 1 \"/main.c\"\n\nint a[2];\n");
+    }
+
+    #[test]
+    fn the_predefined_macros_are_there_without_being_asked_for() {
+        let result = run(&options(), &[("/main.c", "__SIZEOF_LONG__ __x86_64__\n")]);
+        assert_eq!(result.text, "# 1 \"/main.c\"\n8 1\n");
+    }
+
+    #[test]
+    fn dash_d_and_dash_u_reach_the_macro_table() {
+        let mut opts = options();
+        opts.defines.push("FOO=41+1".to_owned());
+        opts.defines.push("BAR".to_owned());
+        opts.undefines.push("__x86_64__".to_owned());
+        let result = run(&opts, &[("/main.c", "FOO BAR\n#ifdef __x86_64__\ngone\n#endif\n")]);
+        // `41+1` with no space in it, which is what it was written as on the command line and
+        // what GCC prints. The three tokens all came out of the one expansion of `FOO`, and a
+        // paste is only worth avoiding where a macro put two tokens together that the person
+        // did not write together.
+        assert_eq!(result.text, "# 1 \"/main.c\"\n41+1 1\n");
+    }
+
+    #[test]
+    fn dash_i_is_where_an_angled_include_looks() {
+        let mut opts = options();
+        opts.search.push_bracket("/inc");
+        let files = [("/main.c", "#include <one.h>\nint after;\n"), ("/inc/one.h", "int in_it;\n")];
+        let result = run(&opts, &files);
+        // A line marker's file name is a string literal, so a separator that is a backslash
+        // comes out escaped, which is what GCC does and what a reader of the output has to be
+        // able to parse back.
+        let one = at("/inc", "one.h").replace('\\', "\\\\");
+        let expected = format!(
+            "# 1 \"/main.c\"\n# 1 \"{one}\" 1\nint in_it;\n# 2 \"/main.c\" 2\nint after;\n"
+        );
+        assert_eq!(result.text, expected);
+    }
+
+    #[test]
+    fn dash_p_leaves_the_markers_out() {
+        let mut opts = options();
+        opts.line_markers = false;
+        opts.search.push_bracket("/inc");
+        let files = [("/main.c", "#include <one.h>\nint after;\n"), ("/inc/one.h", "int in_it;\n")];
+        assert_eq!(run(&opts, &files).text, "int in_it;\nint after;\n");
+    }
+
+    #[test]
+    fn a_diagnostic_says_where_it_is_and_carries_its_code() {
+        let result = run(&options(), &[("/main.c", "#error no\n")]);
+        assert_eq!(result.errors, 1);
+        assert!(
+            result.messages[0].starts_with("/main.c:1:8: error: no ["),
+            "{:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_in_a_header_prints_the_chain_that_reached_it() {
+        let mut opts = options();
+        opts.search.push_bracket("/inc");
+        let files = [
+            ("/main.c", "#include <one.h>\n"),
+            ("/inc/one.h", "#include <two.h>\n"),
+            ("/inc/two.h", "#error deep\n"),
+        ];
+        let result = run(&opts, &files);
+        let text = result.messages.join("\n");
+        assert!(text.starts_with("In file included from /main.c:1:1:\n"), "{text}");
+        assert!(
+            text.contains(&format!("                 from {}:1:1:\n", at("/inc", "one.h"))),
+            "{text}"
+        );
+        assert!(text.contains(&format!("{}:1:8: error: deep", at("/inc", "two.h"))), "{text}");
+    }
+
+    #[test]
+    fn werror_turns_a_warning_into_an_error_in_the_count_and_in_the_word() {
+        let source = "#warning careful\n";
+        let plain = run(&options(), &[("/main.c", source)]);
+        assert_eq!(plain.errors, 0);
+        assert!(plain.messages[0].contains("warning: careful"), "{:?}", plain.messages);
+
+        let mut opts = options();
+        opts.warnings_are_errors = true;
+        let strict = run(&opts, &[("/main.c", source)]);
+        assert_eq!(strict.errors, 1);
+        assert!(strict.messages[0].contains("error: careful"), "{:?}", strict.messages);
+    }
+
+    #[test]
+    fn dash_dm_prints_the_macros_the_file_left_behind_and_not_the_file() {
+        let source = "#define KEPT 1\n#define GONE 2\n#undef GONE\n#ifdef NEVER\n#define \
+                      HIDDEN 3\n#endif\nint x;\n";
+        let result = run(&options(), &[("/main.c", source)]);
+        assert_eq!(result.errors, 0);
+        assert!(result.text.contains("int x;"), "the output is the file without -dM");
+        assert!(!result.text.contains("#define"), "a directive line is not part of the output");
+
+        let mut opts = options();
+        opts.dumps.macros = true;
+        let dumped = run(&opts, &[("/main.c", source)]);
+        assert!(dumped.text.contains("#define KEPT 1\n"), "{}", dumped.text);
+        assert!(!dumped.text.contains("int x;"), "-dM replaces the output rather than adding");
+        // Undefined is gone, and a define the conditional skipped was never made. The dump is
+        // the table at the end of the run and not a list of the lines that were written.
+        assert!(!dumped.text.contains("GONE"), "{}", dumped.text);
+        assert!(!dumped.text.contains("HIDDEN"), "{}", dumped.text);
+        // The predefined set is in there too, because it is defined the same way everything
+        // else is, which is the whole reason this output can be diffed against GCC's.
+        assert!(dumped.text.contains("#define __x86_64__ 1\n"), "{}", dumped.text);
+    }
+
+    /// GCC does not list the macros it works out the value of, and `__TIME__` made two runs of
+    /// the list differ. One the program defines itself is listed.
+    #[test]
+    fn dash_dm_leaves_out_the_macros_the_preprocessor_works_out() {
+        let mut opts = options();
+        opts.dumps.macros = true;
+        let dumped = run(&opts, &[("/main.c", "int x;\n")]);
+        for name in [
+            "__FILE__",
+            "__LINE__",
+            "__DATE__",
+            "__TIME__",
+            "__COUNTER__",
+            "__INCLUDE_LEVEL__",
+            "__BASE_FILE__",
+            "__FILE_NAME__",
+        ] {
+            assert!(!dumped.text.contains(&format!("#define {name} ")), "{name}");
+        }
+        assert!(dumped.text.contains("#define __STDC__ 1\n"), "{}", dumped.text);
+        let own = run(&opts, &[("/main.c", "#undef __DATE__\n#define __DATE__ \"now\"\n")]);
+        assert!(own.text.contains("#define __DATE__ \"now\"\n"), "{}", own.text);
+    }
+
+    #[test]
+    fn the_dialect_reaches_the_predefined_set() {
+        let mut opts = options();
+        opts.std = rucc_session::Std::C99;
+        opts.gnu_extensions = false;
+        let result = run(&opts, &[("/main.c", "__STDC_VERSION__ __STRICT_ANSI__\n")]);
+        assert_eq!(result.text, "# 1 \"/main.c\"\n199901L 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_directory_answers_for_what_is_not_in_it_and_never_for_what_is() {
+        let dir = std::env::temp_dir().join(format!("rucc-listing-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("here.h"), "1").unwrap();
+        std::fs::write(dir.join("sub/deep.h"), "2").unwrap();
+        let fs = OsFileSystem::new();
+        let missing = |path: &Path| fs.read(path).unwrap_err().kind() == io::ErrorKind::NotFound;
+
+        // The first miss is an open, and it is what has the directory listed.
+        assert!(missing(&dir.join("gone.h")));
+        assert!(fs.absent(&dir.join("other.h")).is_some());
+        assert!(missing(&dir.join("other.h")));
+        assert_eq!(&*fs.read(&dir.join("here.h")).unwrap(), b"1");
+
+        // A directory the listing does not have has nothing in it, and one it has is opened.
+        assert!(fs.absent(&dir.join("nowhere/x.h")).is_some());
+        assert!(missing(&dir.join("nowhere/y.h")));
+        assert_eq!(fs.absent(&dir.join("sub/deep.h")), None);
+        assert_eq!(&*fs.read(&dir.join("sub/deep.h")).unwrap(), b"2");
+
+        // A name that differs only in case is looked for, since the file system may fold it.
+        assert_eq!(fs.absent(&dir.join("HERE.h")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

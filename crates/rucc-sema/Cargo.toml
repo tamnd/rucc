@@ -1,0 +1,26 @@
+[package]
+name = "rucc-sema"
+description = "Type checking, conversions, initialization, constant evaluation, and the typed AST."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rucc-ast.workspace = true
+rucc-base.workspace = true
+rucc-diag.workspace = true
+rucc-gnu.workspace = true
+rucc-lex.workspace = true
+rucc-session.workspace = true
+rucc-target.workspace = true
+rucc-types.workspace = true

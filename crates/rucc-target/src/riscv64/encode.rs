@@ -1,0 +1,1727 @@
+//! Encoding one RISC-V instruction as the words the machine runs.
+//!
+//! Design: `spec/11-asm-objects-debug.md` section 11.1, and the RISC-V unprivileged specification
+//! for RV64G, which is the base integer set with the M, A, F and D extensions.
+//!
+//! What this takes is what GNU as takes: a mnemonic and its operands in the order the text writes
+//! them, including the pseudo instructions the listing uses, such as `li`, `mv`, `call` and `beqz`.
+//! A pseudo is the words GNU as writes for it, which is more than one for a constant that does not
+//! fit twelve bits, for the address of a symbol and for a call. Nothing here writes the compressed
+//! forms. An instruction is always four bytes, which is what keeps a distance inside an opcode the
+//! same number of words in the object as in the listing.
+//!
+//! A symbol is left as zeros and a [`Fixup`] that says which bits it goes in, at the word of the
+//! instruction it belongs to. The assembler decides which of them the linker may relax, which it
+//! marks with a [`Fixup::Relax`] at the same place.
+
+use std::fmt;
+
+/// Which part of a symbol's address an operand asks for, spelled in the text as `%lo()` and the
+/// like around the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operator {
+    /// The address itself, or the distance to it, which is what a bare name means.
+    Plain,
+    /// The upper twenty bits of the address, rounded so the low twelve can be added as a signed
+    /// number, `%hi()`.
+    Hi,
+    /// The low twelve bits of the address, `%lo()`.
+    Lo,
+    /// The upper twenty bits of the offset from the thread pointer, `%tprel_hi()`.
+    TprelHi,
+    /// The low twelve bits of it, `%tprel_lo()`.
+    TprelLo,
+    /// The mark on the `add` of the thread pointer, `%tprel_add()`, which only tells the linker
+    /// which instruction it is.
+    TprelAdd,
+    /// The upper twenty bits of the distance to the symbol from the `auipc` that carries them,
+    /// `%pcrel_hi()`.
+    PcrelHi,
+    /// The low twelve bits of that distance, `%pcrel_lo()`, around the label of the `auipc` and
+    /// not the symbol, since the linker finds the distance through the `auipc`.
+    PcrelLo,
+}
+
+/// What is added to the base register of an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offset {
+    /// A number, which the machine carries in twelve signed bits.
+    Imm(i64),
+    /// Part of a symbol's address, which is left for a relocation to fill in.
+    Symbol(Operator),
+}
+
+/// An address, which on this machine is a register and something added to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Addr {
+    /// The register the address starts from.
+    pub base: u8,
+    /// What is added to it.
+    pub offset: Offset,
+}
+
+/// How a floating point instruction rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Round {
+    /// To nearest, ties to even, `rne`.
+    Rne,
+    /// Toward zero, `rtz`, which is how C converts a float to an integer.
+    Rtz,
+    /// Down, `rdn`.
+    Rdn,
+    /// Up, `rup`.
+    Rup,
+    /// To nearest, ties away from zero, `rmm`.
+    Rmm,
+    /// Whatever the rounding mode register says, `dyn`.
+    Dyn,
+}
+
+impl Round {
+    /// The three bits the encoding gives it.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        match self {
+            Round::Rne => 0,
+            Round::Rtz => 1,
+            Round::Rdn => 2,
+            Round::Rup => 3,
+            Round::Rmm => 4,
+            Round::Dyn => 7,
+        }
+    }
+
+    /// The name the text gives it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Round::Rne => "rne",
+            Round::Rtz => "rtz",
+            Round::Rdn => "rdn",
+            Round::Rup => "rup",
+            Round::Rmm => "rmm",
+            Round::Dyn => "dyn",
+        }
+    }
+}
+
+/// What one operand of an instruction is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Value {
+    /// An integer register, where zero is the one that reads as zero.
+    Gpr(u8),
+    /// A floating point register.
+    Fpr(u8),
+    /// A number.
+    Imm(i64),
+    /// An address in memory.
+    Mem(Addr),
+    /// A symbol, or part of its address, which is left for a relocation.
+    Symbol(Operator),
+    /// How a floating point instruction rounds, when the text says.
+    Round(Round),
+    /// Which accesses one side of a `fence` orders, as the four bits the encoding gives them:
+    /// eight for device input, four for device output, two for reads and one for writes.
+    Order(u8),
+}
+
+/// What a linker fills in, named after the `R_RISCV_` relocations without that in front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fixup {
+    /// The distance a conditional branch goes, in twelve bits of two byte steps.
+    Branch,
+    /// The distance `jal` goes, in twenty bits of two byte steps.
+    Jal,
+    /// The distance to what `call` or `tail` reaches, across the `auipc` and the `jalr` after it.
+    CallPlt,
+    /// The upper twenty bits of the distance to a symbol, in an `auipc`.
+    PcrelHi20,
+    /// The low twelve bits of that distance, in the `addi` or load after the `auipc`.
+    PcrelLo12I,
+    /// The same in a store.
+    PcrelLo12S,
+    /// The upper twenty bits of the distance to the symbol's global offset table entry.
+    GotHi20,
+    /// The upper twenty bits of the distance to the global offset table entry that holds a
+    /// thread-local variable's offset from the thread pointer, which is `la.tls.ie`.
+    TlsGotHi20,
+    /// The upper twenty bits of the address, in a `lui`.
+    Hi20,
+    /// The low twelve bits of the address, in an `addi` or a load.
+    Lo12I,
+    /// The same in a store.
+    Lo12S,
+    /// The upper twenty bits of the offset from the thread pointer.
+    TprelHi20,
+    /// The low twelve bits of it, in an `addi` or a load.
+    TprelLo12I,
+    /// The same in a store.
+    TprelLo12S,
+    /// The `add` of the thread pointer, which carries no bits of anything.
+    TprelAdd,
+    /// The low six bits of a byte less the value, which only `.reloc` writes.
+    Sub6,
+    /// The low six bits of a byte set to the value, which only `.reloc` writes.
+    Set6,
+    /// A byte set to the value, which only `.reloc` writes.
+    Set8,
+    /// Two bytes set to the value, which only `.reloc` writes.
+    Set16,
+    /// Four bytes set to the value, which only `.reloc` writes.
+    Set32,
+    /// A byte less the value, the second half of a difference of two places in code.
+    Sub8,
+    /// Two bytes less the value.
+    Sub16,
+    /// Four bytes less the value.
+    Sub32,
+    /// The instruction at the same place may be shortened by the linker. It reaches no symbol.
+    Relax,
+    /// Padding the linker removes down to what the alignment needs. The addend is how many bytes
+    /// of it there are, and it reaches no symbol.
+    Align,
+}
+
+impl Fixup {
+    /// The ELF relocation number the psABI gives it.
+    #[must_use]
+    pub const fn elf(self) -> u32 {
+        match self {
+            Fixup::Branch => 16,
+            Fixup::Jal => 17,
+            Fixup::CallPlt => 19,
+            Fixup::GotHi20 => 20,
+            Fixup::TlsGotHi20 => 21,
+            Fixup::PcrelHi20 => 23,
+            Fixup::PcrelLo12I => 24,
+            Fixup::PcrelLo12S => 25,
+            Fixup::Hi20 => 26,
+            Fixup::Lo12I => 27,
+            Fixup::Lo12S => 28,
+            Fixup::TprelHi20 => 29,
+            Fixup::TprelLo12I => 30,
+            Fixup::TprelLo12S => 31,
+            Fixup::TprelAdd => 32,
+            Fixup::Sub6 => 52,
+            Fixup::Set6 => 53,
+            Fixup::Set8 => 54,
+            Fixup::Set16 => 55,
+            Fixup::Set32 => 56,
+            Fixup::Sub8 => 37,
+            Fixup::Sub16 => 38,
+            Fixup::Sub32 => 39,
+            Fixup::Relax => 51,
+            Fixup::Align => 43,
+        }
+    }
+
+    /// The relocation's name, as readelf prints it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Fixup::Branch => "R_RISCV_BRANCH",
+            Fixup::Jal => "R_RISCV_JAL",
+            Fixup::CallPlt => "R_RISCV_CALL_PLT",
+            Fixup::GotHi20 => "R_RISCV_GOT_HI20",
+            Fixup::TlsGotHi20 => "R_RISCV_TLS_GOT_HI20",
+            Fixup::PcrelHi20 => "R_RISCV_PCREL_HI20",
+            Fixup::PcrelLo12I => "R_RISCV_PCREL_LO12_I",
+            Fixup::PcrelLo12S => "R_RISCV_PCREL_LO12_S",
+            Fixup::Hi20 => "R_RISCV_HI20",
+            Fixup::Lo12I => "R_RISCV_LO12_I",
+            Fixup::Lo12S => "R_RISCV_LO12_S",
+            Fixup::TprelHi20 => "R_RISCV_TPREL_HI20",
+            Fixup::TprelLo12I => "R_RISCV_TPREL_LO12_I",
+            Fixup::TprelLo12S => "R_RISCV_TPREL_LO12_S",
+            Fixup::TprelAdd => "R_RISCV_TPREL_ADD",
+            Fixup::Sub6 => "R_RISCV_SUB6",
+            Fixup::Set6 => "R_RISCV_SET6",
+            Fixup::Set8 => "R_RISCV_SET8",
+            Fixup::Set16 => "R_RISCV_SET16",
+            Fixup::Set32 => "R_RISCV_SET32",
+            Fixup::Sub8 => "R_RISCV_SUB8",
+            Fixup::Sub16 => "R_RISCV_SUB16",
+            Fixup::Sub32 => "R_RISCV_SUB32",
+            Fixup::Relax => "R_RISCV_RELAX",
+            Fixup::Align => "R_RISCV_ALIGN",
+        }
+    }
+
+    /// Whether it reaches a thread-local variable, which makes the name it reaches one.
+    #[must_use]
+    pub const fn thread(self) -> bool {
+        matches!(
+            self,
+            Fixup::TlsGotHi20
+                | Fixup::TprelHi20
+                | Fixup::TprelLo12I
+                | Fixup::TprelLo12S
+                | Fixup::TprelAdd
+        )
+    }
+
+    /// Whether it is a distance from the instruction it is in to somewhere in the same section,
+    /// which an assembler can work out on its own.
+    ///
+    /// Only the branches and `jal`. The `auipc` pairs are distances too, but gas leaves them to
+    /// the linker however near the name is, and so does this.
+    #[must_use]
+    pub const fn relative(self) -> bool {
+        matches!(self, Fixup::Branch | Fixup::Jal)
+    }
+
+    /// The word with the distance filled in, or `None` when it is odd, does not fit, or the
+    /// fixup is not one [`Fixup::relative`] says is worked out here.
+    #[must_use]
+    pub const fn apply(self, word: u32, value: i64) -> Option<u32> {
+        if value % 2 != 0 {
+            return None;
+        }
+        // The opcode bits are the only ones the two forms put anything in when every register is
+        // zero, so masking them off leaves just where the distance goes.
+        match self {
+            Fixup::Branch if fits(value, 13) => Some(word | (b(0, 0, 0, value) & !0x7f)),
+            Fixup::Jal if fits(value, 21) => Some(word | (j(0, value) & !0x7f)),
+            _ => None,
+        }
+    }
+}
+
+/// One instruction as words, and what is left to fill in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
+    /// The words, with zeros where a symbol's address or a label's distance goes.
+    pub words: Vec<u32>,
+    /// How to fill those in, each with the index of the word it is at. A `%pcrel_lo` belongs to
+    /// the `auipc` in front of it, which is the word before.
+    pub fixups: Vec<(usize, Fixup)>,
+}
+
+/// Why an instruction could not be encoded.
+///
+/// Each is a bug in whatever produced the instruction rather than anything a C program could ask
+/// for, so they say which instruction it was and not much more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// Nothing here encodes that mnemonic with those operands.
+    Unwritten {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+        /// How many operands it was given.
+        operands: usize,
+    },
+    /// A number that the instruction cannot carry.
+    Immediate {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+        /// The number.
+        imm: i64,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Unwritten { mnemonic, operands } => {
+                write!(f, "no encoding for {mnemonic} with {operands} operands of those kinds")
+            }
+            Error::Immediate { mnemonic, imm } => {
+                write!(f, "{mnemonic} cannot carry the immediate {imm}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Whether a number fits in that many bits as a signed number.
+#[must_use]
+pub const fn fits(imm: i64, bits: u32) -> bool {
+    let half = 1i64 << (bits - 1);
+    -half <= imm && imm < half
+}
+
+/// The low twelve bits of a number, read back as a signed number, which is what an `addi` after
+/// a `lui` or an `auipc` adds.
+const fn low12(imm: i64) -> i64 {
+    ((imm & 0xfff) ^ 0x800) - 0x800
+}
+
+/// The opcode, the `funct3` and the `funct7` of the register forms.
+fn alu(mnemonic: &str) -> Option<(u32, u32, u32)> {
+    Some(match mnemonic {
+        "add" => (0x33, 0, 0),
+        "sub" => (0x33, 0, 0x20),
+        "sll" => (0x33, 1, 0),
+        "slt" => (0x33, 2, 0),
+        "sltu" => (0x33, 3, 0),
+        "xor" => (0x33, 4, 0),
+        "srl" => (0x33, 5, 0),
+        "sra" => (0x33, 5, 0x20),
+        "or" => (0x33, 6, 0),
+        "and" => (0x33, 7, 0),
+        "mul" => (0x33, 0, 1),
+        "mulh" => (0x33, 1, 1),
+        "mulhsu" => (0x33, 2, 1),
+        "mulhu" => (0x33, 3, 1),
+        "div" => (0x33, 4, 1),
+        "divu" => (0x33, 5, 1),
+        "rem" => (0x33, 6, 1),
+        "remu" => (0x33, 7, 1),
+        "addw" => (0x3b, 0, 0),
+        "subw" => (0x3b, 0, 0x20),
+        "sllw" => (0x3b, 1, 0),
+        "srlw" => (0x3b, 5, 0),
+        "sraw" => (0x3b, 5, 0x20),
+        "mulw" => (0x3b, 0, 1),
+        "divw" => (0x3b, 4, 1),
+        "divuw" => (0x3b, 5, 1),
+        "remw" => (0x3b, 6, 1),
+        "remuw" => (0x3b, 7, 1),
+        // Zbb.
+        "andn" => (0x33, 7, 0x20),
+        "orn" => (0x33, 6, 0x20),
+        "xnor" => (0x33, 4, 0x20),
+        "min" => (0x33, 4, 0x05),
+        "minu" => (0x33, 5, 0x05),
+        "max" => (0x33, 6, 0x05),
+        "maxu" => (0x33, 7, 0x05),
+        "rol" => (0x33, 1, 0x30),
+        "ror" => (0x33, 5, 0x30),
+        "rolw" => (0x3b, 1, 0x30),
+        "rorw" => (0x3b, 5, 0x30),
+        // Zba.
+        "sh1add" => (0x33, 2, 0x10),
+        "sh2add" => (0x33, 4, 0x10),
+        "sh3add" => (0x33, 6, 0x10),
+        "add.uw" => (0x3b, 0, 0x04),
+        "sh1add.uw" => (0x3b, 2, 0x10),
+        "sh2add.uw" => (0x3b, 4, 0x10),
+        "sh3add.uw" => (0x3b, 6, 0x10),
+        // Zbs.
+        "bclr" => (0x33, 1, 0x24),
+        "bext" => (0x33, 5, 0x24),
+        "binv" => (0x33, 1, 0x34),
+        "bset" => (0x33, 1, 0x14),
+        // Zbc, the carry-less multiplies.
+        "clmul" => (0x33, 1, 0x05),
+        "clmulr" => (0x33, 2, 0x05),
+        "clmulh" => (0x33, 3, 0x05),
+        // Zbkb.
+        "pack" => (0x33, 4, 0x04),
+        "packh" => (0x33, 7, 0x04),
+        "packw" => (0x3b, 4, 0x04),
+        _ => return None,
+    })
+}
+
+/// The opcode and the `funct3` of the forms with a twelve bit constant.
+fn alu_imm(mnemonic: &str) -> Option<(u32, u32)> {
+    Some(match mnemonic {
+        "addi" => (0x13, 0),
+        "slti" => (0x13, 2),
+        "sltiu" => (0x13, 3),
+        "xori" => (0x13, 4),
+        "ori" => (0x13, 6),
+        "andi" => (0x13, 7),
+        "addiw" => (0x1b, 0),
+        _ => return None,
+    })
+}
+
+/// The opcode, the `funct3`, the bits above the count, and how many bits the count has, of the
+/// shifts by a constant.
+fn shift_imm(mnemonic: &str) -> Option<(u32, u32, u32, u32)> {
+    Some(match mnemonic {
+        "slli" => (0x13, 1, 0, 6),
+        "srli" => (0x13, 5, 0, 6),
+        "srai" => (0x13, 5, 0x10 << 6, 6),
+        "slliw" => (0x1b, 1, 0, 5),
+        "srliw" => (0x1b, 5, 0, 5),
+        "sraiw" => (0x1b, 5, 0x20 << 5, 5),
+        "rori" => (0x13, 5, 0x18 << 6, 6),
+        "roriw" => (0x1b, 5, 0x30 << 5, 5),
+        "slli.uw" => (0x1b, 1, 0x02 << 6, 6),
+        "bclri" => (0x13, 1, 0x12 << 6, 6),
+        "bexti" => (0x13, 5, 0x12 << 6, 6),
+        "binvi" => (0x13, 1, 0x1a << 6, 6),
+        "bseti" => (0x13, 1, 0x0a << 6, 6),
+        _ => return None,
+    })
+}
+
+/// The opcode, the `funct3` and the twelve bits that pick the operation, of the bit manipulation
+/// instructions with one source register.
+fn unary(mnemonic: &str) -> Option<(u32, u32, i64)> {
+    Some(match mnemonic {
+        "clz" => (0x13, 1, 0x600),
+        "ctz" => (0x13, 1, 0x601),
+        "cpop" => (0x13, 1, 0x602),
+        "sext.b" => (0x13, 1, 0x604),
+        "sext.h" => (0x13, 1, 0x605),
+        "clzw" => (0x1b, 1, 0x600),
+        "ctzw" => (0x1b, 1, 0x601),
+        "cpopw" => (0x1b, 1, 0x602),
+        "zext.h" => (0x3b, 4, 0x080),
+        "rev8" => (0x13, 5, 0x6b8),
+        "orc.b" => (0x13, 5, 0x287),
+        "brev8" => (0x13, 5, 0x687),
+        _ => return None,
+    })
+}
+
+/// The form with a constant of a register instruction written with one, `and t2, t2, 7`, which
+/// llvm-mc reads as `andi` and the kernel's `strcmp.S` writes.
+fn with_constant(mnemonic: &str) -> Option<&'static str> {
+    Some(match mnemonic {
+        "add" => "addi",
+        "addw" => "addiw",
+        "and" => "andi",
+        "or" => "ori",
+        "xor" => "xori",
+        "slt" => "slti",
+        "sltu" => "sltiu",
+        "sll" => "slli",
+        "srl" => "srli",
+        "sra" => "srai",
+        "sllw" => "slliw",
+        "srlw" => "srliw",
+        "sraw" => "sraiw",
+        _ => return None,
+    })
+}
+
+/// The opcode and the `funct3` of the loads, which take an integer or a floating point register.
+fn load(mnemonic: &str) -> Option<(u32, u32, bool)> {
+    Some(match mnemonic {
+        "lb" => (0x03, 0, false),
+        "lh" => (0x03, 1, false),
+        "lw" => (0x03, 2, false),
+        "ld" => (0x03, 3, false),
+        "lbu" => (0x03, 4, false),
+        "lhu" => (0x03, 5, false),
+        "lwu" => (0x03, 6, false),
+        "flw" => (0x07, 2, true),
+        "fld" => (0x07, 3, true),
+        _ => return None,
+    })
+}
+
+/// The same for the stores.
+fn store(mnemonic: &str) -> Option<(u32, u32, bool)> {
+    Some(match mnemonic {
+        "sb" => (0x23, 0, false),
+        "sh" => (0x23, 1, false),
+        "sw" => (0x23, 2, false),
+        "sd" => (0x23, 3, false),
+        "fsw" => (0x27, 2, true),
+        "fsd" => (0x27, 3, true),
+        _ => return None,
+    })
+}
+
+/// The `funct3` of the conditional branches.
+fn branch(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "beq" => 0,
+        "bne" => 1,
+        "blt" => 4,
+        "bge" => 5,
+        "bltu" => 6,
+        "bgeu" => 7,
+        _ => return None,
+    })
+}
+
+/// The `funct5`, the `funct3` and the ordering bits of the A extension's instructions, which are
+/// `lr`, `sc` and the `amo` operations, at `.w` or `.d`, with `.aq`, `.rl` or `.aqrl` after it.
+/// Zabha adds `.b` and `.h` to the `amo` operations, and `amocas.q` takes register pairs.
+fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = mnemonic.split('.');
+    let f5 = match parts.next()? {
+        "lr" => 0x02,
+        "sc" => 0x03,
+        "amoswap" => 0x01,
+        "amoadd" => 0x00,
+        "amoxor" => 0x04,
+        "amoand" => 0x0c,
+        "amoor" => 0x08,
+        "amomin" => 0x10,
+        "amomax" => 0x14,
+        "amominu" => 0x18,
+        "amomaxu" => 0x1c,
+        // Zacas, compare and swap.
+        "amocas" => 0x05,
+        // Zicfiss, the swap on the shadow stack.
+        "ssamoswap" => 0x09,
+        _ => return None,
+    };
+    let f3 = match parts.next()? {
+        "b" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 0,
+        "h" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 1,
+        "w" => 2,
+        "d" => 3,
+        "q" if f5 == 0x05 => 4,
+        _ => return None,
+    };
+    let order = match parts.next() {
+        None => 0,
+        Some("aq") => 2,
+        Some("rl") => 1,
+        Some("aqrl") => 3,
+        Some(_) => return None,
+    };
+    parts.next().is_none().then_some((f5, f3, order))
+}
+
+/// The number of the CSR one of the floating point pseudo instructions reads or writes.
+fn fp_csr(mnemonic: &str) -> i64 {
+    if mnemonic.contains("csr") {
+        3
+    } else if mnemonic.contains("rm") {
+        2
+    } else {
+        1
+    }
+}
+
+/// The `funct3` of the CSR instructions that take a register, `csrrw`, `csrrs` and `csrrc`, and
+/// of the pseudo instructions that write those with `zero` as the destination. The form that
+/// takes a five bit constant instead is four more.
+fn csr(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "csrrw" | "csrw" | "csrrwi" | "csrwi" => 1,
+        "csrrs" | "csrs" | "csrrsi" | "csrsi" => 2,
+        "csrrc" | "csrc" | "csrrci" | "csrci" => 3,
+        _ => return None,
+    })
+}
+
+const fn r(op: u32, f3: u32, f7: u32, rd: u8, rs1: u8, rs2: u8) -> u32 {
+    (f7 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (f3 << 12) | ((rd as u32) << 7) | op
+}
+
+const fn i(op: u32, f3: u32, rd: u8, rs1: u8, imm: i64) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | ((rs1 as u32) << 15) | (f3 << 12) | ((rd as u32) << 7) | op
+}
+
+const fn s(op: u32, f3: u32, rs1: u8, rs2: u8, imm: i64) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 5) & 0x7f) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | ((imm & 0x1f) << 7)
+        | op
+}
+
+const fn b(f3: u32, rs1: u8, rs2: u8, imm: i64) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 12) & 1) << 31)
+        | (((imm >> 5) & 0x3f) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | (((imm >> 1) & 0xf) << 8)
+        | (((imm >> 11) & 1) << 7)
+        | 0x63
+}
+
+const fn u(op: u32, rd: u8, imm20: i64) -> u32 {
+    (((imm20 as u32) & 0xfffff) << 12) | ((rd as u32) << 7) | op
+}
+
+const fn j(rd: u8, imm: i64) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 20) & 1) << 31)
+        | (((imm >> 1) & 0x3ff) << 21)
+        | (((imm >> 11) & 1) << 20)
+        | (((imm >> 12) & 0xff) << 12)
+        | ((rd as u32) << 7)
+        | 0x6f
+}
+
+/// The return address register, the temporary `tail` goes through, and the zero register.
+const RA: u8 = 1;
+const T1: u8 = 6;
+const ZERO: u8 = 0;
+
+/// The scratch register a far constant goes through, `t5`.
+pub const FAR: u8 = 30;
+
+/// The words `li` writes for a constant, which are the ones GNU as writes for it in the cases a
+/// program usually has: one `addi` for twelve bits, a `lui` and an `addiw` for thirty two, and
+/// for anything wider the upper part built the same way, shifted up and the low twelve bits added.
+/// An upper part of twelve bits is an `addiw`, which is what gas builds it with.
+fn li(rd: u8, imm: i64, words: &mut Vec<u32>) {
+    build(rd, imm, false, words);
+}
+
+/// The words for `li`, where `upper` says this is the upper part of a wider constant.
+fn build(rd: u8, imm: i64, upper: bool, words: &mut Vec<u32>) {
+    if let Ok(small) = i32::try_from(imm) {
+        let lo = low12(imm);
+        let hi = (i64::from(small) - lo) >> 12;
+        if hi == 0 {
+            words.push(i(if upper { 0x1b } else { 0x13 }, 0, rd, ZERO, lo));
+        } else {
+            words.push(u(0x37, rd, hi));
+            if lo != 0 {
+                words.push(i(0x1b, 0, rd, rd, lo));
+            }
+        }
+        return;
+    }
+    // The arithmetic is modulo two to the sixty four, the same as the machine's, so a constant
+    // near either end that wraps on the way still comes out as itself.
+    let lo = low12(imm);
+    let hi = imm.wrapping_sub(lo) >> 12;
+    let shift = 12 + hi.trailing_zeros();
+    build(rd, hi >> (shift - 12), true, words);
+    words.push(i(0x13, 1, rd, rd, i64::from(shift)));
+    if lo != 0 {
+        words.push(i(0x13, 0, rd, rd, lo));
+    }
+}
+
+/// How many words `li` writes for a constant.
+#[must_use]
+pub fn li_words(imm: i64) -> usize {
+    let mut words = Vec::new();
+    li(0, imm, &mut words);
+    words.len()
+}
+
+/// The format bits of a floating point mnemonic's suffix, zero for single and one for double.
+fn format(suffix: &str) -> Option<u32> {
+    match suffix {
+        "s" => Some(0),
+        "d" => Some(1),
+        _ => None,
+    }
+}
+
+/// The two bits a conversion gives an integer type, `w`, `wu`, `l` and `lu`.
+fn integer(suffix: &str) -> Option<u32> {
+    match suffix {
+        "w" => Some(0),
+        "wu" => Some(1),
+        "l" => Some(2),
+        "lu" => Some(3),
+        _ => None,
+    }
+}
+
+/// The `funct7` of a hypervisor fence: `hfence.vvma` for the guest's own translation, and
+/// `hfence.gvma` for the one from the guest's physical addresses.
+fn hfence(mnemonic: &str) -> u32 {
+    if mnemonic == "hfence.vvma" { 0x11 } else { 0x31 }
+}
+
+/// The `funct7` and the `rs2` of a hypervisor load, `hlv` and `hlvx`, by the width and the sign.
+/// `hlvx` reads with the permission to run rather than to read.
+fn hlv(mnemonic: &str) -> Option<(u32, u8)> {
+    Some(match mnemonic {
+        "hlv.b" => (0x30, 0),
+        "hlv.bu" => (0x30, 1),
+        "hlv.h" => (0x32, 0),
+        "hlv.hu" => (0x32, 1),
+        "hlvx.hu" => (0x32, 3),
+        "hlv.w" => (0x34, 0),
+        "hlv.wu" => (0x34, 1),
+        "hlvx.wu" => (0x34, 3),
+        "hlv.d" => (0x36, 0),
+        _ => return None,
+    })
+}
+
+/// The `funct7` of a hypervisor store, by the width.
+fn hsv(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "hsv.b" => 0x31,
+        "hsv.h" => 0x33,
+        "hsv.w" => 0x35,
+        "hsv.d" => 0x37,
+        _ => return None,
+    })
+}
+
+/// Writes one instruction.
+///
+/// # Errors
+///
+/// When nothing here encodes that mnemonic with those operands and when a number does not fit
+/// the instruction. See [`Error`].
+pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
+    let mut out = Encoded { words: Vec::new(), fixups: Vec::new() };
+    let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
+    let immediate = |imm| Error::Immediate { mnemonic: mnemonic.to_owned(), imm };
+    let twelve = |imm: i64| if fits(imm, 12) { Ok(imm) } else { Err(immediate(imm)) };
+    use Value::{Fpr, Gpr, Imm, Mem, Symbol};
+
+    if let (Some(constant), [Gpr(_), Gpr(_), Imm(_)]) = (with_constant(mnemonic), values) {
+        return encode(constant, values);
+    }
+    if let Some((op, f3, imm)) = unary(mnemonic) {
+        let [Gpr(rd), Gpr(rs)] = *values else { return Err(unwritten()) };
+        out.words.push(i(op, f3, rd, rs, imm));
+        return Ok(out);
+    }
+    // An `add` marked `%tprel_add` and an `addi` of the low half of an address are below, with
+    // their fixups.
+    if let (Some((op, f3, f7)), [Gpr(rd), Gpr(rs1), Gpr(rs2)]) = (alu(mnemonic), values) {
+        out.words.push(r(op, f3, f7, *rd, *rs1, *rs2));
+        return Ok(out);
+    }
+    if let (Some((op, f3)), [Gpr(rd), Gpr(rs1), Imm(imm)]) = (alu_imm(mnemonic), values) {
+        out.words.push(i(op, f3, *rd, *rs1, twelve(*imm)?));
+        return Ok(out);
+    }
+    if let Some((op, f3, high, bits)) = shift_imm(mnemonic) {
+        let [Gpr(rd), Gpr(rs1), Imm(imm)] = *values else { return Err(unwritten()) };
+        if !(0..1 << bits).contains(&imm) {
+            return Err(immediate(imm));
+        }
+        out.words.push(i(op, f3, rd, rs1, i64::from(high) | imm));
+        return Ok(out);
+    }
+    if let Some((op, f3, fp)) = load(mnemonic) {
+        // A load from a label is the `auipc` to it and the load from what that leaves, through
+        // the destination, or for a floating point one through the register written last.
+        let (rd, through) = match *values {
+            [Gpr(rd), Symbol(Operator::Plain)] if !fp => (rd, Some(rd)),
+            [Fpr(rd), Symbol(Operator::Plain), Gpr(temp)] if fp => (rd, Some(temp)),
+            [Gpr(rd) | Fpr(rd), Mem(_)] => (rd, None),
+            _ => return Err(unwritten()),
+        };
+        if let Some(through) = through {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12I));
+            out.words.push(u(0x17, through, 0));
+            out.words.push(i(op, f3, rd, through, 0));
+            return Ok(out);
+        }
+        let (rd, addr) = match *values {
+            [Gpr(rd), Mem(addr)] if !fp => (rd, addr),
+            [Fpr(rd), Mem(addr)] if fp => (rd, addr),
+            _ => return Err(unwritten()),
+        };
+        let imm = match addr.offset {
+            Offset::Imm(imm) => twelve(imm)?,
+            Offset::Symbol(Operator::Lo) => {
+                out.fixups.push((0, Fixup::Lo12I));
+                0
+            }
+            Offset::Symbol(Operator::TprelLo) => {
+                out.fixups.push((0, Fixup::TprelLo12I));
+                0
+            }
+            Offset::Symbol(Operator::PcrelLo) => {
+                out.fixups.push((0, Fixup::PcrelLo12I));
+                0
+            }
+            Offset::Symbol(_) => return Err(unwritten()),
+        };
+        out.words.push(i(op, f3, rd, addr.base, imm));
+        return Ok(out);
+    }
+    if let Some((op, f3, fp)) = store(mnemonic) {
+        // A store to a label always names the register the `auipc` goes in.
+        if let [Gpr(rs2) | Fpr(rs2), Symbol(Operator::Plain), Gpr(temp)] = *values {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12S));
+            out.words.push(u(0x17, temp, 0));
+            out.words.push(s(op, f3, temp, rs2, 0));
+            return Ok(out);
+        }
+        let (rs2, addr) = match *values {
+            [Gpr(rs2), Mem(addr)] if !fp => (rs2, addr),
+            [Fpr(rs2), Mem(addr)] if fp => (rs2, addr),
+            _ => return Err(unwritten()),
+        };
+        let imm = match addr.offset {
+            Offset::Imm(imm) => twelve(imm)?,
+            Offset::Symbol(Operator::Lo) => {
+                out.fixups.push((0, Fixup::Lo12S));
+                0
+            }
+            Offset::Symbol(Operator::TprelLo) => {
+                out.fixups.push((0, Fixup::TprelLo12S));
+                0
+            }
+            Offset::Symbol(Operator::PcrelLo) => {
+                out.fixups.push((0, Fixup::PcrelLo12S));
+                0
+            }
+            Offset::Symbol(_) => return Err(unwritten()),
+        };
+        out.words.push(s(op, f3, addr.base, rs2, imm));
+        return Ok(out);
+    }
+    if let Some(f3) = branch(mnemonic) {
+        let [Gpr(rs1), Gpr(rs2), ref to] = *values else { return Err(unwritten()) };
+        let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+        out.words.push(b(f3, rs1, rs2, imm));
+        return Ok(out);
+    }
+    if mnemonic.starts_with('f') {
+        if let Some(()) = float(mnemonic, values, &mut out).transpose()? {
+            return Ok(out);
+        }
+    }
+
+    if let Some((f5, f3, order)) = atomic(mnemonic) {
+        let (rd, rs2, base) = match *values {
+            [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 == 0x02 => (rd, ZERO, base),
+            [Gpr(rd), Gpr(rs2), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 != 0x02 => {
+                (rd, rs2, base)
+            }
+            _ => return Err(unwritten()),
+        };
+        if f3 == 4 && (rd % 2 != 0 || rs2 % 2 != 0) {
+            return Err(unwritten());
+        }
+        out.words.push(r(0x2f, f3, f5 << 2 | order, rd, base, rs2));
+        return Ok(out);
+    }
+    if let Some(f3) = csr(mnemonic) {
+        // The register form, or the constant form when the source is a number, which is how GNU
+        // as reads `csrs sstatus, 2` as `csrsi`. The pseudo instructions have no destination,
+        // and `csrr` is `csrrs` from `zero`.
+        let (rd, number, source) = match *values {
+            [Gpr(rd), Imm(number), source] if mnemonic.starts_with("csrr") => (rd, number, source),
+            [Imm(number), source] if !mnemonic.starts_with("csrr") => (ZERO, number, source),
+            _ => return Err(unwritten()),
+        };
+        if !(0..1 << 12).contains(&number) {
+            return Err(immediate(number));
+        }
+        let (f3, rs1) = match source {
+            Gpr(rs1) if !mnemonic.ends_with('i') => (f3, rs1),
+            Imm(imm) if (0..32).contains(&imm) => (f3 | 4, imm as u8),
+            Imm(imm) => return Err(immediate(imm)),
+            _ => return Err(unwritten()),
+        };
+        out.words.push(i(0x73, f3, rd, rs1, number));
+        return Ok(out);
+    }
+
+    match (mnemonic, values) {
+        ("csrr", [Gpr(rd), Imm(number)]) if (0..1 << 12).contains(number) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, *number));
+        }
+        // The counters, which are `csrr` of `cycle`, `time` and `instret`.
+        ("rdcycle", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc00)),
+        ("rdtime", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc01)),
+        ("rdinstret", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc02)),
+        // The floating point control and status register, its rounding mode and its flags.
+        ("frcsr" | "frrm" | "frflags", [Gpr(rd)]) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, ZERO, *rs, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rd), Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, *rd, *rs, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, ZERO, *imm as u8, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Gpr(rd), Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, *rd, *imm as u8, fp_csr(mnemonic)));
+        }
+        // Zicfilp's landing pad, which is `auipc zero` with the label in the upper bits.
+        ("lpad", [Imm(label)]) if (0..1 << 20).contains(label) => {
+            out.words.push(u(0x17, ZERO, *label));
+        }
+        // Zicfiss, which only takes `ra` or `t0` for the return address it pushes and checks.
+        ("sspush", [Gpr(rs2 @ (1 | 5))]) => out.words.push(r(0x73, 4, 0x67, ZERO, ZERO, *rs2)),
+        ("sspopchk", [Gpr(rs1 @ (1 | 5))]) => out.words.push(i(0x73, 4, ZERO, *rs1, 0xcdc)),
+        ("ssrdp", [Gpr(rd)]) if *rd != ZERO => out.words.push(i(0x73, 4, *rd, ZERO, 0xcdc)),
+        ("fence.i", []) => out.words.push(0x0000_100f),
+        ("fence.tso", []) => out.words.push(0x8330_000f),
+        ("pause", []) => out.words.push(0x0100_000f),
+        ("wfi", []) => out.words.push(0x1050_0073),
+        ("sret", []) => out.words.push(0x1020_0073),
+        ("mret", []) => out.words.push(0x3020_0073),
+        ("sfence.vma", []) => out.words.push(0x1200_0073),
+        ("sfence.vma", [Gpr(rs1)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, ZERO)),
+        ("sfence.vma", [Gpr(rs1), Gpr(rs2)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, *rs2)),
+        // The hypervisor extension's fences, which take no operand, an address, or an address and
+        // the virtual machine's number, as `sfence.vma` does. FreeBSD's vmm writes them.
+        ("hfence.vvma" | "hfence.gvma", []) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), 0, 0, 0));
+        }
+        ("hfence.vvma" | "hfence.gvma", [Gpr(rs1)]) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), ZERO, *rs1, ZERO));
+        }
+        ("hfence.vvma" | "hfence.gvma", [Gpr(rs1), Gpr(rs2)]) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), ZERO, *rs1, *rs2));
+        }
+        // Svinval: the fence split in two, with its halves around the invalidations. GNU as takes
+        // only the form with both registers for these.
+        ("sinval.vma" | "hinval.vvma" | "hinval.gvma", [Gpr(rs1), Gpr(rs2)]) => {
+            let f7 = match mnemonic {
+                "sinval.vma" => 0x0b,
+                "hinval.vvma" => 0x13,
+                _ => 0x33,
+            };
+            out.words.push(r(0x73, 0, f7, ZERO, *rs1, *rs2));
+        }
+        ("sfence.w.inval", []) => out.words.push(0x1800_0073),
+        ("sfence.inval.ir", []) => out.words.push(0x1810_0073),
+        // Zicbom and Zicboz: write back, throw away or zero the cache block an address is in.
+        // They take a base with no displacement. FreeBSD's riscv cbo.c writes the first three.
+        (
+            "cbo.inval" | "cbo.clean" | "cbo.flush" | "cbo.zero",
+            [Mem(Addr { base, offset: Offset::Imm(0) })],
+        ) => {
+            let which = match mnemonic {
+                "cbo.inval" => 0,
+                "cbo.clean" => 1,
+                "cbo.flush" => 2,
+                _ => 4,
+            };
+            out.words.push(i(0x0f, 2, ZERO, *base, which));
+        }
+        // The hypervisor's loads and stores, which reach memory as the guest sees it. They take
+        // a base with no displacement, as an atomic does.
+        (_, [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })]) if hlv(mnemonic).is_some() => {
+            let (f7, rs2) = hlv(mnemonic).unwrap_or_default();
+            out.words.push(r(0x73, 4, f7, *rd, *base, rs2));
+        }
+        (_, [Gpr(rs2), Mem(Addr { base, offset: Offset::Imm(0) })]) if hsv(mnemonic).is_some() => {
+            let f7 = hsv(mnemonic).unwrap_or_default();
+            out.words.push(r(0x73, 4, f7, ZERO, *base, *rs2));
+        }
+        // The branches GNU as has as the others with their operands swapped or against `zero`.
+        ("bgt" | "ble" | "bgtu" | "bleu", [Gpr(rs1), Gpr(rs2), to]) => {
+            let f3 = match mnemonic {
+                "bgt" => 4,
+                "ble" => 5,
+                "bgtu" => 6,
+                _ => 7,
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, *rs2, *rs1, imm));
+        }
+        ("blez" | "bgez" | "bltz" | "bgtz", [Gpr(rs), to]) => {
+            let (f3, rs1, rs2) = match mnemonic {
+                "blez" => (5, ZERO, *rs),
+                "bgez" => (5, *rs, ZERO),
+                "bltz" => (4, *rs, ZERO),
+                _ => (4, ZERO, *rs),
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, rs1, rs2, imm));
+        }
+        ("zext.b", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 7, *rd, *rs, 0xff)),
+        ("jalr", [Gpr(rd), Gpr(rs), Imm(imm)]) => {
+            out.words.push(i(0x67, 0, *rd, *rs, twelve(*imm)?));
+        }
+        ("lui", [Gpr(rd), Imm(imm)]) if (0..1 << 20).contains(imm) => {
+            out.words.push(u(0x37, *rd, *imm));
+        }
+        ("lui", [Gpr(rd), Symbol(op @ (Operator::Hi | Operator::TprelHi))]) => {
+            let fixup = if *op == Operator::Hi { Fixup::Hi20 } else { Fixup::TprelHi20 };
+            out.fixups.push((0, fixup));
+            out.words.push(u(0x37, *rd, 0));
+        }
+        ("auipc", [Gpr(rd), Imm(imm)]) if (0..1 << 20).contains(imm) => {
+            out.words.push(u(0x17, *rd, *imm));
+        }
+        ("auipc", [Gpr(rd), Symbol(Operator::PcrelHi)]) => {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.words.push(u(0x17, *rd, 0));
+        }
+        ("jal", [Gpr(rd), to]) => {
+            let imm = distance(to, 21, &mut out, Fixup::Jal).ok_or_else(unwritten)??;
+            out.words.push(j(*rd, imm));
+        }
+        ("jalr", [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(imm) })]) => {
+            out.words.push(i(0x67, 0, *rd, *base, twelve(*imm)?));
+        }
+        ("ecall", []) => out.words.push(0x0000_0073),
+        ("ebreak", []) => out.words.push(0x0010_0073),
+        ("fence", [Value::Order(pred), Value::Order(succ)]) if *pred < 16 && *succ < 16 => {
+            out.words.push((u32::from(*pred) << 24) | (u32::from(*succ) << 20) | 0x0f);
+        }
+        // The pseudo instructions, as the base instructions GNU as writes for them.
+        ("nop", []) => out.words.push(i(0x13, 0, ZERO, ZERO, 0)),
+        ("li", [Gpr(rd), Imm(imm)]) => li(*rd, *imm, &mut out.words),
+        ("mv" | "move", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 0, *rd, *rs, 0)),
+        ("not", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 4, *rd, *rs, -1)),
+        ("neg", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 0, 0x20, *rd, ZERO, *rs)),
+        ("negw", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x3b, 0, 0x20, *rd, ZERO, *rs)),
+        ("sext.w", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x1b, 0, *rd, *rs, 0)),
+        ("seqz", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 3, *rd, *rs, 1)),
+        ("snez", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 3, 0, *rd, ZERO, *rs)),
+        ("sltz", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 2, 0, *rd, *rs, ZERO)),
+        ("sgtz", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 2, 0, *rd, ZERO, *rs)),
+        ("beqz" | "bnez", [Gpr(rs), to]) => {
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(u32::from(mnemonic == "bnez"), *rs, ZERO, imm));
+        }
+        ("j", [to]) => {
+            let imm = distance(to, 21, &mut out, Fixup::Jal).ok_or_else(unwritten)??;
+            out.words.push(j(ZERO, imm));
+        }
+        ("jr", [Gpr(rs)]) => out.words.push(i(0x67, 0, ZERO, *rs, 0)),
+        ("jalr", [Gpr(rs)]) => out.words.push(i(0x67, 0, RA, *rs, 0)),
+        ("jalr", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x67, 0, *rd, *rs, 0)),
+        // A jump through a register and a displacement, which FreeBSD's `memset.S` writes as
+        // `jr -4(t2)` to land inside a run of stores. GNU as takes the displacement as an address
+        // or after a comma, and either way it is the `jalr` with the link that name implies.
+        ("jr" | "jalr", [Mem(Addr { base, offset: Offset::Imm(imm) })] | [Gpr(base), Imm(imm)]) => {
+            let link = if mnemonic == "jr" { ZERO } else { RA };
+            out.words.push(i(0x67, 0, link, *base, twelve(*imm)?));
+        }
+        ("ret", []) => out.words.push(i(0x67, 0, ZERO, RA, 0)),
+        ("call" | "tail", [Symbol(Operator::Plain)]) => {
+            let (link, through) = if mnemonic == "call" { (RA, RA) } else { (ZERO, T1) };
+            out.fixups.push((0, Fixup::CallPlt));
+            out.words.push(u(0x17, through, 0));
+            out.words.push(i(0x67, 0, link, through, 0));
+        }
+        ("lla" | "la" | "la.tls.ie", [Gpr(rd), Symbol(Operator::Plain)]) => {
+            let got = mnemonic != "lla";
+            let hi = match mnemonic {
+                "lla" => Fixup::PcrelHi20,
+                "la" => Fixup::GotHi20,
+                _ => Fixup::TlsGotHi20,
+            };
+            out.fixups.push((0, hi));
+            out.fixups.push((1, Fixup::PcrelLo12I));
+            out.words.push(u(0x17, *rd, 0));
+            out.words.push(if got { i(0x03, 3, *rd, *rd, 0) } else { i(0x13, 0, *rd, *rd, 0) });
+        }
+        // A constant added to or taken from a register when it may not fit twelve bits, which is
+        // how the frame moves the stack pointer. Not a mnemonic GNU as has: the listing writes it
+        // as the instructions here, and the constant goes through `t5` when it does not fit, which
+        // is the scratch register held back for this.
+        ("addi.far" | "subi.far", [Gpr(rd), Gpr(rs), Imm(imm)]) => {
+            let sub = mnemonic == "subi.far";
+            let near = if sub { imm.checked_neg() } else { Some(*imm) };
+            match near.filter(|&near| fits(near, 12)) {
+                Some(near) => out.words.push(i(0x13, 0, *rd, *rs, near)),
+                None => {
+                    li(FAR, *imm, &mut out.words);
+                    out.words.push(r(0x33, 0, if sub { 0x20 } else { 0 }, *rd, *rs, FAR));
+                }
+            }
+        }
+        // An address any distance from a base register, which is how the frame reaches a slot far
+        // from the stack pointer. The constant is built in the register the address goes in, so
+        // that one may not be the base when it does not fit.
+        ("lea.far", [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(imm) })]) => {
+            if fits(*imm, 12) {
+                out.words.push(i(0x13, 0, *rd, *base, *imm));
+            } else if rd != base {
+                li(*rd, *imm, &mut out.words);
+                out.words.push(r(0x33, 0, 0, *rd, *base, *rd));
+            } else {
+                return Err(immediate(*imm));
+            }
+        }
+        ("add", [Gpr(rd), Gpr(rs1), Gpr(rs2), Symbol(Operator::TprelAdd)]) => {
+            out.fixups.push((0, Fixup::TprelAdd));
+            out.words.push(r(0x33, 0, 0, *rd, *rs1, *rs2));
+        }
+        (
+            "addi",
+            [
+                Gpr(rd),
+                Gpr(rs1),
+                Symbol(op @ (Operator::Lo | Operator::TprelLo | Operator::PcrelLo)),
+            ],
+        ) => {
+            let fixup = match op {
+                Operator::Lo => Fixup::Lo12I,
+                Operator::TprelLo => Fixup::TprelLo12I,
+                _ => Fixup::PcrelLo12I,
+            };
+            out.fixups.push((0, fixup));
+            out.words.push(i(0x13, 0, *rd, *rs1, 0));
+        }
+        _ => return Err(unwritten()),
+    }
+    Ok(out)
+}
+
+/// The distance a branch or a jump carries, from a number of bytes or from a label left for a
+/// fixup, checked against how many bits the instruction has for it.
+///
+/// `None` for an operand that is neither, and an error inside for a number that does not fit or
+/// is odd, since every instruction is at least two bytes from the next.
+fn distance(to: &Value, bits: u32, out: &mut Encoded, fixup: Fixup) -> Option<Result<i64, Error>> {
+    match *to {
+        Value::Imm(imm) if fits(imm, bits) && imm % 2 == 0 => Some(Ok(imm)),
+        Value::Imm(imm) => Some(Err(Error::Immediate { mnemonic: String::from("branch"), imm })),
+        Value::Symbol(Operator::Plain) => {
+            out.fixups.push((0, fixup));
+            Some(Ok(0))
+        }
+        _ => None,
+    }
+}
+
+/// A floating point instruction, or `None` for a mnemonic that is not one.
+fn float(mnemonic: &str, values: &[Value], out: &mut Encoded) -> Option<Result<(), Error>> {
+    use Value::{Fpr, Gpr, Round as Rm};
+    let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
+    let mut parts = mnemonic.split('.');
+    let base = parts.next()?;
+    let first = parts.next()?;
+    let second = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    // The rounding mode, when the text gives one, which is always last.
+    let (values, rounding) = match values {
+        [rest @ .., Rm(round)] => (rest, Some(round.bits())),
+        _ => (values, None),
+    };
+    let dynamic = rounding.unwrap_or(7);
+    let word = match (base, second) {
+        ("fadd" | "fsub" | "fmul" | "fdiv", None) => {
+            let fmt = format(first)?;
+            let funct = match base {
+                "fadd" => 0x00,
+                "fsub" => 0x04,
+                "fmul" => 0x08,
+                _ => 0x0c,
+            };
+            let [Fpr(rd), Fpr(rs1), Fpr(rs2)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, dynamic, funct | fmt, rd, rs1, rs2)
+        }
+        ("fsqrt", None) => {
+            let fmt = format(first)?;
+            let [Fpr(rd), Fpr(rs1)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, dynamic, 0x2c | fmt, rd, rs1, 0)
+        }
+        ("fsgnj" | "fsgnjn" | "fsgnjx" | "fmin" | "fmax", None) if rounding.is_none() => {
+            let fmt = format(first)?;
+            let (funct, f3) = match base {
+                "fsgnj" => (0x10, 0),
+                "fsgnjn" => (0x10, 1),
+                "fsgnjx" => (0x10, 2),
+                "fmin" => (0x14, 0),
+                _ => (0x14, 1),
+            };
+            let [Fpr(rd), Fpr(rs1), Fpr(rs2)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, f3, funct | fmt, rd, rs1, rs2)
+        }
+        ("fmv" | "fneg" | "fabs", None) if rounding.is_none() && format(first).is_some() => {
+            let fmt = format(first)?;
+            let f3 = match base {
+                "fmv" => 0,
+                "fneg" => 1,
+                _ => 2,
+            };
+            let [Fpr(rd), Fpr(rs)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, f3, 0x10 | fmt, rd, rs, rs)
+        }
+        ("feq" | "flt" | "fle", None) if rounding.is_none() => {
+            let fmt = format(first)?;
+            let f3 = match base {
+                "feq" => 2,
+                "flt" => 1,
+                _ => 0,
+            };
+            let [Gpr(rd), Fpr(rs1), Fpr(rs2)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, f3, 0x50 | fmt, rd, rs1, rs2)
+        }
+        ("fmadd" | "fmsub" | "fnmsub" | "fnmadd", None) => {
+            let fmt = format(first)?;
+            let op = match base {
+                "fmadd" => 0x43,
+                "fmsub" => 0x47,
+                "fnmsub" => 0x4b,
+                _ => 0x4f,
+            };
+            let [Fpr(rd), Fpr(rs1), Fpr(rs2), Fpr(rs3)] = *values else {
+                return Some(Err(unwritten()));
+            };
+            r(op, dynamic, (u32::from(rs3) << 2) | fmt, rd, rs1, rs2)
+        }
+        // Between the two float formats. Widening is exact, so GNU as writes it with the rounding
+        // field at nearest rather than at dynamic, and so does this.
+        ("fcvt", Some(from)) if format(first).is_some() && format(from).is_some() => {
+            let (to, from) = (format(first)?, format(from)?);
+            if to == from {
+                return Some(Err(unwritten()));
+            }
+            let [Fpr(rd), Fpr(rs)] = *values else { return Some(Err(unwritten())) };
+            let f3 = if to == 1 { rounding.unwrap_or(0) } else { dynamic };
+            r(0x53, f3, 0x20 | to, rd, rs, u8::try_from(from).ok()?)
+        }
+        // A float to an integer.
+        ("fcvt", Some(from)) if integer(first).is_some() => {
+            let (kind, fmt) = (integer(first)?, format(from)?);
+            let [Gpr(rd), Fpr(rs)] = *values else { return Some(Err(unwritten())) };
+            r(0x53, dynamic, 0x60 | fmt, rd, rs, u8::try_from(kind).ok()?)
+        }
+        // An integer to a float. A thirty two bit integer fits a double exactly, which is the
+        // other case GNU as writes at nearest.
+        ("fcvt", Some(from)) if integer(from).is_some() => {
+            let (fmt, kind) = (format(first)?, integer(from)?);
+            let [Fpr(rd), Gpr(rs)] = *values else { return Some(Err(unwritten())) };
+            let exact = fmt == 1 && kind < 2;
+            let f3 = if exact { rounding.unwrap_or(0) } else { dynamic };
+            r(0x53, f3, 0x68 | fmt, rd, rs, u8::try_from(kind).ok()?)
+        }
+        // The bits moved across between the files unchanged.
+        ("fmv", Some(to)) if rounding.is_none() => match (first, to, values) {
+            ("x", "w", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
+            ("x", "d", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x71, *rd, *rs, 0),
+            // `fmv.s.x` and `fmv.x.s` are the old names, which the kernel's `fpu.S` still writes.
+            ("x", "s", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
+            ("w" | "s", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x78, *rd, *rs, 0),
+            ("d", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x79, *rd, *rs, 0),
+            _ => return Some(Err(unwritten())),
+        },
+        _ => return None,
+    };
+    out.words.push(word);
+    Some(Ok(()))
+}
+
+/// Whether the instruction of that mnemonic can carry that displacement from a base register,
+/// which is twelve signed bits for everything that has one.
+#[must_use]
+pub fn reaches(disp: i64) -> bool {
+    fits(disp, 12)
+}
+
+/// Writes one of the few compressed instructions a file asks for by name, as two bytes.
+///
+/// The kernel's `head.S` starts with `c.li s4, -13`, which is the "MZ" an EFI loader looks for.
+///
+/// # Errors
+///
+/// When it is not one of `c.li`, `c.nop`, `c.ebreak` and `c.unimp` with operands it takes.
+pub fn compressed(mnemonic: &str, values: &[Value]) -> Result<u16, Error> {
+    let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
+    Ok(match (mnemonic, values) {
+        ("c.li", &[Value::Gpr(rd), Value::Imm(imm)]) if rd != ZERO && fits(imm, 6) => {
+            let imm = (imm & 0x3f) as u16;
+            0x4001 | (imm >> 5) << 12 | u16::from(rd) << 7 | (imm & 0x1f) << 2
+        }
+        ("c.nop", []) => 0x0001,
+        ("c.ebreak", []) => 0x9002,
+        // The two zero bytes that are an illegal instruction, which NetBSD's `PTRACE_ILLEGAL_ASM`
+        // writes to raise `SIGILL`.
+        ("c.unimp", []) => 0x0000,
+        _ => return Err(unwritten()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Value::{Fpr, Gpr, Imm, Mem};
+
+    fn one(mnemonic: &str, values: &[Value]) -> u32 {
+        let encoded = encode(mnemonic, values).unwrap_or_else(|why| panic!("{why}"));
+        assert_eq!(encoded.words.len(), 1, "{mnemonic}");
+        encoded.words[0]
+    }
+
+    fn at(base: u8, disp: i64) -> Value {
+        Mem(Addr { base, offset: Offset::Imm(disp) })
+    }
+
+    /// Words GNU as 2.42 writes for `-march=rv64g`, read back with objdump.
+    #[test]
+    fn the_words_are_the_ones_gnu_as_writes() {
+        assert_eq!(one("add", &[Gpr(10), Gpr(11), Gpr(12)]), 0x00c5_8533);
+        assert_eq!(one("subw", &[Gpr(10), Gpr(11), Gpr(12)]), 0x40c5_853b);
+        assert_eq!(one("addi", &[Gpr(2), Gpr(2), Imm(-16)]), 0xff01_0113);
+        assert_eq!(one("srai", &[Gpr(10), Gpr(10), Imm(56)]), 0x4385_5513);
+        assert_eq!(one("sraiw", &[Gpr(10), Gpr(10), Imm(3)]), 0x4035_551b);
+        assert_eq!(one("sd", &[Gpr(1), at(2, 8)]), 0x0011_3423);
+        assert_eq!(one("ld", &[Gpr(1), at(2, 8)]), 0x0081_3083);
+        assert_eq!(one("fld", &[Fpr(8), at(2, -8)]), 0xff81_3407);
+        assert_eq!(one("fcvt.d.w", &[Fpr(10), Gpr(10)]), 0xd205_0553);
+        assert_eq!(one("fcvt.d.l", &[Fpr(10), Gpr(10)]), 0xd225_7553);
+        assert_eq!(one("fcvt.s.d", &[Fpr(10), Fpr(11)]), 0x4015_f553);
+        assert_eq!(one("fcvt.d.s", &[Fpr(10), Fpr(11)]), 0x4205_8553);
+        assert_eq!(one("fadd.d", &[Fpr(10), Fpr(11), Fpr(12)]), 0x02c5_f553);
+        assert_eq!(one("fcvt.w.d", &[Gpr(10), Fpr(10), Value::Round(Round::Rtz)]), 0xc205_1553);
+        assert_eq!(one("fmadd.d", &[Fpr(10), Fpr(11), Fpr(12), Fpr(13)]), 0x6ac5_f543);
+        assert_eq!(one("fsqrt.d", &[Fpr(10), Fpr(11)]), 0x5a05_f553);
+        assert_eq!(one("fcvt.d.lu", &[Fpr(10), Gpr(10)]), 0xd235_7553);
+        assert_eq!(one("fcvt.d.wu", &[Fpr(10), Gpr(10)]), 0xd215_0553);
+        assert_eq!(one("fcvt.s.w", &[Fpr(10), Gpr(10)]), 0xd005_7553);
+        assert_eq!(one("fcvt.wu.d", &[Gpr(10), Fpr(10), Value::Round(Round::Rtz)]), 0xc215_1553);
+        assert_eq!(one("fmv.x.d", &[Gpr(10), Fpr(10)]), 0xe205_0553);
+        assert_eq!(one("fmv.s.x", &[Fpr(10), Gpr(10)]), 0xf005_0553);
+        assert_eq!(one("fmv.x.s", &[Gpr(10), Fpr(10)]), 0xe005_0553);
+        assert_eq!(one("feq.d", &[Gpr(10), Fpr(10), Fpr(11)]), 0xa2b5_2553);
+        assert_eq!(one("fneg.d", &[Fpr(10), Fpr(11)]), 0x22b5_9553);
+        assert_eq!(one("sgtz", &[Gpr(10), Gpr(11)]), 0x00b0_2533);
+        assert_eq!(one("sltz", &[Gpr(10), Gpr(11)]), 0x0005_a533);
+        assert_eq!(one("ret", &[]), 0x0000_8067);
+        assert_eq!(one("ebreak", &[]), 0x0010_0073);
+        assert_eq!(one("fence", &[Value::Order(3), Value::Order(3)]), 0x0330_000f);
+    }
+
+    /// The A extension, the CSR instructions and the system ones the kernel writes, with the words
+    /// GNU as writes for `-march=rv64g_zifencei_zihintpause`.
+    #[test]
+    fn the_atomics_and_the_system_instructions_are_the_words_gnu_as_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("lr.w", &[Gpr(15), at(10, 0)], 0x1005_27af),
+            ("sc.d.rl", &[Gpr(15), Gpr(11), at(10, 0)], 0x1ab5_37af),
+            ("amoswap.w.aqrl", &[Gpr(15), Gpr(11), at(10, 0)], 0x0eb5_27af),
+            ("amoadd.d", &[Gpr(0), Gpr(11), at(10, 0)], 0x00b5_302f),
+            ("amoor.w.aq", &[Gpr(15), Gpr(11), at(10, 0)], 0x44b5_27af),
+            ("amomaxu.d", &[Gpr(15), Gpr(11), at(10, 0)], 0xe0b5_37af),
+            ("csrr", &[Gpr(10), Imm(0x100)], 0x1000_2573),
+            ("csrw", &[Imm(0x105), Gpr(10)], 0x1055_1073),
+            ("csrs", &[Imm(0x100), Imm(2)], 0x1001_6073),
+            ("csrc", &[Imm(0x104), Gpr(10)], 0x1045_3073),
+            ("csrrw", &[Gpr(10), Imm(0x140), Gpr(11)], 0x1405_9573),
+            ("csrrci", &[Gpr(10), Imm(0x100), Imm(2)], 0x1001_7573),
+            ("rdtime", &[Gpr(10)], 0xc010_2573),
+            ("fence.i", &[], 0x0000_100f),
+            ("fence.tso", &[], 0x8330_000f),
+            ("pause", &[], 0x0100_000f),
+            ("wfi", &[], 0x1050_0073),
+            ("sret", &[], 0x1020_0073),
+            ("sfence.vma", &[], 0x1200_0073),
+            ("sfence.vma", &[Gpr(10)], 0x1205_0073),
+            ("sfence.vma", &[Gpr(10), Gpr(11)], 0x12b5_0073),
+            ("bgt", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_c463),
+            ("bleu", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_f463),
+            ("blez", &[Gpr(10), Imm(8)], 0x00a0_5463),
+            ("bgtz", &[Gpr(10), Imm(8)], 0x00a0_4463),
+            ("zext.b", &[Gpr(10), Gpr(11)], 0x0ff5_f513),
+            ("jalr", &[Gpr(1), Gpr(10), Imm(4)], 0x0045_00e7),
+            ("jr", &[at(7, -4)], 0xffc3_8067),
+            ("jr", &[at(11, 0)], 0x0005_8067),
+            ("jr", &[Gpr(12), Imm(12)], 0x00c6_0067),
+            ("jalr", &[at(13, 16)], 0x0106_80e7),
+            ("jalr", &[Gpr(16), Imm(20)], 0x0148_00e7),
+            ("jalr", &[Gpr(5), Gpr(15)], 0x0007_82e7),
+            // Zicfilp and Zicfiss, from llvm-mc, since binutils 2.42 does not know them.
+            ("lpad", &[Imm(0)], 0x0000_0017),
+            ("lpad", &[Imm(5)], 0x0000_5017),
+            ("sspush", &[Gpr(1)], 0xce10_4073),
+            ("sspush", &[Gpr(5)], 0xce50_4073),
+            ("sspopchk", &[Gpr(1)], 0xcdc0_c073),
+            ("sspopchk", &[Gpr(5)], 0xcdc2_c073),
+            ("ssrdp", &[Gpr(10)], 0xcdc0_4573),
+            ("ssamoswap.d", &[Gpr(10), Gpr(11), at(12, 0)], 0x48b6_352f),
+            ("ssamoswap.w.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x4eb6_252f),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        // An atomic takes no distance, and a CSR number past twelve bits is refused.
+        assert!(encode("amoadd.w", &[Gpr(15), Gpr(11), at(10, 4)]).is_err());
+        assert!(encode("csrr", &[Gpr(10), Imm(0x1000)]).is_err());
+        assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
+        assert!(encode("sspush", &[Gpr(10)]).is_err());
+        assert!(encode("lpad", &[Imm(1 << 20)]).is_err());
+    }
+
+    /// The hypervisor extension and Svinval, with the words GNU as 2.42 writes for
+    /// `-march=rv64gch_svinval`, read back with objdump.
+    #[test]
+    fn the_hypervisor_and_svinval_instructions_are_the_words_gnu_as_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("hfence.gvma", &[], 0x6200_0073),
+            ("hfence.vvma", &[], 0x2200_0073),
+            ("hfence.gvma", &[Gpr(10)], 0x6205_0073),
+            ("hfence.gvma", &[Gpr(0), Gpr(11)], 0x62b0_0073),
+            ("hfence.vvma", &[Gpr(10), Gpr(11)], 0x22b5_0073),
+            ("hlv.b", &[Gpr(10), at(11, 0)], 0x6005_c573),
+            ("hlv.bu", &[Gpr(10), at(11, 0)], 0x6015_c573),
+            ("hlv.h", &[Gpr(10), at(11, 0)], 0x6405_c573),
+            ("hlv.hu", &[Gpr(10), at(11, 0)], 0x6415_c573),
+            ("hlvx.hu", &[Gpr(10), at(11, 0)], 0x6435_c573),
+            ("hlv.w", &[Gpr(10), at(11, 0)], 0x6805_c573),
+            ("hlv.wu", &[Gpr(10), at(11, 0)], 0x6815_c573),
+            ("hlvx.wu", &[Gpr(10), at(11, 0)], 0x6835_c573),
+            ("hlv.d", &[Gpr(10), at(11, 0)], 0x6c05_c573),
+            ("hsv.b", &[Gpr(10), at(11, 0)], 0x62a5_c073),
+            ("hsv.h", &[Gpr(10), at(11, 0)], 0x66a5_c073),
+            ("hsv.w", &[Gpr(10), at(11, 0)], 0x6aa5_c073),
+            ("hsv.d", &[Gpr(10), at(11, 0)], 0x6ea5_c073),
+            ("sinval.vma", &[Gpr(10), Gpr(0)], 0x1605_0073),
+            ("sinval.vma", &[Gpr(10), Gpr(11)], 0x16b5_0073),
+            ("sfence.w.inval", &[], 0x1800_0073),
+            ("sfence.inval.ir", &[], 0x1810_0073),
+            ("hinval.vvma", &[Gpr(10), Gpr(11)], 0x26b5_0073),
+            ("hinval.gvma", &[Gpr(10), Gpr(11)], 0x66b5_0073),
+            ("csrrw", &[Gpr(6), Imm(0x600), Gpr(6)], 0x6003_1373),
+            ("cbo.clean", &[at(10, 0)], 0x0015_200f),
+            ("cbo.flush", &[at(11, 0)], 0x0025_a00f),
+            ("cbo.inval", &[at(12, 0)], 0x0006_200f),
+            ("cbo.zero", &[at(13, 0)], 0x0046_a00f),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        // A hypervisor load takes no distance, and the Svinval invalidations take both registers,
+        // as GNU as has them.
+        assert!(encode("hlv.d", &[Gpr(10), at(11, 8)]).is_err());
+        assert!(encode("hsv.w", &[Gpr(10), at(11, 4)]).is_err());
+        assert!(encode("sinval.vma", &[Gpr(10)]).is_err());
+        assert!(encode("hinval.gvma", &[Gpr(10)]).is_err());
+        assert!(encode("cbo.flush", &[at(10, 8)]).is_err());
+    }
+
+    /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
+    /// the words llvm-mc 23 writes, since binutils 2.42 knows neither Zacas nor the last.
+    #[test]
+    fn the_crypto_bits_the_byte_atomics_and_the_float_csrs_are_the_words_llvm_mc_writes() {
+        let at = |base| Mem(Addr { base, offset: Offset::Imm(0) });
+        for (mnemonic, values, word) in [
+            ("clmul", &[Gpr(10), Gpr(11), Gpr(12)][..], 0x0ac5_9533),
+            ("clmulr", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_a533),
+            ("clmulh", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_b533),
+            ("pack", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c533),
+            ("packh", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_f533),
+            ("packw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c53b),
+            ("brev8", &[Gpr(10), Gpr(11)], 0x6875_d513),
+            ("amoswap.h.aqrl", &[Gpr(10), Gpr(11), at(12)], 0x0eb6_152f),
+            ("amoadd.b", &[Gpr(10), Gpr(11), at(12)], 0x00b6_052f),
+            ("amocas.h", &[Gpr(10), Gpr(11), at(12)], 0x28b6_152f),
+            ("amocas.q.aqrl", &[Gpr(10), Gpr(12), at(14)], 0x2ec7_452f),
+            ("frcsr", &[Gpr(10)], 0x0030_2573),
+            ("fscsr", &[Gpr(11)], 0x0035_9073),
+            ("fscsr", &[Gpr(10), Gpr(11)], 0x0035_9573),
+            ("frrm", &[Gpr(10)], 0x0020_2573),
+            ("fsrm", &[Gpr(11)], 0x0025_9073),
+            ("frflags", &[Gpr(10)], 0x0010_2573),
+            ("fsflags", &[Gpr(11)], 0x0015_9073),
+            ("fsrmi", &[Imm(2)], 0x0021_5073),
+            ("fsflagsi", &[Gpr(10), Imm(3)], 0x0011_d573),
+        ] {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic}");
+        }
+        // A pair starts at an even register, and only the `amo` operations come in bytes.
+        assert!(encode("amocas.q", &[Gpr(11), Gpr(12), at(14)]).is_err());
+        assert!(encode("lr.b", &[Gpr(10), at(12)]).is_err());
+        assert_eq!(compressed("c.li", &[Gpr(20), Imm(-13)]), Ok(0x5a4d));
+        assert_eq!(compressed("c.nop", &[]), Ok(0x0001));
+        assert_eq!(compressed("c.ebreak", &[]), Ok(0x9002));
+        assert_eq!(compressed("c.unimp", &[]), Ok(0x0000));
+        assert!(compressed("c.li", &[Gpr(0), Imm(1)]).is_err());
+        assert!(compressed("c.li", &[Gpr(10), Imm(32)]).is_err());
+    }
+
+    #[test]
+    fn the_bit_manipulation_instructions_are_the_words_llvm_mc_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("andn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_f533),
+            ("orn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_e533),
+            ("xnor", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_c533),
+            ("max", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_e533),
+            ("maxu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_f533),
+            ("min", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_c533),
+            ("minu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_d533),
+            ("rol", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_9533),
+            ("ror", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d533),
+            ("rolw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_953b),
+            ("rorw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d53b),
+            ("rori", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d513),
+            ("roriw", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d51b),
+            ("clz", &[Gpr(10), Gpr(11)], 0x6005_9513),
+            ("ctz", &[Gpr(10), Gpr(11)], 0x6015_9513),
+            ("cpop", &[Gpr(10), Gpr(11)], 0x6025_9513),
+            ("clzw", &[Gpr(10), Gpr(11)], 0x6005_951b),
+            ("ctzw", &[Gpr(10), Gpr(11)], 0x6015_951b),
+            ("cpopw", &[Gpr(10), Gpr(11)], 0x6025_951b),
+            ("sext.b", &[Gpr(10), Gpr(11)], 0x6045_9513),
+            ("sext.h", &[Gpr(10), Gpr(11)], 0x6055_9513),
+            ("zext.h", &[Gpr(10), Gpr(11)], 0x0805_c53b),
+            ("rev8", &[Gpr(10), Gpr(11)], 0x6b85_d513),
+            ("orc.b", &[Gpr(10), Gpr(11)], 0x2875_d513),
+            ("sh1add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a533),
+            ("sh2add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c533),
+            ("sh3add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e533),
+            ("add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_853b),
+            ("sh1add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a53b),
+            ("sh2add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c53b),
+            ("sh3add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e53b),
+            ("slli.uw", &[Gpr(10), Gpr(11), Imm(13)], 0x08d5_951b),
+            ("bclr", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_9533),
+            ("bclri", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_9513),
+            ("bext", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_d533),
+            ("bexti", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_d513),
+            ("binv", &[Gpr(10), Gpr(11), Gpr(12)], 0x68c5_9533),
+            ("binvi", &[Gpr(10), Gpr(11), Imm(13)], 0x68d5_9513),
+            ("bset", &[Gpr(10), Gpr(11), Gpr(12)], 0x28c5_9533),
+            ("bseti", &[Gpr(10), Gpr(11), Imm(13)], 0x28d5_9513),
+            ("amocas.w", &[Gpr(10), Gpr(11), at(12, 0)], 0x28b6_252f),
+            ("amocas.d.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x2eb6_352f),
+            ("move", &[Gpr(5), Gpr(10)], 0x0005_0293),
+            ("and", &[Gpr(7), Gpr(7), Imm(7)], 0x0073_f393),
+            ("or", &[Gpr(10), Gpr(10), Imm(-2)], 0xffe5_6513),
+            ("xor", &[Gpr(10), Gpr(11), Imm(1)], 0x0015_c513),
+            ("add", &[Gpr(10), Gpr(10), Imm(16)], 0x0105_0513),
+            ("addw", &[Gpr(10), Gpr(10), Imm(-1)], 0xfff5_051b),
+            ("sll", &[Gpr(10), Gpr(11), Imm(3)], 0x0035_9513),
+            ("srl", &[Gpr(10), Gpr(11), Imm(63)], 0x03f5_d513),
+            ("sra", &[Gpr(10), Gpr(11), Imm(1)], 0x4015_d513),
+            ("sllw", &[Gpr(10), Gpr(11), Imm(31)], 0x01f5_951b),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        assert!(encode("rori", &[Gpr(10), Gpr(11), Imm(64)]).is_err());
+        assert!(encode("and", &[Gpr(10), Gpr(11), Imm(4096)]).is_err());
+    }
+
+    #[test]
+    fn a_constant_is_as_many_words_as_gnu_as_writes_for_it() {
+        let words = |imm| encode("li", &[Gpr(10), Imm(imm)]).unwrap().words;
+        assert_eq!(words(-1), [0xfff0_0513]);
+        assert_eq!(words(0x7fff_f800), [0x8000_0537, 0x8005_051b]);
+        assert_eq!(words(0x0012_3000), [0x0012_3537]);
+        assert_eq!(li_words(0x1234_5678_9abc_def0), 8);
+        assert_eq!(li_words(0x8000_0000), 2);
+        // Wider than thirty two bits, where the upper part of twelve bits is an `addiw`.
+        assert_eq!(words(0x3fe0_0000_0000_0000), [0x1ff0_051b, 0x0355_1513]);
+        assert_eq!(words(-0x8000_0001), [0xfff0_051b, 0x01f5_1513, 0xfff5_0513]);
+        assert_eq!(words(0x1_2345_6789), [0x0009_2537, 0xa2b5_051b, 0x00d5_1513, 0x7895_0513]);
+    }
+
+    /// Every constant `li` builds is the constant, which is checked by running the words.
+    #[test]
+    fn a_constant_comes_out_as_itself() {
+        let run = |words: &[u32]| {
+            let mut reg: i64 = 0;
+            for &word in words {
+                let imm = i64::from((word as i32) >> 20);
+                reg = match word & 0x7f {
+                    0x37 => i64::from((word & 0xffff_f000) as i32),
+                    0x1b => {
+                        let from = if (word >> 15) & 31 == 0 { 0 } else { reg };
+                        i64::from(from.wrapping_add(imm) as i32)
+                    }
+                    0x13 if (word >> 12) & 7 == 1 => reg << (imm & 63),
+                    0x13 => {
+                        let from = if (word >> 15) & 31 == 0 { 0 } else { reg };
+                        from.wrapping_add(imm)
+                    }
+                    _ => panic!("{word:#x}"),
+                };
+            }
+            reg
+        };
+        for imm in [
+            0,
+            1,
+            -1,
+            2047,
+            -2048,
+            2048,
+            0x7fff_ffff,
+            -0x8000_0000,
+            0x8000_0000,
+            0xffff_ffff,
+            0x1234_5678_9abc_def0,
+            i64::MAX,
+            i64::MIN,
+            -0x1234_5678_9abc,
+            0x7fff_f800,
+            0x0000_0800_0000_0800,
+        ] {
+            let words = encode("li", &[Gpr(10), Imm(imm)]).unwrap().words;
+            assert_eq!(run(&words), imm, "{imm:#x}");
+        }
+    }
+
+    #[test]
+    fn a_symbol_is_left_for_the_linker() {
+        let call = encode("call", &[Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!(call.words, [0x0000_0097, 0x0000_80e7]);
+        assert_eq!(call.fixups, [(0, Fixup::CallPlt)]);
+        let tail = encode("tail", &[Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!(tail.words, [0x0000_0317, 0x0003_0067]);
+        let la = encode("lla", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!(la.fixups, [(0, Fixup::PcrelHi20), (1, Fixup::PcrelLo12I)]);
+        let ie = encode("la.tls.ie", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!(ie.words, [0x0000_0517, 0x0005_3503]);
+        assert_eq!(ie.fixups, [(0, Fixup::TlsGotHi20), (1, Fixup::PcrelLo12I)]);
+        assert_eq!(Fixup::TlsGotHi20.elf(), 21);
+        let branch = encode("bnez", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!((branch.words[0], branch.fixups[0].1.elf()), (0x0005_1063, 16));
+        assert_eq!(one("beqz", &[Gpr(10), Imm(8)]), 0x0005_0463);
+        assert_eq!(one("j", &[Imm(-4)]), 0xffdf_f06f);
+        // The halves written by hand: `auipc gp, %pcrel_hi(x)`, `ld t0, %pcrel_lo(.L0)(gp)`,
+        // `addi a0, a0, %pcrel_lo(.L1)` and `sd a1, %pcrel_lo(.L2)(a0)`.
+        let hi = encode("auipc", &[Gpr(3), Value::Symbol(Operator::PcrelHi)]).unwrap();
+        assert_eq!((hi.words, hi.fixups), (vec![0x0000_0197], vec![(0, Fixup::PcrelHi20)]));
+        let low = |base| Mem(Addr { base, offset: Offset::Symbol(Operator::PcrelLo) });
+        let ld = encode("ld", &[Gpr(5), low(3)]).unwrap();
+        assert_eq!((ld.words, ld.fixups), (vec![0x0001_b283], vec![(0, Fixup::PcrelLo12I)]));
+        let addi = encode("addi", &[Gpr(10), Gpr(10), Value::Symbol(Operator::PcrelLo)]).unwrap();
+        assert_eq!((addi.words, addi.fixups), (vec![0x0005_0513], vec![(0, Fixup::PcrelLo12I)]));
+        // `addi` was taken as the form with a constant, and `add` as the one of three registers,
+        // before these were reached.
+        for (op, fixup) in [(Operator::Lo, Fixup::Lo12I), (Operator::TprelLo, Fixup::TprelLo12I)] {
+            let addi = encode("addi", &[Gpr(10), Gpr(10), Value::Symbol(op)]).unwrap();
+            assert_eq!((addi.words, addi.fixups), (vec![0x0005_0513], vec![(0, fixup)]));
+        }
+        let add = encode("add", &[Gpr(10), Gpr(10), Gpr(4), Value::Symbol(Operator::TprelAdd)]);
+        let add = add.unwrap();
+        assert_eq!((add.words, add.fixups), (vec![0x0045_0533], vec![(0, Fixup::TprelAdd)]));
+        let sd = encode("sd", &[Gpr(11), low(10)]).unwrap();
+        assert_eq!((sd.words, sd.fixups), (vec![0x00b5_3023], vec![(0, Fixup::PcrelLo12S)]));
+    }
+
+    #[test]
+    fn a_far_constant_goes_through_t5_and_a_far_address_through_its_own_register() {
+        let words = |mnemonic, imm| encode(mnemonic, &[Gpr(2), Gpr(2), Imm(imm)]).unwrap().words;
+        assert_eq!(words("addi.far", 16), [0x0101_0113]);
+        assert_eq!(words("subi.far", 2048), [0x8001_0113]);
+        // li t5, 4096 and sub sp, sp, t5.
+        assert_eq!(words("subi.far", 4096), [0x0000_1f37, 0x41e1_0133]);
+        let lea = |rd, disp| encode("lea.far", &[Gpr(rd), at(8, disp)]);
+        assert_eq!(lea(10, -16).unwrap().words, [0xff04_0513]);
+        // li a0, 8192 and add a0, s0, a0.
+        assert_eq!(lea(10, 8192).unwrap().words, [0x0000_2537, 0x00a4_0533]);
+        assert!(lea(8, 8192).is_err());
+    }
+
+    #[test]
+    fn what_does_not_fit_is_refused() {
+        let far = encode("addi", &[Gpr(10), Gpr(10), Imm(2048)]);
+        assert!(matches!(far, Err(Error::Immediate { imm: 2048, .. })));
+        assert!(encode("ld", &[Gpr(10), at(2, 4096)]).is_err());
+        assert!(encode("slli", &[Gpr(10), Gpr(10), Imm(64)]).is_err());
+        assert!(encode("slliw", &[Gpr(10), Gpr(10), Imm(32)]).is_err());
+        assert!(encode("b.ne", &[Value::Symbol(Operator::Plain)]).is_err());
+        assert!(encode("add", &[Gpr(10), Fpr(10), Gpr(10)]).is_err());
+        assert!(reaches(-2048) && !reaches(2048));
+    }
+
+    /// A distance filled in later is the word the encoder writes for the same distance now.
+    #[test]
+    fn a_distance_filled_in_later_is_the_word_written_with_it() {
+        let named = |mnemonic, values: &[Value]| {
+            let encoded = encode(mnemonic, values).unwrap_or_else(|why| panic!("{why}"));
+            (encoded.words[0], encoded.fixups[0].1)
+        };
+        let symbol = Value::Symbol(Operator::Plain);
+        for distance in [-4096, -2, 8, 4094] {
+            let (word, fixup) = named("bne", &[Gpr(10), Gpr(11), symbol]);
+            let filled = fixup.apply(word, distance);
+            assert_eq!(filled, Some(one("bne", &[Gpr(10), Gpr(11), Imm(distance)])), "{distance}");
+        }
+        for distance in [-(1 << 20), -2, 16, (1 << 20) - 2] {
+            let (word, fixup) = named("jal", &[Gpr(1), symbol]);
+            assert_eq!(fixup.apply(word, distance), Some(one("jal", &[Gpr(1), Imm(distance)])));
+        }
+        let (word, fixup) = named("beqz", &[Gpr(10), symbol]);
+        assert_eq!(fixup.apply(word, 4096), None);
+        assert_eq!(fixup.apply(word, 3), None);
+        assert_eq!(Fixup::CallPlt.apply(0, 8), None);
+        assert!(Fixup::TprelAdd.thread() && !Fixup::PcrelHi20.thread());
+    }
+}

@@ -1,0 +1,20 @@
+# Made by bin/glibc-compat in tamnd/rucc-cross from the packages in sysroots/glibc-compat.
+# library name arch node
+libc __longjmp_chk s390x GLIBC_2.11
+libc __pread64 x86 GLIBC_2.1
+libc __pwrite64 x86 GLIBC_2.1
+libc __sigsetjmp s390x GLIBC_2.2
+libc _longjmp s390x GLIBC_2.2
+libc _setjmp s390x GLIBC_2.2
+libc getcontext s390x GLIBC_2.2
+libc longjmp s390x GLIBC_2.2
+libc lseek64 x86 GLIBC_2.1
+libc open64 x86 GLIBC_2.1
+libc pread x86 GLIBC_2.1
+libc pread64 x86 GLIBC_2.1
+libc pwrite x86 GLIBC_2.1
+libc pwrite64 x86 GLIBC_2.1
+libc setjmp s390x GLIBC_2.2
+libc siglongjmp s390x GLIBC_2.2
+libpthread longjmp s390x GLIBC_2.2
+libpthread siglongjmp s390x GLIBC_2.2

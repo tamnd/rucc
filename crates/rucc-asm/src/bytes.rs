@@ -1,0 +1,2056 @@
+//! Machine functions as the bytes of a text section.
+//!
+//! Design: `spec/11-asm-objects-debug.md` section 11.1. The other end of [`crate::att`], and
+//! deliberately the same walk: an opcode is the list of instructions the target says it is, each
+//! instruction's arguments are drawn from the operands the target says they come from, and the
+//! only difference is that this hands each one to the encoder instead of writing its name. That
+//! is what section 11.1 means by one description rather than two, and it is why a mistake here
+//! cannot be a mistake about what an instruction is. It can only be a mistake about bytes.
+//!
+//! # What the encoder cannot know
+//!
+//! Where anything outside the instruction is. A jump carries the distance to its target and the
+//! target is a block that may not have been written yet, and a call carries the distance to a
+//! function that is not in this file at all. The encoder leaves four bytes for each and says
+//! where it left them, and this fills in the ones it can and records the ones it cannot.
+//!
+//! The ones it can are the jumps inside a function, since by the end of a function every block
+//! has a place. They are patched here and nothing downstream ever hears about them.
+//!
+//! The ones it cannot are the references to a symbol, which are a relocation: an offset into the
+//! section, the name of the thing wanted, and what the linker is being asked for. Choosing which
+//! relocation goes with which addressing mode is this layer's job rather than the object writer's,
+//! per section 11.3, because it is a fact about the instruction and not about the file format.
+//!
+//! # What is not decided here
+//!
+//! How long a jump is. Every one of them takes four bytes for its distance whether it needs them
+//! or not, which is correct and larger than it has to be. Shrinking the ones that fit in a byte is
+//! relaxation, an iterate-to-fixpoint pass over the whole function, and it is not written yet.
+//! Nothing here would have to change for it: it would run before this and settle the lengths.
+//!
+//! Alignment between functions, beyond starting each one on a sixteen byte boundary, which is what
+//! every x86-64 toolchain does and what the instruction fetcher is built around. The padding is
+//! written as single byte nops. A longer nop is fewer instructions to decode and the padding
+//! between two functions is never executed, so there is nothing to be gained by it.
+
+use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
+use rucc_diag::Span;
+use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
+use rucc_target::x86_64::{self, Addr, Arg, Mode, RAX, Value, Width, Written};
+use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
+use rucc_tuple::Arch;
+
+use rucc_object::{
+    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Site, Table, Text,
+    Visibility,
+};
+
+use crate::Error;
+use crate::format::{Directives, binding, visibility};
+use crate::unwind::{self, Rows};
+
+/// The prefix every x86-64 opcode carries in the machine IR.
+const PREFIX: &str = "x64.";
+
+/// The nop `-mnop-mcount` writes in place of the profiler's call, which is gcc's `nopl
+/// 0x0(%rax,%rax,1)`: one instruction as long as the call, so that a tracer writes the call back
+/// in one store and nothing can be running in the middle of it.
+pub(crate) const MCOUNT_NOP: [u8; 5] = [0x0f, 0x1f, 0x44, 0x00, 0x00];
+
+/// The one byte instruction that does nothing, which is what the space in front of a function is.
+///
+/// Also what the room a patcher was promised is made of. The two are the same byte and not the same
+/// thing: the padding is space nothing reaches, and the room is space something jumps into once it
+/// has been written over. See `assemble`.
+const NOP: u8 = 0x90;
+
+/// Where one machine instruction ended up, and where in the source it came from.
+///
+/// The span rather than a file and a line, because this layer has no source map and no business
+/// acquiring one. Turning a span into a place is the driver's, which is also where the paths a
+/// `-ffile-prefix-map` rewrites are still paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    /// How far into its own function the instruction begins.
+    pub at: usize,
+    /// What the machine IR said this instruction was for.
+    pub span: Span,
+    /// Which instruction of the machine function it is, or `None` for the row the prologue gets,
+    /// which is the one row here that no instruction wrote.
+    ///
+    /// The line table has no use for it and the locations do: a local the allocator kept in a
+    /// register is somewhere over a stretch the back end named by an instruction at each end,
+    /// because a machine instruction has no length until something encodes it, and this is where
+    /// it gets one. Carried on the row rather than as a second list because the two are the same
+    /// walk and a second list is a thing that can come to disagree with the first.
+    pub inst: Option<Inst>,
+}
+
+/// A text section and, when the build asked for it, where each instruction in it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assembled {
+    /// The instructions, and what the linker has to be told about them.
+    pub text: Text,
+    /// One list per function of [`Text::funcs`], in the same order, and empty throughout in a
+    /// build that asked for no debug information.
+    pub lines: Vec<Vec<Row>>,
+    /// The frame rules as `.debug_frame`, in a build that asked for debug information and for no
+    /// unwind table, where it is the only table a debugger has to find a frame base through. None
+    /// in every other build, and on a format that has no such section.
+    pub frames: Option<Chunk>,
+}
+
+/// Every function, as the bytes of a text section.
+///
+/// `unwind` is whether a function is described to an unwinder, which is
+/// `rucc_session::Options::unwinds` and is asked of the build rather than worked out here, so that
+/// this and the text writer cannot answer it differently for one function.
+///
+/// `lines` is whether to record where each instruction came from, which is
+/// `rucc_session::Options::debug_info` and is asked the same way and for the same reason. It is a
+/// question rather than something always answered because the rows are one per machine instruction
+/// and a build that is not writing debug information would carry them the length of the back end to
+/// throw them away.
+///
+/// # Errors
+///
+/// [`Error::Machine`] for an architecture nothing here encodes, and the rest for a function that
+/// should not have got this far. See [`Error`].
+///
+/// # Panics
+///
+/// Panics on a function that was promised room for a patcher and has none on either side of its
+/// own label, which is a prologue that recorded room it did not write.
+pub fn assemble(
+    funcs: &[Func],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+    lines: bool,
+) -> Result<Assembled, Error> {
+    assemble_in(funcs, names, target, unwind, lines, false)
+}
+
+/// [`assemble`] for a unit some of whose functions are in a section other than the text section.
+///
+/// A function the program or the driver put in a section goes there, and the cold part of one
+/// split in two goes in `.text.unlikely`, or in `.text.unlikely.` and its name when `functions`
+/// says each function is in a section of its own, which is `-ffunction-sections`. Each section is
+/// laid out on its own, as though it started at nothing, and then put after the text section as a
+/// run of its own. See [`Text::runs`].
+///
+/// Only an ELF function is split, since the listing splits one only there, and a split function
+/// has no landing pad and no room for a patcher. The driver keeps any other to the listing.
+///
+/// # Errors
+///
+/// What [`assemble`] gives back.
+///
+/// # Panics
+///
+/// What [`assemble`] panics on.
+pub fn assemble_in(
+    funcs: &[Func],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+    lines: bool,
+    functions: bool,
+) -> Result<Assembled, Error> {
+    if target.tuple.arch() != Arch::X86_64 {
+        return Err(Error::Machine { triple: target.tuple.to_string() });
+    }
+    let elf = target.object_format == ObjectFormat::Elf;
+    // The text section first and then every other section a function went in, in the order the
+    // first function in each was met, which is the order a listing would have switched to them.
+    let mut laid = vec![Laid::new(String::new(), Text::default())];
+    // Which section and which function in it each extent is, in the order the listing would have
+    // written them, for the unwind table, whose records are in that order.
+    let mut order = Vec::with_capacity(funcs.len());
+    // The cold part of each split function, as where it is and where its first part is, so that a
+    // jump table cell naming a block in it can be pointed at it once both have a number.
+    let mut colds = Vec::new();
+    let mut known = Known::default();
+    for func in funcs {
+        let home = func
+            .section
+            .map(|section| names.resolve(section))
+            .filter(|&section| section != ".text");
+        let here = place(&mut laid, home);
+        let name = names.resolve(func.name).to_owned();
+        let split = func.cold.filter(|_| elf);
+        let there = split.map(|_| {
+            let cold = if functions {
+                format!(".text.unlikely.{name}")
+            } else {
+                ".text.unlikely".to_owned()
+            };
+            place(&mut laid, Some(&cold))
+        });
+        // The section the cold part goes in, out of the list while the function is written so
+        // that it and the section the first part goes in can both be written to.
+        let mut other =
+            there.filter(|&there| there != here).map(|there| std::mem::take(&mut laid[there]));
+        let section = &mut laid[here];
+        let text = &mut section.text;
+        // What this function asked for, which pads the space in front of it and, once every
+        // function has been through here, is what the whole section is aligned to. Both halves
+        // are needed: the offset inside the section is this padding and where the section itself
+        // lands is the alignment recorded on it. It goes on the extent as well, because under
+        // `-ffunction-sections` this function is a section of its own and the padding in front of
+        // it is gone, so this number is the only thing left saying what it wanted.
+        let align = func.align.unwrap_or(FUNC_ALIGN);
+        text.align = text.align.max(align);
+        let step = usize::try_from(align).unwrap_or(1).max(1);
+        while text.bytes.len() % step != 0 {
+            text.bytes.push(NOP);
+        }
+        // The half of the room a patcher was promised that is in front of the function's own
+        // label, laid down here because it is the one part of a finished function that is not in a
+        // block. What makes it the space in front of the function rather than the start of it is
+        // everything below: the symbol, the size and the record an unwinder reads all begin after
+        // it, which is what gcc does with the same flag and what a debugger showing a backtrace
+        // through a patched function needs.
+        //
+        // The byte is written rather than encoded because the room is counted in bytes and the
+        // instruction that fills it has no operands. `an_entry_promised_to_a_patcher_is_bytes_that
+        // _do_nothing_on_both_sides_of_the_symbol` is what holds it to the same byte the encoder
+        // writes for the half that is in a block.
+        let ahead = text.bytes.len();
+        // The room a hot patcher was promised, in front of the patchable room since gcc writes it
+        // first, and the bytes it writes over, which are the first of the function's own. See
+        // `crate::hook`.
+        let arch = target.tuple.arch();
+        let hooked = if func.hook { crate::hook::room(arch) } else { 0 };
+        text.bytes.extend(std::iter::repeat_n(crate::hook::INT3, hooked));
+        if let Some(patch) = func.patch {
+            text.bytes.extend(std::iter::repeat_n(NOP, patch.before as usize));
+        }
+        let start = text.bytes.len();
+        if func.hook {
+            text.bytes.extend_from_slice(crate::hook::opening(arch));
+        }
+        let mut assembler = Assembler {
+            names,
+            directives: Directives::for_target(target),
+            func,
+            name: &name,
+            text,
+            other: other.as_mut().map(|other| &mut other.text),
+            blocks: Vec::new(),
+            jumps: Vec::new(),
+            rows: Vec::new(),
+            lines: Vec::new(),
+            wants: lines,
+            start,
+            room: None,
+            loops: Vec::new(),
+            apart: elf,
+            sites: Vec::new(),
+            known: &mut known,
+            split,
+            cold: None,
+        };
+        assembler.func()?;
+        let room = assembler.room;
+        let blocks = std::mem::take(&mut assembler.blocks);
+        let cold = assembler.cold.take();
+        let mut landings: Vec<Site> = std::mem::take(&mut assembler.sites)
+            .into_iter()
+            .map(|(at, end, pad)| Site {
+                start: at,
+                len: end - at,
+                pad: blocks[pad.index()] - start,
+            })
+            .collect();
+        landings.sort_by_key(|site| site.start);
+        let rows = std::mem::take(&mut assembler.rows);
+        let all = std::mem::take(&mut assembler.lines);
+        drop(assembler);
+        section.rows.push(rows);
+        section.lines.push(all);
+        let text = &mut section.text;
+        let len = cold.as_ref().map_or(text.bytes.len() - start, |cold| cold.hot);
+        // Where the record points is the front of the room, which is the half in front of the
+        // label in a function that has one and the first instruction of the other half otherwise.
+        // The two are not one offset because a landing pad can sit between the halves.
+        let patch = func.patch.map(|patch| {
+            let at = if patch.before > 0 {
+                ahead + hooked
+            } else {
+                room.expect("room that is neither in front of the label nor anywhere after it")
+            };
+            Patch { at, before: patch.before as usize }
+        });
+        order.push((here, text.funcs.len()));
+        text.funcs.push(Extent {
+            name: name.clone(),
+            start,
+            len,
+            align,
+            binding: binding(func.binding),
+            visibility: visibility(func.visibility),
+            patch,
+            hooked,
+            landings,
+        });
+        let hot = (here, text.funcs.len() - 1);
+        if let Some(back) = other {
+            laid[there.expect("a section for the cold part")] = back;
+        }
+        // The cold part, which is a function of its own as far as the symbols and the unwind
+        // table go: `.cold` after the name, local, and with a record that starts from the state a
+        // call leaves and is brought to the one the first part ended in. See `crate::att`.
+        if let (Some(cold), Some(there)) = (cold, there) {
+            let section = &mut laid[there];
+            let text = &mut section.text;
+            order.push((there, text.funcs.len()));
+            colds.push((hot, (there, text.funcs.len())));
+            text.funcs.push(Extent {
+                name: format!("{name}.cold"),
+                start: cold.start,
+                len: text.bytes.len() - cold.start,
+                align: 1,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+                patch: None,
+                hooked: 0,
+                landings: Vec::new(),
+            });
+            section.rows.push(cold.rows);
+            section.lines.push(cold.lines);
+        }
+    }
+    let (mut text, rows, all, order) = merge(laid, &order, &colds);
+    // In whichever of the two shapes the target reads, which is what decides whether a prologue
+    // this cannot describe is a refusal or is nothing at all. See [`unwind::table`].
+    // Or, when there is to be no unwind table and there is to be debug information, the same rows
+    // where only a debugger looks. See [`unwind::debug_frame`].
+    //
+    // In the order the listing would have written the functions, which is not the order they are
+    // in once every section has been put after the text section.
+    let mut frames = None;
+    if let Some(conv) = target.call_regs {
+        let sorted = order.iter().enumerate().all(|(at, &which)| at == which);
+        let (moved, rows): (Vec<Extent>, Vec<Rows>) = if sorted {
+            (Vec::new(), rows)
+        } else {
+            order.iter().map(|&which| (text.funcs[which].clone(), rows[which].clone())).unzip()
+        };
+        let extents = if sorted { &text.funcs } else { &moved };
+        if unwind {
+            text.unwind = unwind::table(extents, &rows, conv, target.object_format, &[], &[])?;
+        } else if lines {
+            frames = unwind::debug_frame(extents, &rows, conv, target.object_format, &[]);
+        }
+    }
+    Ok(Assembled { text, lines: all, frames })
+}
+
+/// One section the functions are laid out in, before it is put after the others.
+#[derive(Default)]
+struct Laid {
+    /// The section's name, and nothing for the text section.
+    name: String,
+    text: Text,
+    /// The frame rules of each function in it, in the order of [`Text::funcs`], kept beside the
+    /// extents rather than written into the section as they are found, because a record counts
+    /// from the start of its function and the function's own length is not known until its last
+    /// instruction has been encoded.
+    rows: Vec<Rows>,
+    /// Where each instruction of each function in it began, the same way.
+    lines: Vec<Vec<Row>>,
+}
+
+impl Laid {
+    fn new(name: String, text: Text) -> Self {
+        Self { name, text, rows: Vec::new(), lines: Vec::new() }
+    }
+}
+
+/// Which of the sections laid out so far is the one called `name`, making it if there is none,
+/// with the text section for no name at all.
+fn place(laid: &mut Vec<Laid>, name: Option<&str>) -> usize {
+    let Some(name) = name else { return 0 };
+    if let Some(at) = laid.iter().position(|section| section.name == name) {
+        return at;
+    }
+    // Aligned to nothing to begin with, since a listing that switches to a section asks for
+    // nothing of it until something in it does.
+    laid.push(Laid::new(name.to_owned(), Text { align: 1, ..Text::default() }));
+    laid.len() - 1
+}
+
+/// Which section a function is in and which of that section's functions it is.
+type Place = (usize, usize);
+
+/// Every section laid out on its own, as the text section with the rest after it as runs, with the
+/// rows and the lines of each function in the order of the extents, and where each extent in
+/// `order` and each cold part in `colds` ended up.
+///
+/// Everything a section kept as a place in its own bytes is moved by how far its bytes moved, and
+/// everything it kept as a function's number by how many functions are in front of it.
+fn merge(
+    laid: Vec<Laid>,
+    order: &[Place],
+    colds: &[(Place, Place)],
+) -> (Text, Vec<Rows>, Vec<Vec<Row>>, Vec<usize>) {
+    let mut firsts = Vec::with_capacity(laid.len());
+    let mut sections = laid.into_iter();
+    let first = sections.next().expect("the text section");
+    let mut text = first.text;
+    let mut rows = first.rows;
+    let mut lines = first.lines;
+    firsts.push(0);
+    for section in sections {
+        let shift = text.bytes.len();
+        let count = text.funcs.len();
+        firsts.push(count);
+        let part = section.text;
+        text.runs.push(rucc_object::Run { name: section.name, start: shift, align: part.align });
+        text.bytes.extend_from_slice(&part.bytes);
+        text.funcs.extend(part.funcs.into_iter().map(|mut func| {
+            func.start += shift;
+            if let Some(patch) = &mut func.patch {
+                patch.at += shift;
+            }
+            func
+        }));
+        text.relocs
+            .extend(part.relocs.into_iter().map(|reloc| Reloc { at: reloc.at + shift, ..reloc }));
+        let moved = |marker: Marker| Marker { at: marker.at + shift, ..marker };
+        text.labels.extend(part.labels.into_iter().map(moved));
+        text.places.extend(part.places.into_iter().map(moved));
+        text.mcount.extend(part.mcount.into_iter().map(|(at, name)| (at + shift, name)));
+        text.tables.extend(part.tables.into_iter().map(|mut table| {
+            table.func += count;
+            for cell in &mut table.cells {
+                if cell.0 != usize::MAX {
+                    cell.0 += count;
+                }
+            }
+            table
+        }));
+        rows.extend(section.rows);
+        lines.extend(section.lines);
+    }
+    let at = |(section, func): (usize, usize)| firsts[section] + func;
+    // A cell naming a block in the cold part was written before the cold part had a number, and
+    // its function is the one the table belongs to.
+    if !colds.is_empty() {
+        let cold: Map<usize, usize> =
+            colds.iter().map(|&(hot, cold)| (at(hot), at(cold))).collect();
+        for table in &mut text.tables {
+            for cell in &mut table.cells {
+                if cell.0 == usize::MAX {
+                    cell.0 = cold[&table.func];
+                }
+            }
+        }
+    }
+    let order = order.iter().map(|&which| at(which)).collect();
+    (text, rows, lines, order)
+}
+
+/// A template kept as text, as the bytes the assembler reads out of it on its own and the places in
+/// them that name something outside it, counted from the front of the template.
+///
+/// Read on its own when nothing in it reaches past its own text: no second section, no alignment,
+/// which counts from the front of a section this is not the front of, and no name it defines, since
+/// another template may be the one that jumps to it and the two are only put together in a
+/// listing. A numbered label it writes and goes to itself is a place rather than a name, and the
+/// reader has already turned every jump to one into a distance. What it names and does not define
+/// is left for the linker, the way gas would leave it, except for a local name, which is always in
+/// the same file and so is another template's. Anything else is an error with what about the text
+/// it was, and the unit goes to the assembler as a listing instead.
+pub(crate) fn template(
+    func: &Func,
+    block: Block,
+    inst: Inst,
+    names: &Interner,
+    directives: Directives,
+) -> Result<(Vec<u8>, Vec<Reloc>), String> {
+    // On a format whose names carry a prefix the text and the linker spell a name differently, and
+    // which one a name in the template meant is not a question this can answer.
+    if !directives.symbol().is_empty() {
+        return Err("names on this format carry a prefix".to_owned());
+    }
+    let text = crate::att::template(func, block, inst, names, directives)
+        .map_err(|trouble| trouble.to_string())?;
+    let read = crate::source::read(&format!("{}\n{text}", directives.text()), Arch::X86_64)
+        .map_err(|trouble| trouble.why)?;
+    for name in &read.names {
+        let outside = name.at == Held::Undefined
+            && name.binding == Binding::Global
+            && name.visibility == Visibility::Default
+            && !name.name.starts_with(directives.local());
+        if !outside {
+            return Err(format!("it names '{}' in a way only the whole file can say", name.name));
+        }
+    }
+    match read.parts.as_slice() {
+        [] => Ok((Vec::new(), Vec::new())),
+        [part] if part.name == ".text" && part.align <= 1 => {
+            Ok((part.bytes.clone(), part.relocs.clone()))
+        }
+        _ => Err("it writes into a section of its own or aligns what follows".to_owned()),
+    }
+}
+
+/// A jump inside a function, waiting for the block it goes to to have a place.
+struct Jump {
+    /// Where the four bytes the distance goes in begin.
+    at: usize,
+    /// Where the instruction it belongs to ends, which is what the distance is counted from.
+    end: usize,
+    /// The place it goes to.
+    to: To,
+    /// What is added to the distance, which is nothing for a jump and is the displacement for an
+    /// address that names a block and has one.
+    disp: i64,
+    /// Whether it is in the cold part of a function split in two. See [`Cold`].
+    cold: bool,
+}
+
+/// The cold part of a function split in two, from where the layout reached its first block.
+struct Cold {
+    /// Where it begins in the section it is in, which is what its own distances count from.
+    start: usize,
+    /// How long the first part is.
+    hot: usize,
+    /// Whether each block is in it, indexed by the block's own number.
+    blocks: Vec<bool>,
+    /// Whether it is in another section from the first part, which it is unless the whole function
+    /// was put in the section the cold part goes in.
+    apart: bool,
+    /// Its frame rules, counted from where it begins.
+    rows: Rows,
+    /// Where each of its instructions began, counted the same way.
+    lines: Vec<Row>,
+}
+
+/// A place in this function that an instruction can name: a block, or one of its jump tables.
+#[derive(Clone, Copy)]
+enum To {
+    Block(Block),
+    Table(u32),
+}
+
+/// One function being written out.
+struct Assembler<'a> {
+    names: &'a Interner,
+    /// How the listing spells things, which a template kept as text is filled in with before it is
+    /// read. See [`template`].
+    directives: Directives,
+    func: &'a Func,
+    name: &'a str,
+    /// The section being written, which is the one the cold part goes in while it is written.
+    text: &'a mut Text,
+    /// The section the cold part of a split function goes in, and the one the first part is in
+    /// while the cold part is written. None for a function in one piece and for one whose two parts
+    /// go in one section.
+    other: Option<&'a mut Text>,
+    /// The first block of the cold part, for a function split in two.
+    split: Option<Block>,
+    /// The cold part, once the layout has reached it.
+    cold: Option<Cold>,
+    /// Where each block starts, indexed by the block's own number, or [`usize::MAX`] for one that
+    /// is not in the layout.
+    blocks: Vec<usize>,
+    jumps: Vec<Jump>,
+    /// The frame rules, each with how far into this function the instruction that changed them
+    /// ended.
+    rows: Rows,
+    /// Where each machine instruction began and what it was for, in the order they were written.
+    ///
+    /// Empty in a build that asked for no debug information, which is what `wants` says.
+    lines: Vec<Row>,
+    /// Whether to fill `lines` in at all.
+    wants: bool,
+    /// Where this function starts in the section, which is what those distances are counted from.
+    start: usize,
+    /// Where the room a patcher was promised after the label began, which is where the instruction
+    /// [`rucc_mir::Patch::after`] names was encoded.
+    ///
+    /// [`None`] in a function that was promised none and in one whose room is all in front of the
+    /// label, which is the same answer to two different questions and is why the caller decides
+    /// which of them it asked. See `assemble`.
+    room: Option<usize>,
+    /// How long the loop each block is the head of is, indexed by the block's own number, and zero
+    /// for a block that heads none. See [`loop_sizes`].
+    loops: Vec<usize>,
+    /// Whether the jump tables go in `.rodata` rather than after the code, which they do on ELF.
+    /// See [`Self::tables`].
+    apart: bool,
+    /// Where each call an unwind lands from began and ended, counted from the front of the
+    /// function, with the pad it lands in. See [`rucc_mir::Func::landings`].
+    sites: Vec<(usize, usize, Block)>,
+    /// What each opcode is written as, for the ones already met. See [`Known`].
+    known: &'a mut Known,
+}
+
+/// What each opcode met so far is written as, by the opcode's symbol.
+///
+/// The target's table is looked up by name, which is hashing the name and comparing it, and a
+/// function is thousands of instructions drawn from far fewer opcodes. So each opcode is looked up
+/// once for the whole unit and every instruction after that is one lookup by a number.
+pub(crate) type Known = Map<Symbol, Option<&'static [Written]>>;
+
+/// How long each loop in the function is, from its head to the end of the last jump back to it,
+/// indexed by the head's own number and zero for a block that is not a head.
+///
+/// Worked out by laying the function out once with no padding and throwing the bytes away. That is
+/// exact because every jump here is four bytes of distance whatever the distance is, so no
+/// instruction's length depends on where it lands and padding in front of the head moves the whole
+/// loop without changing its size. The cost is encoding a function twice, and only a function
+/// something asked to pad a loop in pays it.
+pub(crate) fn loop_sizes(
+    names: &Interner,
+    directives: Directives,
+    func: &Func,
+    known: &mut Known,
+) -> Result<Vec<usize>, Error> {
+    let mut sizes = vec![0; func.block_count()];
+    if func.heads.is_empty() {
+        return Ok(sizes);
+    }
+    let mut text = Text::default();
+    let mut scratch = Assembler {
+        names,
+        directives,
+        func,
+        name: "",
+        text: &mut text,
+        other: None,
+        split: None,
+        cold: None,
+        blocks: Vec::new(),
+        jumps: Vec::new(),
+        rows: Vec::new(),
+        lines: Vec::new(),
+        wants: false,
+        start: 0,
+        room: None,
+        loops: Vec::new(),
+        apart: false,
+        sites: Vec::new(),
+        known,
+    };
+    scratch.lay()?;
+    for jump in &scratch.jumps {
+        let To::Block(head) = jump.to else { continue };
+        let start = scratch.blocks[head.index()];
+        // A jump that ends in front of the head is the way into the loop and not the way round it.
+        if start == usize::MAX || jump.end <= start || !func.heads.contains(&head) {
+            continue;
+        }
+        sizes[head.index()] = sizes[head.index()].max(jump.end - start);
+    }
+    Ok(sizes)
+}
+
+impl Assembler<'_> {
+    /// The blocks, and then the jumps between them once every block has a place.
+    fn func(&mut self) -> Result<(), Error> {
+        self.loops = loop_sizes(self.names, self.directives, self.func, self.known)?;
+        self.lay()?;
+        let tables = self.tables()?;
+        self.patch(&tables)
+    }
+
+    /// The blocks, one after another, with the jumps between them left for [`Self::patch`].
+    fn lay(&mut self) -> Result<(), Error> {
+        self.blocks = vec![usize::MAX; self.func.block_count()];
+        // The prologue, first, because nothing in it has a span of its own. The pushes, the frame
+        // and the moves that put the arguments where the body expects them came from no expression
+        // in the source, so without this the front of every function is the one part of it no row
+        // covers, and a program counter in there gets no answer at all rather than a slightly
+        // early one. Where the function was declared is what gcc says over those bytes.
+        if self.wants && !self.func.declared.is_dummy() {
+            self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
+        }
+        let end = self.func.cfi_end();
+        // A function split in two has its first part end at the last instruction in front of the
+        // cold part, and the rows after that one open the cold part instead. See `crate::att`.
+        let hot_end = self.split.and_then(|cold| {
+            self.func
+                .blocks()
+                .take_while(|&block| block != cold)
+                .flat_map(|block| self.func.insts(block))
+                .last()
+        });
+        self.sites.clear();
+        let pads: Map<Inst, Block> = self.func.landings.iter().copied().collect();
+        for block in self.func.blocks() {
+            if Some(block) == self.split {
+                self.cut(block);
+            }
+            if let Some(cold) = &mut self.cold {
+                cold.blocks[block.index()] = true;
+            }
+            // The head of a loop is padded the way the listing asks the assembler to pad it, with
+            // instructions rather than single bytes, since the block in front of it may fall in.
+            // The section is told for the reason an alignment instruction tells it below, since a
+            // place inside a line of the section is one inside a line of memory only if the
+            // section starts on one.
+            let size = self.loops.get(block.index()).copied().unwrap_or(0);
+            if crate::loop_room(size).is_some() {
+                let count = crate::loop_padding(self.text.bytes.len(), size);
+                x86_64::nops(count, &mut self.text.bytes);
+                self.text.align = self.text.align.max(crate::LINE as u32);
+            }
+            self.blocks[block.index()] = self.text.bytes.len();
+            // And the name an image knows the block by, as a symbol at the same byte. The number
+            // the jumps above use is worked out here and stays here, because both ends of a jump
+            // are in this section. An image is in another one, so what it holds is a relocation
+            // and a relocation names a symbol, which is what this is.
+            if let Some(label) = self.func.block_name(block) {
+                let name = self.names.resolve(label).to_owned();
+                self.text.labels.push(Marker { name, at: self.text.bytes.len() });
+            }
+            for inst in self.func.insts(block) {
+                // Before it is encoded, because what is wanted is where it begins and after this
+                // it has already been written. A landing pad is in front of it in a function that
+                // has one, which is why the room is found this way rather than measured from the
+                // top of the function.
+                if self.func.patch.is_some_and(|patch| patch.after == Some(inst)) {
+                    self.room = Some(self.text.bytes.len());
+                }
+                // Where it begins rather than where it ends, which is the other way round from the
+                // frame rules below and for the same reason they are that way round: a debugger is
+                // asking what a program counter is in the middle of, and an unwinder is asking what
+                // the frame looked like at a return address.
+                if self.wants {
+                    let row = Row { at: self.here(), span: self.func.span(inst), inst: Some(inst) };
+                    match &mut self.cold {
+                        Some(cold) => cold.lines.push(row),
+                        None => self.lines.push(row),
+                    }
+                }
+                let began = self.here();
+                // The profiler's call, listed where it begins and written as the nop of the same
+                // length when those were asked for. See [`rucc_mir::Mcount`].
+                let mcount = self.func.mcount.filter(|mcount| mcount.inst == inst);
+                if let Some(mcount) = mcount.filter(|mcount| mcount.record) {
+                    let section = mcount
+                        .section
+                        .map_or(rucc_object::MCOUNT_LOC, |section| self.names.resolve(section));
+                    self.text.mcount.push((self.text.bytes.len(), section.to_owned()));
+                }
+                if mcount.is_some_and(|mcount| mcount.nop) {
+                    self.text.bytes.extend_from_slice(&MCOUNT_NOP);
+                } else {
+                    self.inst(block, inst)?;
+                }
+                // A call an unwind lands somewhere from, as the bytes it is. See [`Site`].
+                if let Some(&pad) = pads.get(&inst) {
+                    self.sites.push((began, self.here(), pad));
+                }
+                if Some(inst) == end || Some(inst) == hot_end {
+                    continue;
+                }
+                // Where the instruction ended, because a row takes effect after the instruction
+                // that changed the answer and an unwinder is looking up a return address, which is
+                // the byte after a call rather than the call itself.
+                let at = self.here();
+                let rows = match &mut self.cold {
+                    Some(cold) => &mut cold.rows,
+                    None => &mut self.rows,
+                };
+                rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
+            }
+        }
+        // Back to the section the first part is in, which is where the tables and the jumps are
+        // worked out from.
+        let apart = self.cold.as_ref().is_some_and(|cold| cold.apart);
+        if let (true, Some(other)) = (apart, self.other.as_mut()) {
+            std::mem::swap(&mut self.text, other);
+        }
+        Ok(())
+    }
+
+    /// How far into the part being written the next byte is, which is what a row and a frame rule
+    /// count from.
+    fn here(&self) -> usize {
+        self.text.bytes.len() - self.cold.as_ref().map_or(self.start, |cold| cold.start)
+    }
+
+    /// Ends the first part of a function split in two at the block the cold part starts with, and
+    /// starts the cold part in the section it goes in.
+    ///
+    /// The cold part is a function of its own as far as the unwind table goes, so its rows open
+    /// with the ones that take a fresh record to the state the first part ended in. See
+    /// [`crate::att::cold_rows`].
+    fn cut(&mut self, block: Block) {
+        let hot = self.text.bytes.len() - self.start;
+        let apart = self.other.is_some();
+        if let Some(other) = self.other.as_mut() {
+            std::mem::swap(&mut self.text, other);
+        }
+        let rows = crate::att::cold_rows(self.func, block).into_iter().map(|op| (0, op)).collect();
+        self.cold = Some(Cold {
+            start: self.text.bytes.len(),
+            hot,
+            blocks: vec![false; self.func.block_count()],
+            apart,
+            rows,
+            lines: Vec::new(),
+        });
+    }
+
+    /// Where the jumps go, now that every block and every table has a place.
+    ///
+    /// A jump from one part of a split function to the other is left to the linker, since the two
+    /// are in different sections, as a relocation against a place in the part it goes to. See
+    /// [`Text::places`].
+    fn patch(&mut self, tables: &[usize]) -> Result<(), Error> {
+        let mut placed = Vec::new();
+        for jump in std::mem::take(&mut self.jumps) {
+            let (to, there) = match jump.to {
+                To::Block(block) => {
+                    let cold = self.cold.as_ref().is_some_and(|cold| cold.blocks[block.index()]);
+                    (self.blocks[block.index()], cold)
+                }
+                To::Table(table) => (tables[table as usize], false),
+            };
+            debug_assert_ne!(to, usize::MAX, "a jump to a block that was never laid out");
+            // The section the jump is in and the one the place it goes to is in, which are the
+            // same section unless the function was split into two of them.
+            let apart = self.cold.as_ref().is_some_and(|cold| cold.apart);
+            let (from, into) = match self.other.as_deref_mut() {
+                Some(other) if apart && jump.cold => (other, Some(&mut *self.text)),
+                Some(other) if apart => (&mut *self.text, Some(other)),
+                _ => (&mut *self.text, None),
+            };
+            if let Some(into) = into.filter(|_| jump.cold != there) {
+                let To::Block(block) = jump.to else {
+                    unreachable!("a table in the other part of a function split in two")
+                };
+                let name = format!("{}{}.{}", self.directives.local(), self.name, block.index());
+                if !placed.contains(&block) {
+                    placed.push(block);
+                    into.places.push(Marker { name: name.clone(), at: to });
+                }
+                let addend =
+                    jump.disp - i64::try_from(jump.end - jump.at).expect("a jump this long");
+                let after = u8::try_from(jump.end - jump.at - 4).expect("an instruction this long");
+                let kind = Reference::Data;
+                from.relocs.push(Reloc { at: jump.at, symbol: name, kind, addend, after });
+                from.bytes[jump.at..jump.at + 4].fill(0);
+                continue;
+            }
+            let distance = i64::try_from(to).expect("a section this size") + jump.disp
+                - i64::try_from(jump.end).expect("a section this size");
+            let distance = i32::try_from(distance)
+                .map_err(|_| Error::Distance { func: self.name.to_owned(), bytes: distance })?;
+            from.bytes[jump.at..jump.at + 4].copy_from_slice(&distance.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    /// The jump tables, giving back where each one starts when it is in these bytes.
+    ///
+    /// On ELF each goes in `.rodata`, which is where gcc and clang put one: a table is read and
+    /// never run, and in the code it takes room in the lines the instruction fetcher reads and is
+    /// counted as code by anything that measures a section. What goes to the writer is which block
+    /// each cell names, counted from the front of the function, and the writer makes each cell a
+    /// relocation, since its two ends are no longer in one section. See [`Table`].
+    ///
+    /// On the other formats the table stays after the last instruction, where every cell is a
+    /// distance from the table to a block with both ends in this section, so the whole table is
+    /// filled in here and the linker is told nothing. The cells are four bytes each and start on a
+    /// four byte boundary, reached by the byte that does nothing, although nothing ever runs into
+    /// it: the last instruction of a function is a return or a jump.
+    fn tables(&mut self) -> Result<Vec<usize>, Error> {
+        let mut starts = Vec::with_capacity(self.func.tables.len());
+        if self.func.tables.is_empty() {
+            return Ok(starts);
+        }
+        if self.apart {
+            let func = self.text.funcs.len();
+            for (index, table) in self.func.tables.iter().enumerate() {
+                let block =
+                    self.func.block_of(table.jump).expect("a table read by a jump in no block");
+                let succs = &self.func[block].succs;
+                let cells = table
+                    .cells
+                    .iter()
+                    .map(|&cell| {
+                        let block = succs[cell as usize].block;
+                        let to = self.blocks[block.index()];
+                        debug_assert_ne!(to, usize::MAX, "a table naming a block never laid out");
+                        // A block in the cold part of a function split into two sections is
+                        // counted from the front of that part, which has no number until it is
+                        // put after the first part. See `merge`.
+                        match &self.cold {
+                            Some(cold) if cold.apart && cold.blocks[block.index()] => {
+                                (usize::MAX, to - cold.start)
+                            }
+                            _ => (func, to - self.start),
+                        }
+                    })
+                    .collect();
+                let name = self.table(index);
+                self.text.tables.push(Table { name, func, cells, absolute: table.absolute });
+            }
+            return Ok(starts);
+        }
+        while self.text.bytes.len() % 4 != 0 {
+            self.text.bytes.push(NOP);
+        }
+        for table in &self.func.tables {
+            let start = self.text.bytes.len();
+            starts.push(start);
+            let block = self.func.block_of(table.jump).expect("a table read by a jump in no block");
+            let succs = &self.func[block].succs;
+            for &cell in &table.cells {
+                let to = self.blocks[succs[cell as usize].block.index()];
+                debug_assert_ne!(to, usize::MAX, "a table naming a block that was never laid out");
+                let distance = i64::try_from(to).expect("a section this size")
+                    - i64::try_from(start).expect("a section this size");
+                let distance = i32::try_from(distance)
+                    .map_err(|_| Error::Distance { func: self.name.to_owned(), bytes: distance })?;
+                self.text.bytes.extend_from_slice(&distance.to_le_bytes());
+            }
+        }
+        Ok(starts)
+    }
+
+    /// The name one jump table of this function goes by, which is the one the listing gives it.
+    fn table(&self, index: usize) -> String {
+        format!("{}{}_j{index}", self.directives.local(), self.name)
+    }
+
+    /// One instruction of the machine IR, as however many instructions of the machine it is.
+    fn inst(&mut self, block: Block, inst: Inst) -> Result<(), Error> {
+        let data = self.func[inst];
+        let spelled = self.names.resolve(data.opcode.name());
+        let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        // The one opcode that is not an instruction. Where the listing writes the assembler's own
+        // directive this has to do what the assembler would have done, which is pad up to the
+        // boundary with the byte that does nothing, since the gap is reached by falling into it.
+        //
+        // The section has to be told as well. The padding puts the next instruction at a multiple of
+        // the boundary counted from the front of the section, and what makes that an address the
+        // program sees is the section itself landing on one, so the boundary goes on the section's
+        // alignment the way a function's own does.
+        if opcode == x86_64::ALIGN {
+            let bytes = data.imm.map_or(0, |imm| self.func[imm].0);
+            let boundary = u32::try_from(bytes).ok().filter(|at| at.is_power_of_two());
+            let Some(boundary) = boundary else {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            self.text.align = self.text.align.max(boundary);
+            let step = boundary as usize;
+            while self.text.bytes.len() % step != 0 {
+                self.text.bytes.push(NOP);
+            }
+            return Ok(());
+        }
+        // The other one, which is the bytes a template wrote out as themselves. There is nothing to
+        // encode: the program already said what the processor is to be handed, so they go down as
+        // they are.
+        if opcode == x86_64::LITERAL {
+            let Some(imm) = data.imm else {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            let before = self.text.bytes.len();
+            self.text.bytes.extend(x86_64::unpacked(self.func[imm].0));
+            if self.text.bytes.len() == before {
+                return Err(Error::Opcode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            }
+            return Ok(());
+        }
+        // A template kept as text, read on its own and laid down as what it came to. One the
+        // reader cannot take on its own sends the whole unit to the assembler as a listing instead
+        // and never comes here, see [`crate::kept`], so a refusal here is that check and this one
+        // disagreeing.
+        if opcode == x86_64::TEMPLATE {
+            let (bytes, relocs) =
+                template(self.func, block, inst, self.names, self.directives).map_err(|why| {
+                    Error::Encode { func: self.name.to_owned(), opcode: spelled.to_owned(), why }
+                })?;
+            let at = self.text.bytes.len();
+            self.text.bytes.extend(bytes);
+            self.text
+                .relocs
+                .extend(relocs.into_iter().map(|reloc| Reloc { at: reloc.at + at, ..reloc }));
+            return Ok(());
+        }
+        let known =
+            *self.known.entry(data.opcode.name()).or_insert_with(|| x86_64::written(opcode));
+        let Some(written) = known else {
+            return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
+        };
+        let operands = &self.func[data.operands];
+        for machine in written {
+            // What each argument turned out to be, and what the encoder has to be told about
+            // afterwards for the ones that name something it cannot see.
+            let mut values = Vec::with_capacity(machine.args.len());
+            let mut wanted = None;
+            // The other thing an address can name, which is a place in this same function and so is
+            // a distance nothing outside the file has to be told about.
+            let mut labelled = None;
+            // Whether the immediate is the address of a name, which is then the last four bytes.
+            let mut carried = false;
+            for arg in machine.args {
+                values.push(match *arg {
+                    Arg::Reg(at, width) => {
+                        Value::Reg(self.phys(operands[usize::from(at)], spelled)?, width)
+                    }
+                    // The same thing in the other file, which the encoder has to be told apart
+                    // from the one above: which file a register is in is part of which instruction
+                    // it is, and the table it looks a row up in is what says so.
+                    Arg::Xmm(at) => Value::Xmm(self.phys(operands[usize::from(at)], spelled)?),
+                    // The two halves of one word. The encoder numbers a high byte as the low one
+                    // plus four, which is the whole of the difference between them in the bytes
+                    // and is also why only the first four registers have one.
+                    Arg::Low(at) => {
+                        Value::Reg(self.phys(operands[usize::from(at)], spelled)?, Width::Byte)
+                    }
+                    Arg::High(at) => Value::High(self.phys(operands[usize::from(at)], spelled)?),
+                    // A register named outright is the high half of the first one, which an
+                    // eight bit remainder comes back in, or one of the registers only AVX-512
+                    // has, which nothing is allocated to and which only the zeroing in front of a
+                    // `ret` names: the top sixteen vector registers whole, and the eight masks.
+                    Arg::Named(name) => named(name),
+                    // A depth on the x87 stack, which carries nothing across because there is
+                    // nothing to carry: the depth is in the opcode byte the mnemonic picks, so
+                    // what the encoder needs from here is that an argument was there at all.
+                    Arg::Stack(_) => Value::Stack,
+                    Arg::Lit(lane) => Value::Imm(i64::from(lane)),
+                    // The first operand read, which is where a call puts the address it goes
+                    // through. Everything in front of it is a register the call writes.
+                    Arg::Through => {
+                        Value::Reg(self.phys(operands[defs(operands)], spelled)?, Width::Quad)
+                    }
+                    // The address of a name stored under the kernel code model, which is the
+                    // four byte immediate of a `movq` that the machine sign extends, the way gcc
+                    // writes `movq $md_ops, 8(%rax)`. See `fold::named_stores`.
+                    Arg::Imm if machine.mnemonic == "movq" && data.symbol.is_some() => {
+                        let symbol = data.symbol.map(|symbol| self.names.resolve(symbol));
+                        let disp = data.imm.map_or(0, |imm| self.func[imm].0);
+                        wanted = symbol.map(|symbol| (symbol.to_owned(), Reference::Signed, disp));
+                        carried = true;
+                        Value::Imm(0)
+                    }
+                    // Any other immediate that is the address of a name is i386's, which a listing
+                    // takes to the assembler.
+                    Arg::Imm if data.symbol.is_some() => {
+                        return Err(Error::Encode {
+                            func: self.name.to_owned(),
+                            opcode: spelled.to_owned(),
+                            why: "an immediate that is the address of a name is i386's, and this \
+                                  writes x86-64"
+                                .to_owned(),
+                        });
+                    }
+                    Arg::Imm => Value::Imm(data.imm.map_or(0, |imm| self.func[imm].0)),
+                    // The address a call or a jump reads where it goes from is the same bytes as
+                    // any other address, and the star in its text is nothing in them.
+                    Arg::Mem | Arg::Indirect => {
+                        let amode = data.mem.map(|mem| self.func[mem]);
+                        let (addr, symbol) = self.addr(operands, amode.as_ref(), spelled)?;
+                        if let Some(symbol) = symbol {
+                            // A mode that reads the global offset table names the slot rather than
+                            // the thing, and the four bytes are the same four bytes either way, so
+                            // which relocation it is is the whole of the difference here.
+                            let kind = match amode.map_or(Reach::Itself, |mem| mem.reach) {
+                                Reach::Itself => Reference::Data,
+                                Reach::Table => Reference::Got,
+                                Reach::Thread => Reference::Thread,
+                                Reach::Section => Reference::Section,
+                                Reach::Absolute => Reference::Signed,
+                                // i386 only, which this does not encode: a listing takes it to
+                                // the assembler instead.
+                                Reach::GotOff => {
+                                    return Err(Error::Encode {
+                                        func: self.name.to_owned(),
+                                        opcode: spelled.to_owned(),
+                                        why: "an address counted from the global offset table is \
+                                              i386's, and this writes x86-64"
+                                            .to_owned(),
+                                    });
+                                }
+                            };
+                            wanted = Some((symbol, kind, i64::from(addr.disp)));
+                        }
+                        if let Some(block) = amode.and_then(|mem| mem.block) {
+                            labelled = Some((To::Block(block), i64::from(addr.disp)));
+                        }
+                        if let Some(table) = amode.and_then(|mem| mem.table) {
+                            // In another section, so the linker's to fill in like any symbol. The
+                            // kernel code model's table is reached by its own address, which is
+                            // the four bytes the machine sign extends.
+                            if self.apart && (addr.rip || addr.linked) {
+                                let name = self.table(table as usize);
+                                let kind =
+                                    if addr.linked { Reference::Signed } else { Reference::Data };
+                                wanted = Some((name, kind, i64::from(addr.disp)));
+                            } else {
+                                labelled = Some((To::Table(table), i64::from(addr.disp)));
+                            }
+                        }
+                        Value::Mem(addr)
+                    }
+                    Arg::Symbol => {
+                        let symbol =
+                            data.symbol.map(|symbol| self.names.resolve(symbol).to_owned());
+                        if let Some(symbol) = symbol {
+                            wanted = Some((symbol, Reference::Call, 0));
+                        }
+                        Value::Dest
+                    }
+                    // Where a conditional jump goes is the first arm, because the block layout
+                    // guarantees the second is the block laid out next and is fallen into.
+                    Arg::Label => Value::Dest,
+                });
+            }
+
+            // The address of a name under the kernel code model, which is the name as a number and
+            // is written as the immediate of a `movq`, the way gcc writes it. The four bytes of
+            // the immediate are the last four of the instruction.
+            let mut mnemonic = machine.mnemonic;
+            let immediate = mnemonic == "leaq"
+                && data.mem.is_some_and(|mem| absolute_only(&self.func[mem]))
+                && matches!(values.first(), Some(Value::Mem(_)));
+            if immediate {
+                mnemonic = "movq";
+                values[0] = Value::Imm(0);
+            }
+            let start = self.text.bytes.len();
+            let holes = x86_64::encode(mnemonic, &values, &mut self.text.bytes).map_err(|why| {
+                Error::Encode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                    why: why.to_string(),
+                }
+            })?;
+            let end = self.text.bytes.len();
+
+            // A hole is either something outside the file, which is a relocation, or a block of
+            // this function, which is patched once every block has a place.
+            if let Some((symbol, kind, disp)) = wanted {
+                let kind = match kind {
+                    Reference::Got => slot(&self.text.bytes[start..end], Mode::Bits64),
+                    kind => kind,
+                };
+                let at = match kind {
+                    Reference::Call => holes.dest,
+                    Reference::Data
+                    | Reference::Got
+                    | Reference::GotBare
+                    | Reference::GotKept
+                    | Reference::Thread => holes.rip,
+                    Reference::Section => holes.disp,
+                    Reference::Signed if immediate || carried => Some(end - 4),
+                    Reference::Signed => holes.disp,
+                    // An address written into an image rather than reached by an instruction, and
+                    // how far something is from the front of one, which is what a table of data
+                    // holds. Nothing above produces either, because every reference an instruction
+                    // makes is a distance from where the instruction ends or, under the kernel
+                    // code model, the four bytes above. The field of an AArch64 instruction is not
+                    // something this machine has.
+                    Reference::Address { .. }
+                    | Reference::Image
+                    | Reference::Away
+                    | Reference::AwayWide
+                    | Reference::Short
+                    | Reference::Tiny
+                    | Reference::Field(_)
+                    | Reference::Riscv(_)
+                    | Reference::Sum { .. }
+                    | Reference::Leb { .. } => {
+                        unreachable!("an instruction wanting an address")
+                    }
+                    // The ways i386 reaches the global offset table and thread-local storage,
+                    // which this encoder does not write yet.
+                    Reference::GotOffset
+                    | Reference::GotFront
+                    | Reference::Slot
+                    | Reference::SlotKept
+                    | Reference::Tls(_) => {
+                        unreachable!("an x86-64 instruction reaching the table the i386 way")
+                    }
+                };
+                let at = at.expect("an instruction naming a symbol leaves room for the distance");
+                let addend = match kind {
+                    // Counted from the front of the section, so nothing about where the
+                    // instruction ends comes into it.
+                    Reference::Section | Reference::Signed => disp,
+                    _ => disp - i64::try_from(end - at).expect("an instruction this long"),
+                };
+                // How many bytes of the instruction come after the four the linker writes over,
+                // which is what is left of the distance from the hole to the end of it. Already in
+                // the addend and written down again because COFF wants the two apart, and there is
+                // nowhere else it can be worked out: by the time a writer sees the relocation the
+                // instruction it is in is bytes like any others.
+                let after = u8::try_from(end - at - 4).expect("an instruction this long");
+                self.text.relocs.push(Reloc { at, symbol, kind, addend, after });
+                // The addend is the whole of it, so the four bytes are left as nothing, which is
+                // what gas leaves. tcc's linker adds to what is there rather than writing over it,
+                // and a `mov cstr_buf+8(%rip)` with the eight in both places read eight bytes
+                // past the member it wanted.
+                self.text.bytes[at..at + 4].fill(0);
+            } else if let Some((to, disp)) = labelled {
+                // The address of a label, which is the four bytes an address counted from the
+                // instruction pointer leaves and is patched where a jump is patched rather than
+                // written out as a relocation, since both ends of it are in this function.
+                let at = holes.rip.expect("an address naming a label leaves room for the distance");
+                let cold = self.cold.is_some();
+                self.jumps.push(Jump { at, end, to, disp, cold });
+            } else if let Some(at) = holes.dest {
+                match self.func[block].succs.first() {
+                    Some(call) => {
+                        let (to, cold) = (To::Block(call.block), self.cold.is_some());
+                        self.jumps.push(Jump { at, end, to, disp: 0, cold });
+                    }
+                    None => debug_assert!(false, "a jump out of a block with no arms"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One address, with the operands it names resolved and the symbol it names handed back.
+    ///
+    /// A symbol with no base and no index is reached from the instruction pointer, which is how a
+    /// global is reached in position independent code and the only way this compiler reaches one.
+    /// The displacement is carried to the relocation's addend, and the four bytes it would have
+    /// gone in are left as nothing once the relocation is written.
+    fn addr(
+        &self,
+        operands: &[Operand],
+        amode: Option<&Amode>,
+        opcode: &str,
+    ) -> Result<(Addr, Option<String>), Error> {
+        let Some(amode) = amode else {
+            return Ok((Addr::default(), None));
+        };
+        let base = match amode.base {
+            Some(at) => Some(self.phys(operands[usize::from(at)], opcode)?),
+            None => None,
+        };
+        let index = match amode.index {
+            Some(at) => Some(self.phys(operands[usize::from(at)], opcode)?),
+            None => None,
+        };
+        let symbol = amode.symbol.map(|symbol| self.names.resolve(symbol).to_owned());
+        // A block is reached the same way and leaves the same four bytes. What is different is who
+        // fills them in, which is this file rather than the linker, and that is the caller's to
+        // sort out: what it needs from here is that the address was written that way at all.
+        let names = symbol.is_some() || amode.block.is_some() || amode.table.is_some();
+        let absolute =
+            (symbol.is_some() || amode.table.is_some()) && amode.reach == Reach::Absolute;
+        let rip = names && base.is_none() && index.is_none() && !absolute;
+        // Or a symbol's offset in its section added to a register, which is the linker's to fill
+        // in as well but is not counted from the instruction. The symbol's own address under the
+        // kernel code model is the same four bytes, with or without registers added to it, and so
+        // is a jump table's under that model.
+        let linked = (symbol.is_some() && matches!(amode.reach, Reach::Section | Reach::Absolute))
+            || absolute;
+        let segment = amode.segment;
+        let addr = Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment, linked };
+        Ok((addr, if rip || linked { symbol } else { None }))
+    }
+
+    /// The real register one operand ended up in.
+    fn phys(&self, operand: Operand, opcode: &str) -> Result<PhysReg, Error> {
+        operand
+            .reg
+            .phys()
+            .ok_or_else(|| Error::Virtual { func: self.name.to_owned(), opcode: opcode.to_owned() })
+    }
+}
+
+/// Whether an address is a name's own address under the kernel code model and nothing else, no
+/// register and no segment, which is what a `leaq` of it is written as a `movq` of an immediate for.
+pub(crate) fn absolute_only(amode: &Amode) -> bool {
+    amode.reach == Reach::Absolute
+        && amode.symbol.is_some()
+        && amode.base.is_none()
+        && amode.index.is_none()
+        && amode.segment.is_none()
+}
+
+/// Which relocation a read of a slot of the global offset table asks for, from the bytes of the
+/// instruction it is in.
+///
+/// The linker can turn a slot back into the address itself in only a few instructions: a `mov`
+/// from memory, `test`, the eight that do arithmetic from memory into a register, and a `call` or
+/// `jmp` through memory, none of them behind a `0x66`. gas asks for the relocation that allows it
+/// in those and the plain one everywhere else, and says whether there is a REX prefix, which is
+/// what the linker needs to know to rewrite the instruction in place. In thirty two bit mode
+/// `0x40` to `0x4F` are `inc` and `dec` rather than a REX prefix, so they are the instruction.
+pub(crate) fn slot(bytes: &[u8], mode: Mode) -> Reference {
+    let mut rest = bytes;
+    let mut rex = false;
+    while let [first, tail @ ..] = rest {
+        match first {
+            0x66 => return Reference::GotKept,
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3 => rest = tail,
+            byte if mode.rex(*byte).is_some() => {
+                rex = true;
+                rest = tail;
+            }
+            _ => break,
+        }
+    }
+    let rewritten = match rest {
+        [0x8B | 0x85, ..] => true,
+        [0xFF, modrm, ..] => matches!((modrm >> 3) & 7, 2 | 4),
+        [op, ..] => *op & !0x38 == 0x03,
+        [] => false,
+    };
+    match (rewritten, rex) {
+        (false, _) => Reference::GotKept,
+        (true, true) => Reference::Got,
+        (true, false) => Reference::GotBare,
+    }
+}
+
+/// The value a register an instruction names outright is, which is `ah` unless it is one of the
+/// registers only AVX-512 has. See [`Arg::Named`].
+fn named(name: &str) -> Value {
+    let number = |prefix: &str| name.strip_prefix(prefix).and_then(|it| it.parse::<u8>().ok());
+    if let Some(number) = number("zmm") {
+        Value::Vector(number, x86_64::Length::Zmm)
+    } else if let Some(number) = number("xmm") {
+        Value::Vector(number, x86_64::Length::Xmm)
+    } else if let Some(number) = number("k") {
+        Value::Mask(number)
+    } else {
+        Value::High(RAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rucc_base::Interner;
+    use rucc_mir::{BlockCall, Mem, Opcode, Reg, Table};
+    use rucc_object::{Binding, Visibility};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
+    use rucc_target::{Arch, Env, Os, Triple};
+
+    /// A linux x86-64 target, which is the one every case here is written for.
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// One function of one block, with those instructions in it, assembled.
+    fn write(build: impl FnOnce(&mut Func, &mut Interner)) -> Text {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        build(&mut func, &mut names);
+        assemble(&[func], &names, &target(), true, false)
+            .expect("a function that was allocated")
+            .text
+    }
+
+    /// Those bytes, as the hexadecimal a manual writes them in.
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+    }
+
+    /// An addition of two registers, which is the smallest instruction with operands there is.
+    fn add(func: &mut Func, names: &mut Interner) {
+        let block = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        func.build(block, add)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+    }
+
+    #[test]
+    fn an_instruction_is_the_bytes_the_target_says_it_is() {
+        let text = write(add);
+        assert_eq!(hex(&text.bytes), "01 c8");
+        let f = Extent {
+            name: "f".to_owned(),
+            start: 0,
+            len: 2,
+            align: FUNC_ALIGN,
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            patch: None,
+            hooked: 0,
+            landings: Vec::new(),
+        };
+        assert_eq!(text.funcs, [f]);
+        assert!(text.relocs.is_empty());
+    }
+
+    #[test]
+    fn an_opcode_the_machine_has_no_single_instruction_for_is_all_the_ones_it_has() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let cmp = Opcode::new(names.intern("x64.cmp_set_l_64"));
+            func.build(block, cmp)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .operand(Operand::read(Reg::physical(RDX), GPR))
+                .finish();
+        });
+        // The comparison at the width it was asked for and then the set, which is the same two
+        // instructions the assembly path writes and is why one description rather than two.
+        assert_eq!(hex(&text.bytes), "48 39 d1 0f 9c c0");
+    }
+
+    #[test]
+    fn an_opcode_that_is_not_an_instruction_is_no_bytes_at_all() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let ret = Opcode::new(names.intern("x64.ret_val_32"));
+            func.build(block, ret).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        });
+        assert!(text.bytes.is_empty(), "{:?}", text.bytes);
+    }
+
+    #[test]
+    fn an_alignment_is_the_bytes_between_where_it_is_and_the_boundary_it_asks_for() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
+            let align = Opcode::new(names.intern("x64.align"));
+            let two = |func: &mut Func| {
+                func.build(block, add)
+                    .operand(Operand::write(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RCX), GPR))
+                    .finish();
+            };
+            two(func);
+            func.build(block, align).imm(8).finish();
+            two(func);
+        });
+        // Two bytes of addition, six of nothing, two more of addition. The padding is the one byte
+        // instruction that does nothing rather than a run of zeroes, because the processor may walk
+        // through it to get to what comes after, which is the whole reason a program asks.
+        assert_eq!(hex(&text.bytes), "01 c8 90 90 90 90 90 90 01 c8");
+        // The section has to be told as well. A function aligned to eight inside a section aligned
+        // to one is aligned to eight in its own reckoning and to nothing at all in the program's.
+        assert!(text.align >= 8, "{}", text.align);
+    }
+
+    /// The bytes a template wrote out itself, which go down as they are.
+    ///
+    /// `xgetbv` written as its three bytes, which is how every program that has one writes it,
+    /// between two instructions so that what is checked is that the bytes land where the program
+    /// put them and not just that they land.
+    #[test]
+    fn a_byte_out_of_a_template_is_that_byte_and_nothing_around_it() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("x64.add_rr_32"));
+            let byte = Opcode::new(names.intern("x64.byte"));
+            let two = |func: &mut Func| {
+                func.build(block, add)
+                    .operand(Operand::write(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RAX), GPR))
+                    .operand(Operand::read(Reg::physical(RCX), GPR))
+                    .finish();
+            };
+            two(func);
+            let bytes = x86_64::packed(&[0x0f, 0x01, 0xd0]).expect("three bytes fit");
+            func.build(block, byte).imm(bytes).finish();
+            two(func);
+        });
+        assert_eq!(hex(&text.bytes), "01 c8 0f 01 d0 01 c8");
+    }
+
+    #[test]
+    fn a_jump_inside_a_function_is_filled_in_rather_than_left_to_the_linker() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let first = func.create_block();
+        let second = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        func.build(first, add)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp"));
+        func.build(second, jmp).finish();
+        func.succs_mut(second).push(BlockCall::to(first));
+
+        let text = assemble(&[func], &names, &target(), true, false).expect("two blocks").text;
+        // Two bytes of addition, then a jump back over itself and over them, which is seven bytes
+        // backwards because a jump counts from where it ends.
+        assert_eq!(hex(&text.bytes), "01 c8 e9 f9 ff ff ff");
+        assert!(text.relocs.is_empty(), "a jump inside a function is not the linker's business");
+    }
+
+    /// A function split in two, the first part jumping to the cold part and back, and a function
+    /// put in `.text.unlikely` whole.
+    fn moved(names: &mut Interner) -> Vec<Func> {
+        let mut f = Func::new(names.intern("f"));
+        let first = f.create_block();
+        let second = f.create_block();
+        let addition = Opcode::new(names.intern("x64.add_rr_32"));
+        f.build(first, addition)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp"));
+        f.build(first, jmp).finish();
+        f.succs_mut(first).push(BlockCall::to(second));
+        f.build(second, jmp).finish();
+        f.succs_mut(second).push(BlockCall::to(first));
+        f.cold = Some(second);
+        let mut g = Func::new(names.intern("g"));
+        add(&mut g, names);
+        g.section = Some(names.intern(".text.unlikely"));
+        vec![f, g]
+    }
+
+    #[test]
+    fn the_cold_part_of_a_split_function_is_a_section_of_its_own_the_linker_jumps_into() {
+        let mut names = Interner::new();
+        let funcs = moved(&mut names);
+        let text = assemble_in(&funcs, &names, &target(), true, false, false).expect("two").text;
+        // The first part is the addition and the jump, and the cold part is put after it as the
+        // section it goes in, with the function moved whole after that on its own boundary,
+        // counted from the front of the section.
+        let runs =
+            vec![rucc_object::Run { name: ".text.unlikely".to_owned(), start: 7, align: 16 }];
+        assert_eq!(text.runs, runs);
+        let extents: Vec<(&str, usize, usize, Binding)> = text
+            .funcs
+            .iter()
+            .map(|func| (func.name.as_str(), func.start, func.len, func.binding))
+            .collect();
+        assert_eq!(
+            extents,
+            vec![
+                ("f", 0, 7, Binding::Global),
+                ("f.cold", 7, 5, Binding::Local),
+                ("g", 23, 2, Binding::Global),
+            ]
+        );
+        // Each jump between the parts is the linker's, to a place in the other part, and neither
+        // place is a symbol.
+        let relocs: Vec<(usize, &str, i64)> = text
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.addend))
+            .collect();
+        assert_eq!(relocs, vec![(3, ".Lf.1", -4), (8, ".Lf.0", -4)]);
+        let places: Vec<(&str, usize)> =
+            text.places.iter().map(|place| (place.name.as_str(), place.at)).collect();
+        assert_eq!(places, vec![(".Lf.0", 0), (".Lf.1", 7)]);
+        assert!(text.labels.is_empty(), "{:?}", text.labels);
+        assert_eq!(&text.bytes[2..7], &[0xe9, 0, 0, 0, 0]);
+        assert_eq!(&text.bytes[7..12], &[0xe9, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn under_function_sections_the_cold_part_is_in_a_section_named_for_its_function() {
+        let mut names = Interner::new();
+        let mut funcs = moved(&mut names);
+        funcs.truncate(1);
+        let text = assemble_in(&funcs, &names, &target(), true, false, true).expect("one").text;
+        let runs: Vec<&str> = text.runs.iter().map(|run| run.name.as_str()).collect();
+        assert_eq!(runs, vec![".text.unlikely.f"]);
+        assert_eq!(text.runs[0].align, 1, "nothing in the cold part asked for a boundary");
+    }
+
+    #[test]
+    fn the_address_of_a_label_is_filled_in_here_as_well() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let first = func.create_block();
+        let second = func.create_block();
+        let lea = Opcode::new(names.intern("x64.lea_64"));
+        func.build(first, lea)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::block(second))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(first, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        func.succs_mut(first).push(BlockCall::to(second));
+        func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+
+        let text = assemble(&[func], &names, &target(), true, false).expect("two blocks").text;
+        // Seven bytes of address, two of jump, and then the block. The distance is two, because
+        // the four bytes count from the end of the instruction that holds them and the jump is
+        // what is in between.
+        assert_eq!(hex(&text.bytes), "48 8d 05 02 00 00 00 ff e0 c3");
+        assert!(text.relocs.is_empty(), "a label of this function is not the linker's business");
+    }
+
+    /// A function that jumps through a table of three cells to one of two returns.
+    fn switching(names: &mut Interner) -> Func {
+        let mut func = Func::new(names.intern("f"));
+        let head = func.create_block();
+        let first = func.create_block();
+        let second = func.create_block();
+        let lea = Opcode::new(names.intern("x64.lea_64"));
+        func.build(head, lea)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::table(0))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+        let jump = func.build(head, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        func.succs_mut(head).push(BlockCall::to(first));
+        func.succs_mut(head).push(BlockCall::to(second));
+        func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
+        func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+        func.tables.push(Table { jump, cells: vec![0, 1, 0], absolute: false });
+        func
+    }
+
+    #[test]
+    fn a_jump_table_on_elf_goes_to_the_writer_with_where_each_block_is() {
+        let mut names = Interner::new();
+        let func = switching(&mut names);
+        let text = assemble(&[func], &names, &target(), true, false).expect("a table").text;
+        // Seven bytes of address, two of jump and two returns, and nothing after them: the table
+        // is not in the code. The address is the linker's to fill in, counted from the end of
+        // the instruction, which is four bytes past the hole.
+        assert_eq!(hex(&text.bytes), "48 8d 05 00 00 00 00 ff e0 c3 c3");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: ".Lf_j0".to_owned(),
+                kind: Reference::Data,
+                addend: -4,
+                after: 0
+            }]
+        );
+        // The two returns are nine and ten bytes into the function.
+        let table = rucc_object::Table {
+            name: ".Lf_j0".to_owned(),
+            func: 0,
+            cells: vec![(0, 9), (0, 10), (0, 9)],
+            absolute: false,
+        };
+        assert_eq!(text.tables, [table]);
+    }
+
+    #[test]
+    fn a_jump_table_on_windows_is_written_after_the_code_as_distances_from_itself() {
+        let mut names = Interner::new();
+        let func = switching(&mut names);
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Windows, Env::Gnu));
+        let text = assemble(&[func], &names, &target, true, false).expect("a table").text;
+        // Seven bytes of address, two of jump and two returns end at eleven, one byte that does
+        // nothing brings the table to twelve, and each cell is how far back its block is from
+        // there. The address counts from the end of its own instruction, so it is five.
+        assert_eq!(
+            hex(&text.bytes),
+            "48 8d 05 05 00 00 00 ff e0 c3 c3 90 fd ff ff ff fe ff ff ff fd ff ff ff"
+        );
+        assert!(text.relocs.is_empty(), "a table of this function is not the linker's business");
+        assert!(text.tables.is_empty(), "{:?}", text.tables);
+    }
+
+    #[test]
+    fn a_call_leaves_the_linker_the_name_of_what_it_calls() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let call = Opcode::new(names.intern("x64.call"));
+        let callee = names.intern("puts");
+        func.build(block, call).symbol(callee).finish();
+
+        let text = assemble(&[func], &names, &target(), true, false).expect("a call").text;
+        assert_eq!(hex(&text.bytes), "e8 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 1,
+                symbol: "puts".to_owned(),
+                kind: Reference::Call,
+                addend: -4,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_global_is_a_relocation_counted_from_the_end_of_the_instruction() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let load = Opcode::new(names.intern("x64.mov_rm_64"));
+        let global = names.intern("counter");
+        func.build(block, load)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::of(global).plus(8))
+            .finish();
+
+        let text =
+            assemble(&[func], &names, &target(), true, false).expect("a load of a global").text;
+        // The four bytes are nothing, as gas leaves them, because tcc's linker adds to what is
+        // there and would count the eight twice.
+        assert_eq!(hex(&text.bytes), "48 8b 05 00 00 00 00");
+        // Four bytes back to where the instruction ends, and then the eight the address already
+        // meant. A relocation counts from where its own bytes start and an instruction counts
+        // from where it ends, and the addend is what makes up the difference.
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: "counter".to_owned(),
+                kind: Reference::Data,
+                addend: 4,
+                after: 0
+            }]
+        );
+    }
+
+    /// The room a patcher was promised, on both sides of the symbol.
+    ///
+    /// What holds the two halves to the same byte. The half in front of the label is written as a
+    /// byte here and the half after it is encoded from the opcode like any other instruction, so
+    /// this is what would notice if the machine ever encoded one of them as something else.
+    #[test]
+    fn an_entry_promised_to_a_patcher_is_bytes_that_do_nothing_on_both_sides_of_the_symbol() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let pad = Opcode::new(names.intern("x64.nop"));
+        let first = func.build(block, pad).finish();
+        func.build(block, pad).finish();
+        add(&mut func, &mut names);
+        func.patch = Some(rucc_mir::Patch { before: 3, pad, after: Some(first) });
+
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a function with room in it")
+            .text;
+        assert_eq!(hex(&text.bytes), "90 90 90 90 90 01 c8");
+        let [f] = &text.funcs[..] else { panic!("one function") };
+        // The symbol is after the room in front of the label and its size counts none of it, which
+        // is what makes a backtrace through the function name the function rather than the room.
+        assert_eq!(f.start, 3);
+        assert_eq!(f.len, 4);
+        // And the record points at the front of the whole thing, which here is the front of the
+        // function's bytes because there is room in front of the label.
+        assert_eq!(f.patch, Some(Patch { at: 0, before: 3 }));
+    }
+
+    /// The same when the room is all after the label, which is what one number asks for.
+    #[test]
+    fn room_that_is_all_after_the_label_is_recorded_where_it_really_starts() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        // A landing pad in front of it, which is the one thing that goes between the label and the
+        // room and is why the record is not just the top of the function.
+        let landing = Opcode::new(names.intern("x64.endbr64"));
+        func.build(block, landing).finish();
+        let pad = Opcode::new(names.intern("x64.nop"));
+        let first = func.build(block, pad).finish();
+        func.build(block, pad).finish();
+        add(&mut func, &mut names);
+        func.patch = Some(rucc_mir::Patch { before: 0, pad, after: Some(first) });
+
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a function with room in it")
+            .text;
+        assert_eq!(hex(&text.bytes), "f3 0f 1e fa 90 90 01 c8");
+        let [f] = &text.funcs[..] else { panic!("one function") };
+        assert_eq!(f.start, 0);
+        assert_eq!(f.patch, Some(Patch { at: 4, before: 0 }));
+    }
+
+    #[test]
+    fn a_global_read_out_of_the_offset_table_asks_for_the_relocation_that_names_the_slot() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let load = Opcode::new(names.intern("x64.mov_rm_64"));
+        let away = names.intern("away");
+        func.build(block, load)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::got(away))
+            .finish();
+
+        let text = assemble(&[func], &names, &target(), true, false)
+            .expect("a load through the offset table")
+            .text;
+        // A `mov` with a REX prefix, which the relocation requires by name: the linker is allowed
+        // to turn it back into a `lea`, and it can only do that when it knows what it is looking
+        // at down to the prefix.
+        assert_eq!(hex(&text.bytes), "48 8b 05 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: "away".to_owned(),
+                kind: Reference::Got,
+                addend: -4,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_name_under_the_kernel_model_is_a_movq_of_the_number() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            let here = names.intern("here");
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem { disp: 8, ..Mem::absolute(here) })
+                .finish();
+        });
+        // `movq $here+8, %rax`, the form gcc writes, with the four bytes the machine sign extends
+        // at the end and the addend in the relocation rather than in them.
+        assert_eq!(hex(&text.bytes), "48 c7 c0 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: "here".to_owned(),
+                kind: Reference::Signed,
+                addend: 8,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn an_indexed_name_under_the_kernel_model_is_one_instruction() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
+            let tab = names.intern("tab");
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem {
+                    index: Some(Operand::read(Reg::physical(RDX), GPR)),
+                    scale: 8,
+                    disp: 16,
+                    ..Mem::absolute(tab)
+                })
+                .finish();
+        });
+        // `movq tab+16(,%rdx,8), %rax`: no base, so the four bytes after the index byte are the
+        // address, and they are `R_X86_64_32S` rather than anything counted from the instruction.
+        assert_eq!(hex(&text.bytes), "48 8b 04 d5 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 4,
+                symbol: "tab".to_owned(),
+                kind: Reference::Signed,
+                addend: 16,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn an_address_that_names_a_register_is_not_a_relocation() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(
+                    Mem::at(Operand::read(Reg::physical(RCX), GPR))
+                        .indexed(Operand::read(Reg::physical(RDX), GPR), 4)
+                        .plus(-16),
+                )
+                .finish();
+        });
+        assert_eq!(hex(&text.bytes), "48 8d 44 91 f0");
+        assert!(text.relocs.is_empty());
+    }
+
+    #[test]
+    fn every_function_starts_on_a_boundary_and_the_space_in_front_of_one_does_nothing() {
+        let mut names = Interner::new();
+        let mut first = Func::new(names.intern("f"));
+        add(&mut first, &mut names);
+        let mut second = Func::new(names.intern("g"));
+        add(&mut second, &mut names);
+
+        let text =
+            assemble(&[first, second], &names, &target(), true, false).expect("two functions").text;
+        assert_eq!(text.funcs[1].start, 16);
+        assert_eq!(text.bytes.len(), 18);
+        assert!(text.bytes[2..16].iter().all(|byte| *byte == NOP), "{:?}", text.bytes);
+    }
+
+    #[test]
+    fn a_function_that_was_never_allocated_is_refused_rather_than_encoded_wrongly() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let vreg = func.new_vreg(GPR);
+        let neg = Opcode::new(names.intern("x64.neg_r_32"));
+        func.build(block, neg).operand(Operand::write(vreg, GPR)).finish();
+        let error =
+            assemble(&[func], &names, &target(), true, false).expect_err("a virtual register");
+        assert_eq!(
+            error,
+            Error::Virtual { func: "f".to_owned(), opcode: "x64.neg_r_32".to_owned() }
+        );
+    }
+
+    #[test]
+    fn an_opcode_the_target_does_not_describe_is_refused() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let made_up = Opcode::new(names.intern("x64.frobnicate"));
+        func.build(block, made_up).finish();
+        let error =
+            assemble(&[func], &names, &target(), true, false).expect_err("no such instruction");
+        assert_eq!(
+            error,
+            Error::Opcode { func: "f".to_owned(), opcode: "x64.frobnicate".to_owned() }
+        );
+    }
+
+    #[test]
+    fn a_build_that_asked_for_debug_information_is_told_where_each_instruction_began() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        for at in 0..2u32 {
+            func.build(block, add)
+                .at(Span::new(at * 10, at * 10 + 3))
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .finish();
+        }
+
+        // And which instruction each row is for, which the line table has no use for and the
+        // locations do, since a stretch a local is somewhere over is named by an instruction at
+        // each end and this is where one gets an address.
+        let line: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+        let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
+        assert_eq!(
+            out.lines,
+            vec![vec![
+                Row { at: 0, span: Span::new(0, 3), inst: Some(line[0]) },
+                Row { at: 2, span: Span::new(10, 13), inst: Some(line[1]) },
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_function_that_knows_where_it_was_declared_says_so_over_its_prologue() {
+        // The front of a function is instructions no expression in the source asked for, so
+        // nothing there carries a span and the bytes would be covered by nothing. The declaration
+        // is what gcc puts over them and it is what this puts over them too, as a row at zero in
+        // front of everything the body produced.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        func.declared = Span::new(100, 104);
+        let block = func.create_block();
+        let add = Opcode::new(names.intern("x64.add_rr_32"));
+        // The first with no span, the way every instruction a prologue is made of has none, and
+        // the second with one, the way an instruction the body asked for does.
+        for span in [Span::DUMMY, Span::new(10, 13)] {
+            func.build(block, add)
+                .at(span)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .finish();
+        }
+
+        // The row for the declaration is the one row here no instruction wrote, which is what
+        // says the bytes it covers are the prologue's.
+        let line: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+        let out = assemble(&[func], &names, &target(), true, true).expect("two instructions");
+        assert_eq!(
+            out.lines,
+            vec![vec![
+                Row { at: 0, span: Span::new(100, 104), inst: None },
+                Row { at: 0, span: Span::DUMMY, inst: Some(line[0]) },
+                Row { at: 2, span: Span::new(10, 13), inst: Some(line[1]) },
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_build_that_asked_for_none_carries_no_rows_at_all() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        add(&mut func, &mut names);
+
+        let out = assemble(&[func], &names, &target(), true, false).expect("one instruction");
+        assert_eq!(out.lines, vec![Vec::new()]);
+    }
+
+    #[test]
+    fn a_machine_with_no_encoder_here_is_said_so_rather_than_encoded_as_x86_64() {
+        let names = Interner::new();
+        let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
+        let error = assemble(&[], &names, &aarch64, true, false).expect_err("no encoder");
+        assert!(matches!(error, Error::Machine { .. }), "{error:?}");
+    }
+
+    /// A loop that would cross a line starts on the next one, the gap is instructions that do
+    /// nothing, and a loop that fits where it falls is left there.
+    #[test]
+    fn the_head_of_a_loop_that_would_cross_a_line_starts_on_the_next_one() {
+        let laid = |ahead: usize| {
+            write(|func, names| {
+                let first = func.create_block();
+                let head = func.create_block();
+                let add = Opcode::new(names.intern("x64.add_rr_32"));
+                for block in std::iter::repeat_n(first, ahead).chain(std::iter::repeat_n(head, 15))
+                {
+                    func.build(block, add)
+                        .operand(Operand::write(Reg::physical(RAX), GPR))
+                        .operand(Operand::read(Reg::physical(RAX), GPR))
+                        .operand(Operand::read(Reg::physical(RCX), GPR))
+                        .finish();
+                }
+                func.build(head, Opcode::new(names.intern("x64.jmp"))).finish();
+                func.succs_mut(head).push(BlockCall::to(head));
+                func.heads = vec![head];
+            })
+        };
+        // Fifteen adds and the five byte jump back are a loop of thirty five bytes. Twenty adds in
+        // front put it at forty, which crosses at sixty four, so it moves there.
+        let text = laid(20);
+        assert_eq!(text.bytes.len(), 64 + 35);
+        assert_eq!(hex(&text.bytes[64..66]), "01 c8");
+        assert!(text.bytes[40..64].iter().all(|&byte| byte != 0x01), "only padding in the gap");
+        assert_eq!(text.bytes[40], 0x66, "a long nop rather than single bytes");
+        assert!(text.align >= 64, "{}", text.align);
+        // Ten adds in front put it at twenty, and it ends at fifty five without crossing.
+        let text = laid(10);
+        assert_eq!(text.bytes.len(), 20 + 35);
+        assert_eq!(hex(&text.bytes[20..22]), "01 c8");
+    }
+
+    #[test]
+    fn a_byte_from_0x40_to_0x4f_is_a_rex_prefix_only_in_sixty_four_bit_mode() {
+        let load = [0x48, 0x8B, 0x05, 0, 0, 0, 0];
+        assert_eq!(slot(&load, Mode::Bits64), Reference::Got);
+        assert_eq!(slot(&load[1..], Mode::Bits64), Reference::GotBare);
+        // In thirty two bit mode `0x48` is `decl %eax`, which is not an instruction the linker
+        // may rewrite.
+        assert_eq!(slot(&load, Mode::Bits32), Reference::GotKept);
+        assert_eq!(slot(&load[1..], Mode::Bits32), Reference::GotBare);
+    }
+}

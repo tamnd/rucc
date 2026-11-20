@@ -1,0 +1,2823 @@
+//! The C type system, interned, and layout computation.
+//!
+//! Design: `spec/07-types-and-semantics.md`. Layer rank 3, see `spec/18-package-layout.md`.
+//!
+//! There is one [`Types`] per translation unit and it owns every type in it. A [`TypeId`] is
+//! four bytes and two of them are equal exactly when they are the same type, which turns the
+//! question the compiler asks more often than any other into an integer comparison.
+//!
+//! Two ideas shape the rest of it.
+//!
+//! **Sugar is kept and never decided on.** `typedef int32_t;` gives a node that remembers the
+//! name and points at canonical `int`. Every semantic rule reads [`Types::canonical`] and sees
+//! `int`; every diagnostic reads the type as it was written and says `int32_t`. Compilers that
+//! throw the name away produce messages nobody can act on, and compilers that decide on the
+//! name produce wrong answers, and both are common. Sugar is not only at the outermost node,
+//! so `int32_t *` and `int32_t[4]` are sugar too and canonicalising rebuilds them.
+//!
+//! **`_Atomic` is a type, not a qualifier.** `const` and `volatile` and `restrict` are a
+//! bitmask in the interning key, because nothing about them changes what an object is. C lets
+//! `_Atomic` be written in the same position, but `_Atomic(T)` can have a different alignment
+//! from `T`, so it is a type constructor here and the parser is what maps the spelling onto
+//! it. Document 01 recorded a compiler that treated it as a qualifier and lost track of it,
+//! which is exactly the shortcut that makes atomics silently wrong.
+//!
+//! Layout comes out of [`TargetInfo`](rucc_target::TargetInfo) and never out of the host.
+//! `long` is four bytes on Windows and eight on Linux, and `long double` is eight bytes on
+//! Apple and sixteen on SysV x86-64, so a cross compiler that asks its own platform is wrong
+//! twice before it has read a line of C.
+//!
+//! ```
+//! use rucc_target::{TargetInfo, Triple};
+//! use rucc_types::{IntKind, Types, layout};
+//!
+//! let mut types = Types::new();
+//! let linux = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+//! let windows = TargetInfo::new("x86_64-pc-windows-msvc".parse::<Triple>().unwrap());
+//!
+//! let long = types.int(IntKind::Long);
+//! assert_eq!(layout(&types, long, &linux).unwrap().size, 8);
+//! assert_eq!(layout(&types, long, &windows).unwrap().size, 4);
+//! ```
+//!
+//! Records are laid out by [`layout_record`], which takes the members and gives back their
+//! offsets, and the result is handed to [`Types::complete_record`] so that the record then has
+//! a size like any other type. Bit-fields, `packed`, `#pragma pack`, `aligned`, zero width
+//! bit-fields and flexible array members are all in there, and every one of their rules was
+//! measured against gcc and clang rather than read off a document.
+//!
+//! [`promote`] and [`usual_arithmetic`] are 6.3.1.1 and 6.3.1.8, the rules that decide what
+//! type an arithmetic expression has. Their answers were read out of gcc and clang with
+//! `_Generic` naming the type of every interesting pair, which is also how the C23 changes were
+//! pinned down: `_BitInt` does not promote, and an enumeration promotes through whatever it is
+//! represented in.
+//!
+//! `__int128` is one of the integer kinds rather than a `_BitInt(128)` in disguise. The two are
+//! different types: `__int128` is sixteen bytes aligned to sixteen everywhere, `_BitInt(128)` is
+//! aligned to its granule, and `__int128` outranks `long long` where a `_BitInt` is ranked by
+//! width alone. It is available on every target here, because all three architectures are
+//! 64-bit and GCC has it on every 64-bit target it supports.
+//!
+//! [`compatible`] and [`composite`] are 6.2.7, the relation that decides whether two
+//! declarations of one name are talking about the same thing and the type that is left when they
+//! are. Identity is not that relation: `int f(int a[3])` and `int f(int *a)` are different types
+//! and the same function. The composite is what a caller merging two declarations should keep,
+//! because it is the only one of the three types in play that knows both the array size and the
+//! parameter list.
+//!
+//! # Status
+//!
+//! The type universe, the interner, the canonical and sugar split, the qualifier rules, layout
+//! with records included, the arithmetic conversions, compatibility with the composite type, and
+//! [`spell`], which writes a type back as the C declaration it is, are implemented.
+//!
+//! Not here yet, and named so that the gap is not mistaken for a decision: the decimal floating
+//! types.
+//!
+//! Every crate in the workspace is published, and publishing implies a promise. This one is
+//! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
+//! Depend on the `rucc` binary's behaviour, not on this.
+
+#![doc(html_root_url = "https://docs.rs/rucc-types/0.30.15")]
+
+mod classify;
+mod compat;
+mod convert;
+mod granule;
+mod kencc;
+mod kind;
+mod layout;
+mod print;
+mod record;
+mod types;
+
+pub use crate::classify::{
+    element, element_as_written, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete,
+    is_complex, is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer,
+    is_real, is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
+    pointee_as_written, real_part,
+};
+pub use crate::compat::{
+    adjust_parameter, compatible, compatible_kencc, compatible_pointees, compatible_unqualified,
+    composite,
+};
+pub use crate::convert::{
+    kencc_arithmetic, kencc_assignment, kencc_promote, mask_of, promote, promote_bit_field,
+    usual_arithmetic, vectors_convertible,
+};
+pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
+pub use crate::kencc::{KENCC_SIGN_INTERN, kencc_same_type, kencc_signature, kencc_type_text};
+pub use crate::kind::{
+    ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
+    RecordKind, Sme, SmeMode, SmeShare, Type, TypeKind, VlaId,
+};
+pub use crate::layout::{
+    IntegerInfo, Layout, LayoutError, align, float_format, float_width, int_width, integer_info,
+    layout,
+};
+pub use crate::print::{declare, spell};
+pub use crate::record::{
+    Extent, Field, FieldDecl, RecordError, RecordLayout, RecordOptions, VariableLayout,
+    layout_record,
+};
+pub use crate::types::{
+    Alias, EnumInfo, Enumerator, Hardbool, Prototype, RecordInfo, Spelled, TypeId, Types, Written,
+};
+
+/// The milestone in `spec/17-milestones.md` that fills this crate in.
+pub const MILESTONE: &str = "M2";
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use rucc_base::{Interner, Symbol};
+    use rucc_target::{BitFieldStyle, TargetInfo, Triple};
+
+    use super::*;
+
+    fn target(triple: &str) -> TargetInfo {
+        TargetInfo::new(triple.parse::<Triple>().expect("a triple the compiler supports"))
+    }
+
+    fn linux() -> TargetInfo {
+        target("x86_64-unknown-linux-gnu")
+    }
+
+    /// The one target in the table that runs Microsoft's bit-field rule. So does
+    /// `x86_64-pc-windows-gnu`, and the tests below say so where it matters, because a rule keyed
+    /// on the environment rather than on the operating system would pass every one of them.
+    fn windows() -> TargetInfo {
+        target("x86_64-pc-windows-msvc")
+    }
+
+    /// AAPCS64 proper, where an unnamed bit-field raises the record's alignment. Apple's AArch64
+    /// dropped that, so `aarch64-apple-darwin` answers the way x86-64 does and is the pair to
+    /// this one wherever the difference is being measured.
+    fn aapcs() -> TargetInfo {
+        target("aarch64-unknown-linux-gnu")
+    }
+
+    /// Lays out a record with no attributes on it, on x86-64 Linux.
+    fn lay_out(types: &Types, kind: RecordKind, fields: &[FieldDecl]) -> RecordLayout {
+        lay_out_on(&linux(), types, kind, fields)
+    }
+
+    /// Lays out a record with no attributes on it, on a named target.
+    fn lay_out_on(
+        target: &TargetInfo,
+        types: &Types,
+        kind: RecordKind,
+        fields: &[FieldDecl],
+    ) -> RecordLayout {
+        layout_record(types, kind, fields, &RecordOptions::default(), target)
+            .expect("a record every member of which has a layout")
+    }
+
+    /// The offsets of the members, in bits, which is what a measurement of a real compiler
+    /// gives back once its byte offsets and its bit dumps are put together.
+    fn offsets(laid_out: &RecordLayout) -> Vec<u128> {
+        laid_out.fields.iter().map(Field::bit_offset).collect()
+    }
+
+    /// A complete record type built out of the given members.
+    fn record(types: &mut Types, kind: RecordKind, fields: &[FieldDecl]) -> TypeId {
+        let id = types.declare_record(kind, None);
+        let laid_out = lay_out(types, kind, fields);
+        types.complete_record(id, laid_out);
+        types.record(id)
+    }
+
+    /// An ordinary member of the given type, unnamed, which is all most of these tests need.
+    fn member(ty: TypeId) -> FieldDecl {
+        FieldDecl::new(None, ty)
+    }
+
+    /// A named bit-field, which is what a measurement of a real compiler has to use to be able
+    /// to read the field back.
+    fn bits(interner: &mut Interner, name: &str, ty: TypeId, width: u32) -> FieldDecl {
+        FieldDecl::bit_field(Some(interner.intern(name)), ty, width)
+    }
+
+    /// An unnamed bit-field, which occupies bits and raises nothing.
+    fn unnamed_bits(ty: TypeId, width: u32) -> FieldDecl {
+        FieldDecl::bit_field(None, ty, width)
+    }
+
+    #[test]
+    fn milestone_is_recorded() {
+        assert!(MILESTONE.starts_with('M'));
+    }
+
+    #[test]
+    fn an_integer_type_answers_with_the_width_of_its_value_and_not_of_its_object() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+
+        // A `bool` is one byte and holds one bit, and a `_BitInt(37)` is eight bytes and holds
+        // thirty seven. Folding a constant in the size rather than the width gets both wrong.
+        let boolean = types.boolean();
+        let bits = types.bit_int(true, 37);
+        // Through the sugar, the qualifiers and `_Atomic`, none of which is part of a value.
+        let short = types.int(IntKind::Short);
+        let alias = types.typedef(interner.intern("word"), short);
+        let unsigned_char = types.int(IntKind::UChar);
+        let atomic = types.atomic(unsigned_char);
+
+        let shape = |ty| integer_info(&types, ty, &target).expect("an integer type");
+        assert_eq!(shape(boolean), IntegerInfo::new(false, 1));
+        assert_eq!(shape(bits), IntegerInfo::new(true, 37));
+        assert_eq!(shape(types.int(IntKind::Int)), IntegerInfo::new(true, 32));
+        assert_eq!(shape(types.int(IntKind::ULong)), IntegerInfo::new(false, 64));
+        assert_eq!(shape(alias), IntegerInfo::new(true, 16));
+        assert_eq!(shape(atomic), IntegerInfo::new(false, 8));
+
+        assert_eq!(integer_info(&types, types.float(FloatKind::Double), &target), None);
+    }
+
+    #[test]
+    fn an_enumeration_answers_with_the_type_the_enumerators_are_kept_in() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+
+        // An enumeration that has not been completed has no underlying type yet, and the answer
+        // is that there is no answer rather than a guess at `int` that a later `: long` unsays.
+        let colour = types.declare_enum(Some(interner.intern("colour")));
+        let ty = types.enumeration(colour);
+        assert_eq!(integer_info(&types, ty, &target), None);
+
+        let underlying = types.int(IntKind::ULong);
+        types.complete_enum(colour, underlying, true);
+        assert_eq!(integer_info(&types, ty, &target), Some(IntegerInfo::new(false, 64)));
+    }
+
+    #[test]
+    fn a_value_stored_in_an_integer_type_keeps_the_bits_the_type_has_room_for() {
+        let char_type = IntegerInfo::new(true, 8);
+        assert_eq!(char_type.wrap(300), 44);
+        assert!(!char_type.holds(300));
+        assert!(char_type.holds(-128));
+
+        assert_eq!(IntegerInfo::new(false, 32).wrap(-1), 4_294_967_295);
+        assert_eq!(IntegerInfo::new(false, 8).wrap(-1), 255);
+
+        // Every pattern is a value of a hundred and twenty eight bit type, of either signedness,
+        // which is what stops the folding from inventing an overflow at the widest type there is.
+        assert!(IntegerInfo::new(false, 128).holds(i128::MIN));
+        assert!(IntegerInfo::new(true, 128).holds(i128::MIN));
+        assert_eq!(IntegerInfo::new(true, 128).wrap(i128::MAX), i128::MAX);
+    }
+
+    #[test]
+    fn a_long_double_has_a_format_the_size_does_not_give_away() {
+        let target = linux();
+        // Sixteen bytes on SysV x86-64 and eighty bits of x87 inside them. A compiler that
+        // picked the format by the size would fold every one of those constants too finely.
+        assert_eq!(float_width(FloatKind::LongDouble, &target), 128);
+        assert_eq!(
+            float_format(FloatKind::LongDouble, &target),
+            rucc_base::float::Format::X87Extended
+        );
+        assert_eq!(float_format(FloatKind::Float, &target), rucc_base::float::Format::Single);
+    }
+
+    #[test]
+    fn an_interchange_type_names_a_format_and_an_extended_one_names_the_target() {
+        use rucc_base::float::Format;
+
+        // The four `_FloatN` types are the same format everywhere, which is the point of them,
+        // so a program that wants binary128 can say so and get it or get told it cannot.
+        for target in [&linux(), &target("aarch64-apple-darwin")] {
+            assert_eq!(float_format(FloatKind::Float16, target), Format::Half);
+            assert_eq!(float_format(FloatKind::Float32, target), Format::Single);
+            assert_eq!(float_format(FloatKind::Float64, target), Format::Double);
+            assert_eq!(float_format(FloatKind::Float128, target), Format::Quad);
+            assert_eq!(float_width(FloatKind::Float16, target), 16);
+            assert_eq!(float_width(FloatKind::Float32, target), 32);
+            assert_eq!(float_width(FloatKind::Float64, target), 64);
+            assert_eq!(float_width(FloatKind::Float128, target), 128);
+            // `_Float32x` is `double` on every target this compiles for.
+            assert_eq!(float_format(FloatKind::Float32x, target), Format::Double);
+        }
+
+        // `_Float64x` is the one that moves, and it moves with the processor rather than with
+        // the operating system, so it stays eighty bits of x87 on x86-64 where `long double`
+        // is the same thing and is quad on Apple where `long double` is only a `double`.
+        let x86 = linux();
+        assert_eq!(float_format(FloatKind::Float64x, &x86), Format::X87Extended);
+        assert_eq!(float_format(FloatKind::LongDouble, &x86), Format::X87Extended);
+        let mac = target("aarch64-apple-darwin");
+        assert_eq!(float_format(FloatKind::Float64x, &mac), Format::Quad);
+        assert_eq!(float_format(FloatKind::LongDouble, &mac), Format::Double);
+        // Sixteen bytes either way, because the x87 eighty bits are stored padded, which is
+        // the same reason `long double` is sixteen bytes on x86-64 and not ten.
+        assert_eq!(float_width(FloatKind::Float64x, &x86), 128);
+        assert_eq!(float_width(FloatKind::Float64x, &mac), 128);
+    }
+
+    #[test]
+    fn every_floating_type_is_as_wide_as_the_format_it_is_stored_in() {
+        let types = Types::new();
+        let sizes = |target: &TargetInfo| -> Vec<(u64, u64)> {
+            FloatKind::ALL
+                .iter()
+                .map(|&kind| {
+                    let found = layout(&types, types.float(kind), target).expect("a complete type");
+                    (found.size, found.align)
+                })
+                .collect()
+        };
+        // Read off gcc 16 with `sizeof` and `_Alignof`, in the order of `FloatKind::ALL`. The
+        // two targets differ in one place, which is `long double`, and the eighty bit x87 value
+        // that `long double` and `_Float64x` hold on x86-64 takes sixteen bytes to store.
+        assert_eq!(
+            sizes(&linux()),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (16, 16),
+                (16, 16),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16),
+                (2, 2),
+                (16, 16),
+                (2, 2)
+            ]
+        );
+        assert_eq!(
+            sizes(&target("aarch64-apple-darwin")),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (16, 16),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16),
+                (2, 2),
+                (16, 16),
+                (2, 2)
+            ]
+        );
+        // The i386 rows, read off gcc 13 the same way. `_Float64x` is the twelve byte `long
+        // double` it shares a format with, and `_Float128` is sixteen aligned on both even where
+        // `double` is aligned to four.
+        assert_eq!(
+            sizes(&target("i686-linux-gnu")),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 4),
+                (8, 4),
+                (8, 4),
+                (12, 4),
+                (12, 4),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16),
+                (2, 2),
+                (16, 16),
+                (2, 2)
+            ]
+        );
+        assert_eq!(
+            sizes(&target("i686-windows-gnu")),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (12, 4),
+                (12, 4),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16),
+                (2, 2),
+                (16, 16),
+                (2, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn every_floating_type_has_a_slot_of_its_own_and_a_name_of_its_own() {
+        // Fifteen types and fifteen ids, which is what makes `_Float64` and `double` two types that
+        // `_Generic` can tell apart rather than one type with two spellings.
+        let types = Types::new();
+        let mut seen = Vec::new();
+        for kind in FloatKind::ALL {
+            seen.push(types.float(kind));
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "two floating types share an id");
+
+        let names: Vec<&str> = FloatKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "_Float16",
+                "float",
+                "_Float32",
+                "double",
+                "_Float32x",
+                "_Float64",
+                "long double",
+                "_Float64x",
+                "_Float128",
+                "_Decimal32",
+                "_Decimal64",
+                "_Decimal128",
+                "__fp16",
+                "_Decimal64x",
+                "__bf16",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_type_asked_for_twice_is_the_same_id() {
+        let mut types = Types::new();
+        let a = types.pointer(types.int(IntKind::Int));
+        let b = types.pointer(types.int(IntKind::Int));
+        assert_eq!(a, b, "interning is what makes type identity an integer comparison");
+        let c = types.pointer(types.int(IntKind::Long));
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn a_qualifier_makes_a_different_type_with_the_same_shape() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let konst = types.qualified(int, Qualifiers::CONST);
+        assert_ne!(int, konst);
+        assert_eq!(types.kind(konst), types.kind(int));
+        assert!(types.quals(konst).has(Qualifiers::CONST));
+        assert_eq!(types.unqualified(konst), int);
+    }
+
+    #[test]
+    fn qualifiers_accumulate_and_do_not_depend_on_the_order_they_were_written() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let a = types.qualified(int, Qualifiers::CONST);
+        let a = types.qualified(a, Qualifiers::VOLATILE);
+        let b = types.qualified(int, Qualifiers::VOLATILE);
+        let b = types.qualified(b, Qualifiers::CONST);
+        assert_eq!(a, b, "`const volatile int` and `volatile const int` are one type");
+    }
+
+    #[test]
+    fn qualifying_an_array_qualifies_its_element() {
+        // 6.7.3p10, and not a shortcut. An array type has no qualifiers of its own, so if this
+        // put the `const` on the array then `const` on an array parameter would mean nothing.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let array = types.array(int, ArrayLen::Fixed(4));
+        let konst = types.qualified(array, Qualifiers::CONST);
+        assert!(types.quals(konst).is_none(), "the array itself is unqualified");
+        let TypeKind::Array { elem, len } = types.kind(konst) else {
+            panic!("still an array");
+        };
+        assert_eq!(len, ArrayLen::Fixed(4));
+        assert!(types.quals(elem).has(Qualifiers::CONST));
+    }
+
+    #[test]
+    fn a_typedef_is_a_different_type_that_means_the_same_thing() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        assert_ne!(name, int, "the sugar survives, so a diagnostic can print it");
+        assert_eq!(types.canonical(name), int, "and no rule ever sees it");
+        assert!(types.is_sugar(name));
+        assert!(!types.is_sugar(int));
+    }
+
+    /// The names are a list beside the table and change nothing about what a type is.
+    ///
+    /// Two names for one type are one type, which is the whole reason they are kept here rather
+    /// than interned: the list grows and the identifiers do not, so the equality of two type
+    /// identifiers still means the two are the same type.
+    #[test]
+    fn a_typedef_name_is_recorded_without_making_a_type_of_its_own() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        types.alias(interner.intern("int32_t"), int, None);
+        types.alias(interner.intern("word"), int, None);
+        types.alias(interner.intern("int32_t"), int, None);
+        let names: Vec<_> =
+            types.aliases().iter().map(|had| interner.resolve(had.name).to_owned()).collect();
+        assert_eq!(names, ["int32_t", "word"], "the same name twice is one entry");
+        assert!(types.aliases().iter().all(|had| had.of == int));
+        assert_eq!(types.int(IntKind::Int), int, "and the type is the type it was");
+    }
+
+    #[test]
+    fn sugar_below_the_outermost_node_is_resolved_too() {
+        // The bug this is here for: canonicalising only the top node leaves `int32_t *` and
+        // `int *` as different types, and then every rule stated on pointers stops firing.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        let sugar_pointer = types.pointer(name);
+        let plain_pointer = types.pointer(int);
+        assert_ne!(sugar_pointer, plain_pointer);
+        assert_eq!(types.canonical(sugar_pointer), plain_pointer);
+
+        let sugar_array = types.array(name, ArrayLen::Fixed(3));
+        let plain_array = types.array(int, ArrayLen::Fixed(3));
+        assert_eq!(types.canonical(sugar_array), plain_array);
+    }
+
+    #[test]
+    fn a_typedef_of_a_typedef_canonicalises_all_the_way_down() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let mut current = int;
+        for i in 0..8 {
+            current = types.typedef(interner.intern(&format!("t{i}")), current);
+        }
+        assert_eq!(types.canonical(current), int);
+    }
+
+    #[test]
+    fn a_typedef_that_asked_for_an_alignment_says_what_it_is_and_not_what_it_is_at_least() {
+        // `__attribute__((aligned(n)))` in this one position replaces the alignment rather than
+        // raising it, which is what lets `typedef int L __attribute__((aligned(2)))` really be an
+        // `int` at a multiple of two. The size is left where it was, which is gcc's answer and the
+        // reason an array of an over aligned typedef is refused rather than padded.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let target = linux();
+        let int = types.int(IntKind::Int);
+        let low = types.aligned_typedef(interner.intern("L"), int, NonZeroU32::new(2).unwrap());
+        let high = types.aligned_typedef(interner.intern("H"), int, NonZeroU32::new(16).unwrap());
+
+        assert_eq!(layout(&types, low, &target), Ok(Layout::new(4, 2)));
+        assert_eq!(layout(&types, high, &target), Ok(Layout::new(4, 16)));
+        // And the type behind them is what it always was, since the alignment belongs to the name
+        // and not to the `int`.
+        assert_eq!(layout(&types, int, &target), Ok(Layout::new(4, 4)));
+
+        // Two names for one type that asked for different alignments are two types, which is why
+        // the alignment is part of what the table interns them by.
+        assert_ne!(low, high);
+
+        // The nearest one wins, because the outer typedef is the one a declaration was written
+        // with, and one that asked for nothing keeps whatever the one below it asked for.
+        let outer = types.aligned_typedef(interner.intern("M"), low, NonZeroU32::new(8).unwrap());
+        assert_eq!(types.align_override(outer), NonZeroU32::new(8));
+        let plain = types.typedef(interner.intern("N"), low);
+        assert_eq!(types.align_override(plain), NonZeroU32::new(2));
+        // Below the sugar there is nothing to find, since only a typedef can carry one of these.
+        assert_eq!(types.align_override(int), None);
+    }
+
+    #[test]
+    fn a_flexible_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
+        // gcc 13 puts the array at four and the record at four, and the array was at eight.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let int = types.int(IntKind::Int);
+        let four = NonZeroU32::new(4).unwrap();
+        let u64 = types.aligned_typedef(interner.intern("u64"), ull, four);
+        let flexible = types.array(u64, ArrayLen::Unknown);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(flexible)]);
+        assert_eq!(offsets(&laid_out), [0, 32]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        // And through a typedef of the array.
+        let named = types.typedef(interner.intern("flex"), flexible);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(named)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+    }
+
+    #[test]
+    fn what_a_member_asks_to_sit_at_comes_from_the_nearest_typedef_that_said() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let four = NonZeroU32::new(4);
+        let eight = NonZeroU32::new(8).unwrap();
+        let sixteen = NonZeroU32::new(16).unwrap();
+        // The kernel's `__aligned_u64` written the other way round, lowered and checked.
+        let u64 = types.checked_typedef(interner.intern("u64"), ull, four, false, eight);
+        assert_eq!(types.warn_if_not_aligned(u64), Some(eight));
+        assert_eq!(types.align_override(u64), four);
+        // It is not a different type to anything but the warning.
+        assert_eq!(types.canonical(u64), types.canonical(ull));
+        // Another name, an array and a qualifier ask what they name.
+        let alias = types.typedef(interner.intern("alias"), u64);
+        assert_eq!(types.warn_if_not_aligned(alias), Some(eight));
+        let array = types.array(u64, ArrayLen::Fixed(2));
+        assert_eq!(types.warn_if_not_aligned(array), Some(eight));
+        let constant = types.qualified(u64, Qualifiers::CONST);
+        assert_eq!(types.warn_if_not_aligned(constant), Some(eight));
+        // The nearest one that said wins, and below the sugar there is nothing.
+        let wider = types.checked_typedef(interner.intern("wider"), u64, None, false, sixteen);
+        assert_eq!(types.warn_if_not_aligned(wider), Some(sixteen));
+        assert_eq!(types.warn_if_not_aligned(ull), None);
+        // A record says it of itself, and a pointer to one asks nothing.
+        let record = record(&mut types, RecordKind::Struct, &[member(ull)]);
+        assert_eq!(types.warn_if_not_aligned(record), None);
+        let TypeKind::Record(id) = types.kind(record) else { unreachable!() };
+        types.make_record_checked(id, sixteen);
+        assert_eq!(types.warn_if_not_aligned(record), Some(sixteen));
+        let pointer = types.pointer(record);
+        assert_eq!(types.warn_if_not_aligned(pointer), None);
+    }
+
+    #[test]
+    fn an_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
+        // mingw-w64's `jmp_buf`, which is `typedef _JBTYPE jmp_buf[16]` with `_JBTYPE` a sixteen
+        // byte record that a typedef aligns to sixteen. The canonical array holds the plain
+        // record, aligned to eight, so the alignment has to come from the element as written.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let part = types.array(ull, ArrayLen::Fixed(2));
+        let float128 = record(&mut types, RecordKind::Struct, &[member(part)]);
+        let sixteen = NonZeroU32::new(16).unwrap();
+        let jbtype = types.aligned_typedef(interner.intern("_JBTYPE"), float128, sixteen);
+        let array = types.array(jbtype, ArrayLen::Fixed(16));
+        let jmp_buf = types.typedef(interner.intern("jmp_buf"), array);
+
+        for target in [linux(), windows(), target("x86_64-pc-windows-gnu")] {
+            assert_eq!(layout(&types, float128, &target), Ok(Layout::new(16, 8)));
+            assert_eq!(layout(&types, array, &target), Ok(Layout::new(256, 16)));
+            assert_eq!(layout(&types, jmp_buf, &target), Ok(Layout::new(256, 16)));
+            // Through another name for the element, and one array deeper.
+            let alias = types.typedef(interner.intern("alias_t"), jbtype);
+            let aliased = types.array(alias, ArrayLen::Fixed(16));
+            assert_eq!(layout(&types, aliased, &target), Ok(Layout::new(256, 16)));
+            let two = types.array(jmp_buf, ArrayLen::Fixed(2));
+            assert_eq!(layout(&types, two, &target), Ok(Layout::new(512, 16)));
+            // A member of the type lands at a multiple of sixteen and takes the record with it.
+            let char_ty = types.int(IntKind::Char);
+            let fields = [member(char_ty), member(jmp_buf)];
+            let laid_out = lay_out_on(&target, &types, RecordKind::Struct, &fields);
+            assert_eq!(offsets(&laid_out), [0, 128]);
+            assert_eq!(laid_out.layout, Layout::new(272, 16));
+            // And a variable length one, which has an alignment and no size.
+            let vla = types.array(jbtype, ArrayLen::Variable(VlaId(0)));
+            assert_eq!(align(&types, vla, &target), Ok(16));
+        }
+    }
+
+    #[test]
+    fn a_qualified_typedef_keeps_the_name_and_canonicalises_to_the_qualified_type() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        let konst = types.qualified(name, Qualifiers::CONST);
+        assert!(matches!(types.kind(konst), TypeKind::Typedef { .. }), "still prints as int32_t");
+        let want = types.qualified(int, Qualifiers::CONST);
+        assert_eq!(types.canonical(konst), want);
+    }
+
+    #[test]
+    fn a_typedef_of_an_array_pushes_a_qualifier_to_the_element_when_it_canonicalises() {
+        // `typedef int A[4]; const A x;` declares an array of `const int`, which is where the
+        // array rule and the sugar rule have to agree with each other.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let array = types.array(int, ArrayLen::Fixed(4));
+        let name = types.typedef(interner.intern("A"), array);
+        let konst = types.qualified(name, Qualifiers::CONST);
+        let konst_int = types.qualified(int, Qualifiers::CONST);
+        let want = types.array(konst_int, ArrayLen::Fixed(4));
+        assert_eq!(types.canonical(konst), want);
+    }
+
+    #[test]
+    fn a_function_type_is_deduplicated_by_its_signature() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let make = |types: &mut Types, params: Vec<TypeId>, variadic| {
+            types.function(FunctionType {
+                ret: int,
+                params,
+                variadic,
+                prototyped: true,
+                convention: rucc_target::Convention::Target,
+                nocf: false,
+                indirect_return: false,
+                return_pointer_popped: None,
+                sse_regparm: false,
+                sme: Sme::NONE,
+            })
+        };
+        let a = make(&mut types, vec![int, long], false);
+        let b = make(&mut types, vec![int, long], false);
+        assert_eq!(a, b);
+        assert_ne!(a, make(&mut types, vec![int, long], true), "`...` is part of the type");
+        assert_ne!(a, make(&mut types, vec![long, int], false));
+    }
+
+    #[test]
+    fn a_function_type_written_with_a_typedef_canonicalises_through_its_signature() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        let sugar = types.function(FunctionType {
+            ret: name,
+            params: vec![name],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        let plain = types.function(FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        assert_ne!(sugar, plain);
+        assert_eq!(types.canonical(sugar), plain);
+    }
+
+    #[test]
+    fn a_record_is_its_declaration_and_not_its_members() {
+        // Two structs written the same way in one translation unit are different types. The
+        // looser relation that does hold between them is compatibility, which is a separate
+        // question from identity and is answered elsewhere.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let tag = interner.intern("point");
+        let first = types.declare_record(RecordKind::Struct, Some(tag));
+        let second = types.declare_record(RecordKind::Struct, Some(tag));
+        assert_ne!(types.record(first), types.record(second));
+        assert_eq!(types.record(first), types.record(first));
+    }
+
+    #[test]
+    fn a_record_has_no_layout_until_it_has_been_completed() {
+        let mut types = Types::new();
+        let id = types.declare_record(RecordKind::Struct, None);
+        let ty = types.record(id);
+        assert_eq!(layout(&types, ty, &linux()), Err(LayoutError::Incomplete));
+        let long_long = types.int(IntKind::LongLong);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(long_long); 2]);
+        types.complete_record(id, laid_out);
+        assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(16, 8));
+    }
+
+    #[test]
+    fn an_enum_takes_the_layout_of_its_underlying_type() {
+        let mut types = Types::new();
+        let id = types.declare_enum(None);
+        let ty = types.enumeration(id);
+        assert_eq!(layout(&types, ty, &linux()), Err(LayoutError::Incomplete));
+        let int = types.int(IntKind::Int);
+        types.complete_enum(id, int, false);
+        assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(4, 4));
+    }
+
+    #[test]
+    fn the_scalar_widths_come_from_the_target() {
+        let mut types = Types::new();
+        let linux = linux();
+        let windows = target("x86_64-pc-windows-msvc");
+        let darwin = target("aarch64-apple-darwin");
+
+        let long = types.int(IntKind::Long);
+        assert_eq!(layout(&types, long, &linux).unwrap(), Layout::new(8, 8));
+        assert_eq!(layout(&types, long, &windows).unwrap(), Layout::new(4, 4), "LLP64");
+
+        let ldouble = types.float(FloatKind::LongDouble);
+        assert_eq!(layout(&types, ldouble, &linux).unwrap(), Layout::new(16, 16));
+        assert_eq!(layout(&types, ldouble, &darwin).unwrap(), Layout::new(8, 8));
+
+        let pointer = types.pointer(types.void());
+        assert_eq!(layout(&types, pointer, &linux).unwrap(), Layout::new(8, 8));
+
+        let boolean = types.boolean();
+        assert_eq!(layout(&types, boolean, &linux).unwrap(), Layout::new(1, 1));
+    }
+
+    #[test]
+    fn a_complex_type_is_two_of_its_component_with_the_components_alignment() {
+        // `_Complex long double` on SysV x86-64 is thirty two bytes aligned to sixteen, which
+        // is the case that catches an implementation that aligns the pair to its own size.
+        let mut types = Types::new();
+        let linux = linux();
+        let cfloat = types.complex_float(FloatKind::Float);
+        assert_eq!(layout(&types, cfloat, &linux).unwrap(), Layout::new(8, 4));
+        let cdouble = types.complex_float(FloatKind::Double);
+        assert_eq!(layout(&types, cdouble, &linux).unwrap(), Layout::new(16, 8));
+        let cldouble = types.complex_float(FloatKind::LongDouble);
+        assert_eq!(layout(&types, cldouble, &linux).unwrap(), Layout::new(32, 16));
+        let darwin = target("aarch64-apple-darwin");
+        assert_eq!(layout(&types, cldouble, &darwin).unwrap(), Layout::new(16, 8));
+    }
+
+    #[test]
+    fn an_atomic_type_can_be_more_aligned_than_the_type_it_wraps() {
+        // The whole reason `_Atomic` is a type here rather than a qualifier. A sixteen byte
+        // record is aligned to eight and the atomic version of it is aligned to sixteen.
+        let mut types = Types::new();
+        let linux = linux();
+        let long_long = types.int(IntKind::LongLong);
+        let plain = record(&mut types, RecordKind::Struct, &[member(long_long); 2]);
+        let atomic = types.atomic(plain);
+        assert_eq!(layout(&types, plain, &linux).unwrap(), Layout::new(16, 8));
+        assert_eq!(layout(&types, atomic, &linux).unwrap(), Layout::new(16, 16));
+
+        // An odd size cannot be accessed atomically in one go, so nothing is raised.
+        let odd = record(&mut types, RecordKind::Struct, &[member(long_long); 3]);
+        let atomic_odd = types.atomic(odd);
+        assert_eq!(layout(&types, atomic_odd, &linux).unwrap(), Layout::new(24, 8));
+
+        let int = types.int(IntKind::Int);
+        let atomic_int = types.atomic(int);
+        assert_eq!(layout(&types, atomic_int, &linux).unwrap(), Layout::new(4, 4));
+    }
+
+    #[test]
+    fn a_bit_int_is_laid_out_like_a_standard_integer_until_it_outgrows_one() {
+        // Measured with clang 18 on x86-64 Linux and clang on AArch64 Darwin. The two disagree
+        // above sixty four bits, which is why the granule is a target fact.
+        let mut types = Types::new();
+        let linux = linux();
+        let darwin = target("aarch64-apple-darwin");
+        let cases = [(7, 1, 1), (8, 1, 1), (9, 2, 2), (17, 4, 4), (33, 8, 8), (64, 8, 8)];
+        for (width, size, align) in cases {
+            let ty = types.bit_int(true, width);
+            assert_eq!(layout(&types, ty, &linux).unwrap(), Layout::new(size, align), "{width}");
+            assert_eq!(layout(&types, ty, &darwin).unwrap(), Layout::new(size, align), "{width}");
+        }
+        for width in [65, 96, 128] {
+            let ty = types.bit_int(false, width);
+            assert_eq!(layout(&types, ty, &linux).unwrap(), Layout::new(16, 8), "{width}");
+            assert_eq!(layout(&types, ty, &darwin).unwrap(), Layout::new(16, 16), "{width}");
+        }
+        let wide = types.bit_int(true, 129);
+        assert_eq!(layout(&types, wide, &linux).unwrap(), Layout::new(24, 8));
+        assert_eq!(layout(&types, wide, &darwin).unwrap(), Layout::new(32, 16));
+    }
+
+    #[test]
+    fn an_array_is_its_element_repeated_and_keeps_its_elements_alignment() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let ty = types.array(int, ArrayLen::Fixed(10));
+        assert_eq!(layout(&types, ty, &linux).unwrap(), Layout::new(40, 4));
+        let nested = types.array(ty, ArrayLen::Fixed(3));
+        assert_eq!(layout(&types, nested, &linux).unwrap(), Layout::new(120, 4));
+    }
+
+    #[test]
+    fn an_array_without_a_size_is_incomplete_and_an_impossible_one_says_so() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        for len in [ArrayLen::Unknown, ArrayLen::Star] {
+            let ty = types.array(int, len);
+            assert_eq!(layout(&types, ty, &linux), Err(LayoutError::Incomplete));
+        }
+        // An array whose length the program computes is a different answer from an incomplete
+        // one, because it is not a mistake: there is a size and this is not the place that
+        // knows it. A caller that only wants a number treats the two the same and a caller
+        // building the arithmetic asks for the members instead.
+        let measured = types.array(int, ArrayLen::Variable(VlaId(0)));
+        assert_eq!(layout(&types, measured, &linux), Err(LayoutError::Variable));
+        assert_eq!(align(&types, measured, &linux), Ok(4));
+        let huge = types.array(int, ArrayLen::Fixed(u64::MAX));
+        assert_eq!(layout(&types, huge, &linux), Err(LayoutError::TooLarge));
+    }
+
+    #[test]
+    fn the_largest_array_is_the_largest_object_and_not_the_largest_number() {
+        // The limit is `PTRDIFF_MAX` rather than wherever the multiplication happens to
+        // overflow, so an array of a byte may be every byte an object may have and one more
+        // than that is refused. gcc 16 gives the same two answers.
+        let mut types = Types::new();
+        let linux = linux();
+        let max = linux.max_object_size();
+        let ch = types.int(IntKind::Char);
+        let fits = types.array(ch, ArrayLen::Fixed(max));
+        assert_eq!(layout(&types, fits, &linux), Ok(Layout::new(max, 1)));
+        let over = types.array(ch, ArrayLen::Fixed(max + 1));
+        assert_eq!(layout(&types, over, &linux), Err(LayoutError::TooLarge));
+    }
+
+    #[test]
+    fn a_record_may_be_as_large_as_an_object_may_be_and_no_larger() {
+        // The shape `991014-1.c` in the gcc.c-torture execution suite asks about: a type
+        // nothing is ever an object of is still a type `sizeof` has to answer about. Counting
+        // the record in bits made the largest one an eighth of this, with the multiply by eight
+        // overflowing rather than any rule saying so.
+        let mut types = Types::new();
+        let linux = linux();
+        let max = linux.max_object_size();
+        let ch = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let short = types.int(IntKind::Short);
+
+        let huge = types.array(short, ArrayLen::Fixed((1 << 62) - 256));
+        let members = [member(huge), member(int), member(int), member(int), member(int)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        assert_eq!(laid_out.layout, Layout::new((1 << 63) - 496, 4));
+
+        let brim = types.array(ch, ArrayLen::Fixed(max));
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(brim)]);
+        assert_eq!(laid_out.layout, Layout::new(max, 1));
+
+        let over = [member(brim), member(ch)];
+        let options = RecordOptions::default();
+        let error = layout_record(&types, RecordKind::Struct, &over, &options, &linux);
+        assert_eq!(error, Err(RecordError::TooLarge));
+    }
+
+    #[test]
+    fn a_bit_field_past_where_a_bit_count_fits_is_still_placed() {
+        // Eight times the largest object is more than a `u64` holds, so a bit-field at the end
+        // of a record that large has a bit offset no bit count can name. It is a byte offset
+        // and a bit within it here, which is what lets this be laid out at all, and gcc 16
+        // gives the same size for it.
+        let mut types = Types::new();
+        let linux = linux();
+        let ch = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let mut interner = Interner::new();
+        let buf = types.array(ch, ArrayLen::Fixed(linux.max_object_size() - 7));
+        let members = [member(buf), bits(&mut interner, "x", int, 1)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        assert_eq!(laid_out.layout, Layout::new(9_223_372_036_854_775_804, 4));
+        let last = laid_out.fields[1];
+        assert_eq!((last.offset, last.bit), (9_223_372_036_854_775_800, 0));
+        assert_eq!(last.bit_offset(), 73_786_976_294_838_206_400);
+    }
+
+    #[test]
+    fn two_variable_length_arrays_of_the_same_element_are_still_different_types() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let a = types.array(int, ArrayLen::Variable(VlaId(0)));
+        let b = types.array(int, ArrayLen::Variable(VlaId(1)));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_vector_is_rounded_up_to_a_power_of_two_and_aligned_to_the_whole_thing() {
+        // What GCC does with a `vector_size` that is not already one, checked against clang on
+        // AArch64 Darwin, which accepts the three element case that GCC rejects outright.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let four = types.vector(int, 4);
+        assert_eq!(layout(&types, four, &linux).unwrap(), Layout::new(16, 16));
+        let three = types.vector(int, 3);
+        assert_eq!(layout(&types, three, &linux).unwrap(), Layout::new(16, 16));
+        let three_chars = types.vector(types.int(IntKind::Char), 3);
+        assert_eq!(layout(&types, three_chars, &linux).unwrap(), Layout::new(4, 4));
+    }
+
+    #[test]
+    fn the_types_without_a_size_say_which_kind_of_without_they_are() {
+        // Kept apart because GNU C gives both of them a size of one and a different warning,
+        // and because a caller that cannot tell them apart cannot write either message.
+        let mut types = Types::new();
+        let linux = linux();
+        let void = types.void();
+        assert_eq!(layout(&types, void, &linux), Err(LayoutError::Incomplete));
+        let int = types.int(IntKind::Int);
+        let function = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
+        let pointer_to_function = types.pointer(function);
+        assert_eq!(layout(&types, pointer_to_function, &linux).unwrap(), Layout::new(8, 8));
+    }
+
+    #[test]
+    fn a_struct_puts_each_member_at_the_next_offset_it_is_allowed_to_start_at() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+        assert_eq!(laid_out.fields[1].offset, 4);
+
+        // And the tail is padded, which is what makes an array of the thing work.
+        let long_long = types.int(IntKind::LongLong);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(long_long), member(char_)]);
+        assert_eq!(laid_out.layout, Layout::new(16, 8));
+    }
+
+    #[test]
+    fn a_union_starts_every_member_at_zero_and_is_as_large_as_the_largest() {
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(char_), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 0]);
+
+        // Nine bytes and a short is ten, not nine and not sixteen: the size is rounded up to
+        // the alignment rather than to the largest member.
+        let nine = types.array(char_, ArrayLen::Fixed(9));
+        let short = types.int(IntKind::Short);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(nine), member(short)]);
+        assert_eq!(laid_out.layout, Layout::new(10, 2));
+    }
+
+    #[test]
+    fn bit_fields_share_a_unit_until_one_of_them_would_span_two() {
+        // Measured with gcc 13.3 on x86-64 Linux and clang on AArch64 Darwin, including where
+        // the bits landed, by setting each field to all ones and dumping the bytes.
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        let fields = [bits(&mut interner, "a", int, 3), bits(&mut interner, "b", int, 5)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 3]);
+
+        // Thirty bits do not fit in what is left of the first int, so they start a new one.
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // Thirty three bits of a `long long` do fit in what is left of the first one, because
+        // the unit is eight bytes rather than four, so they stay where they are.
+        let fields = [member(char_), bits(&mut interner, "b", long_long, 33)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // An ordinary member after a bit-field starts at the next byte it is allowed to.
+        let fields = [bits(&mut interner, "a", int, 3), member(char_)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(offsets(&laid_out), [0, 8]);
+    }
+
+    #[test]
+    fn a_zero_width_bit_field_moves_the_next_member_on_and_nothing_else() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let fields = [member(char_), unnamed_bits(int, 0), member(char_)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        // Five bytes aligned to one: the zero width field pushed the second `char` to offset
+        // four without giving the record the alignment of an `int`. Both compilers report that.
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+        assert_eq!(laid_out.fields.len(), 3, "one field per declaration, so indices line up");
+
+        // With nothing after it the padding is still the record's, which is the half of the rule
+        // the case above hides: the second `char` ends further along than the zero width field
+        // does, so whether the field moved the size or only the next member never showed.
+        let trailing = [member(char_), unnamed_bits(int, 0)];
+        assert_eq!(lay_out(&types, RecordKind::Struct, &trailing).layout, Layout::new(4, 1));
+
+        // And a record that is nothing but the zero width field has nothing to pad, so it is the
+        // empty structure with the alignment of whatever the field's type was.
+        let only = [unnamed_bits(int, 0)];
+        assert_eq!(lay_out(&types, RecordKind::Struct, &only).layout, Layout::new(0, 1));
+    }
+
+    #[test]
+    fn an_unnamed_bit_field_does_not_raise_the_records_alignment_but_a_named_one_does() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+
+        let unnamed = [member(char_), unnamed_bits(int, 20)];
+        let unnamed = lay_out(&types, RecordKind::Struct, &unnamed);
+        assert_eq!(unnamed.layout, Layout::new(4, 1));
+
+        let named = [member(char_), bits(&mut interner, "b", int, 20)];
+        let named = lay_out(&types, RecordKind::Struct, &named);
+        assert_eq!(named.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&named), [0, 8], "the same place either way");
+
+        // The unit an unnamed field has to fit inside is still its own type's, so this one
+        // moves to bit thirty two and the record is eight bytes aligned to one.
+        let wider = [member(char_), unnamed_bits(int, 30)];
+        let wider = lay_out(&types, RecordKind::Struct, &wider);
+        assert_eq!(wider.layout, Layout::new(8, 1));
+        assert_eq!(offsets(&wider), [0, 32]);
+    }
+
+    #[test]
+    fn aapcs64_lets_an_unnamed_bit_field_raise_the_records_alignment() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // The same structure as the test above, on the one ABI in the table that disagrees.
+        let fields = [member(char_), unnamed_bits(uint, 20)];
+        let arm = lay_out_on(&aapcs(), &types, RecordKind::Struct, &fields);
+        assert_eq!(arm.layout, Layout::new(4, 4));
+
+        // The zero width member is the case a program actually writes, and it is where the rule
+        // is visible with nothing else in the record at all.
+        let only = [unnamed_bits(uint, 0)];
+        assert_eq!(
+            lay_out_on(&aapcs(), &types, RecordKind::Struct, &only).layout,
+            Layout::new(0, 4)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Struct, &only).layout, Layout::new(0, 1));
+
+        // And it changes a size rather than only an alignment, because the record is rounded up
+        // to the alignment it ends with. Five bytes on x86-64 and eight here.
+        let pushed = [member(char_), unnamed_bits(uint, 0), member(char_)];
+        let pushed = lay_out_on(&aapcs(), &types, RecordKind::Struct, &pushed);
+        assert_eq!(pushed.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&pushed), [0, 32, 32]);
+    }
+
+    #[test]
+    fn windows_allocates_a_bit_field_into_a_unit_of_its_declared_type() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+        let ushort = types.int(IntKind::UShort);
+        let longlong = types.int(IntKind::LongLong);
+
+        // An ordinary member closes the unit, and the unit costs its whole four bytes, so the
+        // `char` is at offset four rather than at offset one.
+        let then_member = [bits(&mut interner, "m0", uint, 3), member(char_)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &then_member);
+        assert_eq!(ms.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&ms), [0, 32]);
+        let itanium = lay_out(&types, RecordKind::Struct, &then_member);
+        assert_eq!(itanium.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&itanium), [0, 8]);
+
+        // A declared type of a different size closes it too, although five bits were free.
+        let narrower = [bits(&mut interner, "m0", uint, 3), bits(&mut interner, "m1", ushort, 5)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &narrower);
+        assert_eq!(ms.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&ms), [0, 32]);
+        assert_eq!(lay_out(&types, RecordKind::Struct, &narrower).layout, Layout::new(4, 4));
+
+        // And the unit is opened at its own alignment, so a `long long` bit-field after a `char`
+        // starts at offset eight where the Itanium rule leaves it at bit eight.
+        let wide = [member(char_), bits(&mut interner, "b", longlong, 33)];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &wide);
+        assert_eq!(ms.layout, Layout::new(16, 8));
+        assert_eq!(offsets(&ms), [0, 64]);
+        let itanium = lay_out(&types, RecordKind::Struct, &wide);
+        assert_eq!(itanium.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&itanium), [0, 8]);
+    }
+
+    #[test]
+    fn microsofts_zero_width_bit_field_closes_a_unit_and_does_nothing_without_one() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // Nothing before it is a bit-field, so there is no run to end and the member is free.
+        let alone = [member(char_), unnamed_bits(uint, 0)];
+        assert_eq!(
+            lay_out_on(&windows(), &types, RecordKind::Struct, &alone).layout,
+            Layout::new(1, 1)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Struct, &alone).layout, Layout::new(4, 1));
+
+        // With a unit open it ends it, and the member after starts a unit of its own.
+        let between = [
+            bits(&mut interner, "m0", uint, 3),
+            unnamed_bits(uint, 0),
+            bits(&mut interner, "m1", uint, 5),
+            member(char_),
+        ];
+        let ms = lay_out_on(&windows(), &types, RecordKind::Struct, &between);
+        assert_eq!(ms.layout, Layout::new(12, 4));
+        assert_eq!(offsets(&ms), [0, 32, 32, 64]);
+        let itanium = lay_out(&types, RecordKind::Struct, &between);
+        assert_eq!(itanium.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&itanium), [0, 32, 32, 40]);
+
+        // And after a unit narrower than its own type it rounds to its type's alignment and
+        // raises the record's, which is what gcc on mingw-w64 prints for this one.
+        let int_ = types.int(IntKind::Int);
+        let narrow = [
+            bits(&mut interner, "a", char_, 1),
+            unnamed_bits(int_, 0),
+            bits(&mut interner, "b", char_, 1),
+        ];
+        for target in [windows(), target("x86_64-pc-windows-gnu")] {
+            let ms = lay_out_on(&target, &types, RecordKind::Struct, &narrow);
+            assert_eq!(ms.layout, Layout::new(8, 4));
+            assert_eq!(offsets(&ms), [0, 32, 32]);
+        }
+    }
+
+    #[test]
+    fn ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int_ = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let mingw = target("x86_64-pc-windows-gnu");
+        let gcc = RecordOptions { bit_fields: Some(BitFieldStyle::Itanium), ..Default::default() };
+        let ms = RecordOptions { bit_fields: Some(BitFieldStyle::Microsoft), ..Default::default() };
+        let on = |target: &TargetInfo, options: &RecordOptions, fields: &[FieldDecl]| {
+            layout_record(&types, RecordKind::Struct, fields, options, target)
+                .expect("a record every member of which has a layout")
+        };
+
+        // `gcc_struct` on mingw gives what Linux gives with no attribute, and `ms_struct` on Linux
+        // gives what mingw gives with none. Every number here is what gcc 16 on x86-64 Linux and
+        // mingw-w64 gcc print for the same source.
+        let then_member = [bits(&mut interner, "m", uint, 3), member(char_)];
+        let laid_out = on(&mingw, &gcc, &then_member);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+        let laid_out = on(&linux(), &ms, &then_member);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // Asking for the rule the target already has changes nothing.
+        assert_eq!(
+            on(&mingw, &ms, &then_member),
+            on(&mingw, &RecordOptions::default(), &then_member)
+        );
+        assert_eq!(
+            on(&linux(), &gcc, &then_member),
+            lay_out(&types, RecordKind::Struct, &then_member)
+        );
+
+        // Whether an unnamed bit-field aligns the record goes with the rule and not the target.
+        let unnamed = [member(char_), unnamed_bits(int_, 20)];
+        assert_eq!(on(&mingw, &gcc, &unnamed).layout, Layout::new(4, 1));
+        assert_eq!(on(&linux(), &ms, &unnamed).layout, Layout::new(8, 4));
+        // Except that the Itanium rule on AArch64 is AAPCS64's, which says yes, so on Windows on
+        // AArch64 gcc_struct gives four aligned to four, as llvm-mingw's clang does.
+        let arm_mingw = target("aarch64-pc-windows-gnu");
+        assert_eq!(on(&arm_mingw, &gcc, &unnamed).layout, Layout::new(4, 4));
+        assert_eq!(on(&arm_mingw, &RecordOptions::default(), &unnamed).layout, Layout::new(8, 4));
+
+        // And so does what a zero width one does, with a bit-field before it and without one.
+        let narrow = [
+            bits(&mut interner, "a", char_, 1),
+            unnamed_bits(int_, 0),
+            bits(&mut interner, "b", char_, 1),
+        ];
+        let laid_out = on(&mingw, &gcc, &narrow);
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+        assert_eq!(on(&linux(), &ms, &narrow).layout, Layout::new(8, 4));
+        let alone = [member(char_), unnamed_bits(uint, 0)];
+        assert_eq!(on(&mingw, &gcc, &alone).layout, Layout::new(4, 1));
+        assert_eq!(on(&linux(), &ms, &alone).layout, Layout::new(1, 1));
+    }
+
+    #[test]
+    fn msvc_gives_a_unions_bit_field_storage_and_no_say_in_the_alignment() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let uint = types.int(IntKind::UInt);
+
+        // Four bytes because the unit is an `unsigned`, aligned to one because the only member
+        // that gets a say is the `char`. An alignment smaller than either member would have.
+        let fields = [bits(&mut interner, "m0", uint, 3), member(char_)];
+        assert_eq!(
+            lay_out_on(&windows(), &types, RecordKind::Union, &fields).layout,
+            Layout::new(4, 1)
+        );
+        assert_eq!(lay_out(&types, RecordKind::Union, &fields).layout, Layout::new(4, 4));
+        // MinGW's gcc aligns it to four with the same bit-field rule otherwise, and clang aligns
+        // it to one. gcc is the incumbent there, so its answer is the one taken.
+        let mingw = target("x86_64-pc-windows-gnu");
+        assert_eq!(
+            lay_out_on(&mingw, &types, RecordKind::Union, &fields).layout,
+            Layout::new(4, 4)
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_storage_in_it_is_four_bytes_under_msvc_and_nothing_anywhere_else() {
+        let mut types = Types::new();
+        let uint = types.int(IntKind::UInt);
+        let mingw = target("x86_64-pc-windows-gnu");
+
+        // Three shapes that hold nothing, and the reference gives all three the same answer.
+        let none: [FieldDecl; 0] = [];
+        let zero_width = [unnamed_bits(uint, 0)];
+        let flexible = [member(types.array(uint, ArrayLen::Unknown))];
+        for fields in [&none[..], &zero_width[..], &flexible[..]] {
+            let msvc = lay_out_on(&windows(), &types, RecordKind::Struct, fields);
+            assert_eq!(msvc.layout.size, 4, "four bytes under MSVC");
+            assert_eq!(lay_out_on(&mingw, &types, RecordKind::Struct, fields).layout.size, 0);
+            assert_eq!(lay_out(&types, RecordKind::Struct, fields).layout.size, 0);
+        }
+
+        // It is the environment that decides and not the operating system, so the two Windows
+        // targets disagree with each other and mingw agrees with Linux. A rule keyed on the
+        // operating system would have put both of them at four.
+        assert_eq!(windows().empty_record_size, 4);
+        assert_eq!(mingw.empty_record_size, 0);
+    }
+
+    #[test]
+    fn a_plan_9_record_is_a_whole_number_of_words() {
+        let mut types = Types::new();
+        let ushort = types.int(IntKind::UShort);
+        let char_ = types.int(IntKind::Char);
+        let chars = types.array(char_, ArrayLen::Fixed(7));
+        // The `Optab` of 7l, which 7c makes sixteen bytes and every table in the linker counts on.
+        let fields = [member(ushort), member(chars)];
+        for (triple, size, word) in
+            [("aarch64-plan9", 16, 8), ("x86_64-plan9", 16, 8), ("i386-plan9", 12, 4)]
+        {
+            let plan9 = target(triple);
+            let laid_out = lay_out_on(&plan9, &types, RecordKind::Struct, &fields);
+            assert_eq!(laid_out.layout, Layout::new(size, word), "{triple}");
+            let union = lay_out_on(&plan9, &types, RecordKind::Union, &fields);
+            assert_eq!(union.layout, Layout::new(8, word), "{triple}");
+            let packed = RecordOptions { pack: Some(2), ..RecordOptions::default() };
+            let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &plan9)
+                .expect("a record every member of which has a layout");
+            assert_eq!(laid_out.layout, Layout::new(10, 2), "{triple}");
+        }
+        assert_eq!(lay_out(&types, RecordKind::Struct, &fields).layout, Layout::new(10, 2));
+    }
+
+    #[test]
+    fn packed_drops_every_member_to_a_byte_and_bit_fields_to_the_next_free_bit() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let packed = RecordOptions { packed: true, ..RecordOptions::default() };
+
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct of two complete members");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 8], "no boundary left to move to");
+
+        // A zero width bit-field still rounds to its own type, packed or not, which is the
+        // whole reason a program writes one inside a packed structure.
+        let fields = [member(char_), unnamed_bits(int, 0), member(char_)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a zero width bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+    }
+
+    #[test]
+    fn pragma_pack_caps_alignment_and_leaves_a_bit_field_where_it_already_is() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let pack = RecordOptions { pack: Some(2), ..RecordOptions::default() };
+
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct of two complete members");
+        assert_eq!(laid_out.layout, Layout::new(6, 2));
+        assert_eq!(offsets(&laid_out), [0, 16]);
+
+        // Six bytes with the field at bit eight, not at bit sixteen. Once the alignment has
+        // been capped below the type's own there is no boundary to move to, so the field stays
+        // put. Measured, because moving it is at least as plausible a reading.
+        let fields = [member(char_), bits(&mut interner, "b", int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct with a bit-field");
+        assert_eq!(laid_out.layout, Layout::new(6, 2));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // The same structure with the field unnamed is five bytes aligned to one, because the
+        // capped alignment reached it through the record and an unnamed field gives none back.
+        let fields = [member(char_), unnamed_bits(int, 30)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a packed struct with an unnamed bit-field");
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+    }
+
+    #[test]
+    fn an_alignment_the_program_asked_for_raises_the_member_and_the_record() {
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+
+        let aligned = FieldDecl { align: Some(16), ..member(int) };
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), aligned]);
+        assert_eq!(laid_out.layout, Layout::new(32, 16));
+        assert_eq!(offsets(&laid_out), [0, 128]);
+
+        // `packed, aligned(4)` together: the members pack and the record does not, which is
+        // the combination the attribute pair exists for.
+        let options = RecordOptions { packed: true, align: Some(4), ..RecordOptions::default() };
+        let fields = [member(char_), member(int)];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &options, &linux())
+            .expect("a packed struct with an alignment asked for");
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+    }
+
+    #[test]
+    fn an_alignment_asked_for_on_a_bit_field_moves_it_even_when_packed() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        // Not packed: the field goes to the next sixteen byte boundary and takes the record
+        // with it, where without the request it would have shared the first byte.
+        let aligned = FieldDecl { align: Some(16), ..bits(&mut interner, "a", char_, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(32, 16));
+        assert_eq!(offsets(&laid_out), [0, 128]);
+
+        // Packed, the request still wins over the next free bit.
+        let packed = RecordOptions { packed: true, ..RecordOptions::default() };
+        let aligned = FieldDecl { align: Some(4), ..bits(&mut interner, "a", int, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with an aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // `aligned(1)` asks for nothing an `int` did not have, and packed it still means the
+        // next whole byte rather than the next bit.
+        let aligned = FieldDecl { align: Some(1), ..bits(&mut interner, "a", int, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a byte aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(2, 1));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // Under `#pragma pack(1)` an `aligned(16)` is capped to a byte and still moves the field
+        // to one, which is the layout tcc's `95_bitfields` prints under gcc.
+        let pack = RecordOptions { pack: Some(1), ..RecordOptions::default() };
+        let fields = [
+            bits(&mut interner, "x", int, 12),
+            bits(&mut interner, "y", char_, 6),
+            bits(&mut interner, "z", long_long, 63),
+            FieldDecl { align: Some(16), ..bits(&mut interner, "a", char_, 4) },
+            bits(&mut interner, "b", long_long, 2),
+        ];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a struct under pragma pack with an aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(12, 1));
+        assert_eq!(offsets(&laid_out), [0, 12, 18, 88, 92]);
+    }
+
+    #[test]
+    fn a_flexible_array_member_costs_nothing_but_its_alignment() {
+        // What makes `malloc(sizeof(struct S) + n)` the idiom it is.
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        let chars = types.array(char_, ArrayLen::Unknown);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(int), member(chars)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // The alignment still applies, so this is eight bytes of which one is the `char`.
+        let longs = types.array(long_long, ArrayLen::Unknown);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(longs)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 8));
+        assert_eq!(offsets(&laid_out), [0, 64]);
+
+        // Anywhere but last it is an incomplete member, and which member is part of the answer.
+        let fields = [member(chars), member(int)];
+        let error =
+            layout_record(&types, RecordKind::Struct, &fields, &RecordOptions::default(), &linux());
+        assert_eq!(error, Err(RecordError::Member { index: 0, error: LayoutError::Incomplete }));
+    }
+
+    #[test]
+    fn a_record_with_no_members_is_zero_bytes_aligned_to_one() {
+        // The GNU empty structure, which C itself does not have and which real headers do.
+        let types = Types::new();
+        let laid_out = lay_out(&types, RecordKind::Struct, &[]);
+        assert_eq!(laid_out.layout, Layout::new(0, 1));
+    }
+
+    #[test]
+    fn a_bit_field_wider_than_the_type_it_is_declared_with_is_refused() {
+        let types = Types::new();
+        let int = types.int(IntKind::Int);
+        let fields = [unnamed_bits(int, 33)];
+        let error =
+            layout_record(&types, RecordKind::Struct, &fields, &RecordOptions::default(), &linux());
+        let want = RecordError::BitFieldTooWide { index: 0, width: 33, capacity: 32 };
+        assert_eq!(error, Err(want));
+    }
+
+    #[test]
+    fn a_record_reports_its_members_once_it_has_been_completed() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let name = interner.intern("count");
+        let fields = [member(char_), FieldDecl::new(Some(name), int)];
+        let id = types.declare_record(RecordKind::Struct, None);
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        types.complete_record(id, laid_out);
+        let ty = types.record(id);
+        assert_eq!(layout(&types, ty, &linux()).unwrap(), Layout::new(8, 4));
+        let field = types.field(id, name).expect("the member that was declared");
+        assert_eq!(field.offset, 4);
+        assert!(!field.is_bit_field());
+        assert_eq!(types.field(id, interner.intern("missing")), None);
+    }
+
+    #[test]
+    fn a_nested_record_brings_its_own_alignment_with_it() {
+        let mut types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let inner = record(&mut types, RecordKind::Struct, &[member(char_)]);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(inner), member(int)]);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // An anonymous member is an ordinary member with no name, so the same code lays it out
+        // and the four bytes of padding after the `char` are there either way.
+        let anonymous = record(&mut types, RecordKind::Struct, &[member(int), member(char_)]);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(char_), member(anonymous)]);
+        assert_eq!(laid_out.layout, Layout::new(12, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+    }
+
+    #[test]
+    fn everything_narrower_than_an_int_promotes_to_one() {
+        // Measured by naming the type of `+x` with `_Generic` in gcc 13.3 and clang 18. Every
+        // one of these answers `int`, including the unsigned ones, because an `int` holds every
+        // value a sixteen bit unsigned type has.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let narrow =
+            [IntKind::Char, IntKind::SChar, IntKind::UChar, IntKind::Short, IntKind::UShort];
+        for kind in narrow {
+            let ty = types.int(kind);
+            assert_eq!(promote(&mut types, ty, &linux), int, "{}", kind.as_str());
+        }
+        let boolean = types.boolean();
+        assert_eq!(promote(&mut types, boolean, &linux), int, "C23 made bool a real type");
+
+        // From `int` up, a type is its own promotion.
+        for kind in [IntKind::Int, IntKind::UInt, IntKind::Long, IntKind::ULongLong] {
+            let ty = types.int(kind);
+            assert_eq!(promote(&mut types, ty, &linux), ty, "{}", kind.as_str());
+        }
+    }
+
+    #[test]
+    fn an_fp16_promotes_to_a_float_and_a_float16_does_not() {
+        // gcc 15 for aarch64-unknown-freebsd15.1 names `+h` a `float` for an `__fp16`, and `h + h`
+        // as well, where both are `_Float16` for a `_Float16`.
+        let mut types = Types::new();
+        let linux = linux();
+        let float = types.float(FloatKind::Float);
+        let fp16 = types.float(FloatKind::Fp16);
+        let half = types.float(FloatKind::Float16);
+        assert_eq!(promote(&mut types, fp16, &linux), float);
+        assert_eq!(usual_arithmetic(&mut types, fp16, fp16, &linux), Some(float));
+        assert_eq!(promote(&mut types, half, &linux), half);
+        assert_eq!(usual_arithmetic(&mut types, half, half, &linux), Some(half));
+        let double = types.float(FloatKind::Double);
+        assert_eq!(usual_arithmetic(&mut types, fp16, double, &linux), Some(double));
+        assert_eq!(usual_arithmetic(&mut types, fp16, half, &linux), Some(float));
+    }
+
+    #[test]
+    fn a_brain_float_is_not_promoted_and_meets_a_float16_as_a_float16() {
+        // gcc 15 for x86_64-unknown-freebsd15.1: `b + b` is a `__bf16`, `b + f` a `float`, `b + 1`
+        // a `__bf16`. gcc 13 to 16 give `b + h` and `h + b` for a `_Float16` the type `_Float16`
+        // (tamnd/rucc#4369).
+        let mut types = Types::new();
+        let linux = linux();
+        let brain = types.float(FloatKind::BFloat16);
+        let float = types.float(FloatKind::Float);
+        let half = types.float(FloatKind::Float16);
+        let int = types.int(IntKind::Int);
+        assert_eq!(promote(&mut types, brain, &linux), brain);
+        assert_eq!(usual_arithmetic(&mut types, brain, brain, &linux), Some(brain));
+        assert_eq!(usual_arithmetic(&mut types, brain, float, &linux), Some(float));
+        assert_eq!(usual_arithmetic(&mut types, int, brain, &linux), Some(brain));
+        assert_eq!(usual_arithmetic(&mut types, brain, half, &linux), Some(half));
+        assert_eq!(usual_arithmetic(&mut types, half, brain, &linux), Some(half));
+        assert_eq!(layout(&types, brain, &linux).map(|it| (it.size, it.align)), Ok((2, 2)));
+    }
+
+    #[test]
+    fn a_bit_int_is_not_promoted_at_all() {
+        // C23 6.3.1.1p2, and the point of the type. `_BitInt(8) + _BitInt(8)` stays eight bits
+        // wide where `char + char` is an `int`, which is what makes the width mean something.
+        let mut types = Types::new();
+        let linux = linux();
+        let small = types.bit_int(true, 8);
+        assert_eq!(promote(&mut types, small, &linux), small);
+        assert_eq!(usual_arithmetic(&mut types, small, small, &linux), Some(small));
+    }
+
+    #[test]
+    fn a_bit_field_is_promoted_by_its_width_and_not_by_its_type() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let ullong = types.int(IntKind::ULongLong);
+
+        // Three bits of an unsigned field all fit in an `int`, so it is signed afterwards.
+        assert_eq!(promote_bit_field(&mut types, uint, 3, &linux), int);
+        // Thirty two of them do not.
+        assert_eq!(promote_bit_field(&mut types, uint, 32, &linux), uint);
+        // Twenty bits of a signed field, which is an `int` either way.
+        assert_eq!(promote_bit_field(&mut types, int, 20, &linux), int);
+        // Forty bits are forty bits of value and nothing more. The C17 wording says `unsigned
+        // int` here, which would silently drop eight of them, and C23 says the declared type,
+        // which would silently add twenty four. Both compilers give the width instead, so
+        // `x.b << 32` on such a field is zero rather than a value with a bit above the fortieth.
+        let forty = types.bit_int(false, 40);
+        assert_eq!(promote_bit_field(&mut types, ullong, 40, &linux), forty);
+        // A field as wide as its type is that type, since there is no precision to lose.
+        assert_eq!(promote_bit_field(&mut types, ullong, 64, &linux), ullong);
+    }
+
+    #[test]
+    fn an_enumeration_promotes_through_what_it_is_represented_in() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let short = types.int(IntKind::Short);
+        let uint = types.int(IntKind::UInt);
+
+        // `enum E : short` promotes the same way a `short` does, which is to `int`.
+        let fixed = types.declare_enum(None);
+        types.complete_enum(fixed, short, true);
+        let fixed = types.enumeration(fixed);
+        assert_eq!(promote(&mut types, fixed, &linux), int);
+
+        // An enumeration all of whose enumerators are non-negative is represented in
+        // `unsigned int` by both compilers, and then it promotes to itself.
+        let unsigned = types.declare_enum(None);
+        types.complete_enum(unsigned, uint, false);
+        let unsigned = types.enumeration(unsigned);
+        assert_eq!(promote(&mut types, unsigned, &linux), uint);
+
+        // An enumeration nobody has decided on yet answers `int`, so that an expression using
+        // one is still checkable while the diagnostic about it is being written.
+        let undecided = types.declare_enum(None);
+        let undecided = types.enumeration(undecided);
+        assert_eq!(promote(&mut types, undecided, &linux), int);
+    }
+
+    #[test]
+    fn the_qualifiers_and_the_atomic_come_off_before_anything_else() {
+        // By the time a value is being promoted the lvalue conversion has already happened, so
+        // `_Atomic const int` and `int` are the same operand.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let konst = types.qualified(int, Qualifiers::CONST);
+        let atomic = types.atomic(konst);
+        assert_eq!(promote(&mut types, atomic, &linux), int);
+        assert_eq!(usual_arithmetic(&mut types, atomic, konst, &linux), Some(int));
+    }
+
+    #[test]
+    fn the_usual_arithmetic_conversions_between_the_standard_integer_types() {
+        // Every row measured with `_Generic` in gcc 13.3 and clang 18 on x86-64 Linux.
+        let mut types = Types::new();
+        let linux = linux();
+        let cases = [
+            (IntKind::Int, IntKind::UInt, IntKind::UInt),
+            (IntKind::Int, IntKind::Long, IntKind::Long),
+            (IntKind::UInt, IntKind::Long, IntKind::Long),
+            (IntKind::UInt, IntKind::ULong, IntKind::ULong),
+            (IntKind::Int, IntKind::LongLong, IntKind::LongLong),
+            (IntKind::UInt, IntKind::LongLong, IntKind::LongLong),
+            (IntKind::ULong, IntKind::LongLong, IntKind::ULongLong),
+            (IntKind::Char, IntKind::Char, IntKind::Int),
+            (IntKind::UChar, IntKind::UShort, IntKind::Int),
+        ];
+        for (left, right, want) in cases {
+            let left = types.int(left);
+            let right = types.int(right);
+            let want = types.int(want);
+            assert_eq!(usual_arithmetic(&mut types, left, right, &linux), Some(want));
+            assert_eq!(usual_arithmetic(&mut types, right, left, &linux), Some(want), "either way");
+        }
+    }
+
+    #[test]
+    fn int128_is_sixteen_bytes_aligned_to_sixteen_and_outranks_long_long() {
+        // Measured on gcc 13.3 on x86-64 Linux and clang on AArch64 Darwin, both of which
+        // report the same size, the same alignment, and an offset of sixteen for a member
+        // after a `char`.
+        let mut types = Types::new();
+        let linux = linux();
+        let signed = types.int(IntKind::Int128);
+        let unsigned = types.int(IntKind::UInt128);
+        for id in [signed, unsigned] {
+            let laid_out = layout(&types, id, &linux).expect("a complete type");
+            assert_eq!(laid_out.size, 16);
+            assert_eq!(laid_out.align, 16);
+        }
+
+        // `__int128 + unsigned long long` is `__int128`, because it wins on rank and is wide
+        // enough to hold every value the other side had. Both compilers agree, and it is the
+        // one pair that says the rank is above `long long` rather than beside it.
+        let ull = types.int(IntKind::ULongLong);
+        assert_eq!(usual_arithmetic(&mut types, signed, ull, &linux), Some(signed));
+        // And it is its own promotion, the way every type at or above `int` is.
+        assert_eq!(promote(&mut types, signed, &linux), signed);
+    }
+
+    #[test]
+    fn a_bit_int_of_a_hundred_and_twenty_eight_bits_is_not_int128() {
+        // Same width, different types. The alignment is the visible difference on x86-64,
+        // where a `_BitInt` is aligned to its sixty four bit granule and `__int128` is not.
+        let mut types = Types::new();
+        let linux = linux();
+        let int128 = types.int(IntKind::Int128);
+        let bit_int = types.bit_int(true, 128);
+        assert_ne!(int128, bit_int);
+        assert!(!compatible(&types, int128, bit_int));
+        assert_eq!(layout(&types, bit_int, &linux).expect("complete").align, 8);
+        assert_eq!(layout(&types, int128, &linux).expect("complete").align, 16);
+    }
+
+    #[test]
+    fn the_last_arm_takes_the_unsigned_type_of_the_wider_one() {
+        // `unsigned long + long long` is `unsigned long long` on Linux: the `long long` wins on
+        // rank and cannot hold every value of the `unsigned long`, so neither operand's own
+        // type is the answer. This is the arm programs are surprised by.
+        let mut types = Types::new();
+        let linux = linux();
+        let ulong = types.int(IntKind::ULong);
+        let long_long = types.int(IntKind::LongLong);
+        let want = types.int(IntKind::ULongLong);
+        assert_eq!(usual_arithmetic(&mut types, ulong, long_long, &linux), Some(want));
+
+        // The same pair on Windows, where `long` is thirty two bits, comes out as `long long`,
+        // because there it does hold every value. A host-driven implementation gets one of
+        // these two wrong.
+        let windows = target("x86_64-pc-windows-msvc");
+        assert_eq!(usual_arithmetic(&mut types, ulong, long_long, &windows), Some(long_long));
+    }
+
+    #[test]
+    fn a_bit_int_is_ranked_by_its_width_against_the_standard_types() {
+        // Measured with clang 18 on x86-64 Linux, which is the compiler that has `_BitInt`.
+        let mut types = Types::new();
+        let linux = linux();
+        let b40 = types.bit_int(true, 40);
+        let ub40 = types.bit_int(false, 40);
+        let b8 = types.bit_int(true, 8);
+        let b32 = types.bit_int(true, 32);
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+
+        // Wider than an `int`, so it outranks one.
+        assert_eq!(usual_arithmetic(&mut types, b40, int, &linux), Some(b40));
+        // Narrower than a `long`, so it loses to one.
+        assert_eq!(usual_arithmetic(&mut types, b40, long, &linux), Some(long));
+        // The same width as an `int`, and a standard type wins the tie.
+        assert_eq!(usual_arithmetic(&mut types, b32, int, &linux), Some(int));
+        assert_eq!(usual_arithmetic(&mut types, b32, uint, &linux), Some(uint));
+        // The other side promotes first, so a `char` next to a narrow `_BitInt` is an `int`
+        // and the `_BitInt` loses to it.
+        assert_eq!(usual_arithmetic(&mut types, b8, char_, &linux), Some(int));
+        // Unsigned and higher ranked wins outright, and unsigned and lower ranked loses to a
+        // signed type wide enough to hold it.
+        assert_eq!(usual_arithmetic(&mut types, ub40, int, &linux), Some(ub40));
+        assert_eq!(usual_arithmetic(&mut types, ub40, long, &linux), Some(long));
+        // Two bit-precise types of the same width and different signedness.
+        assert_eq!(usual_arithmetic(&mut types, b40, ub40, &linux), Some(ub40));
+    }
+
+    #[test]
+    fn a_floating_operand_decides_the_answer_whatever_the_other_side_is() {
+        let mut types = Types::new();
+        let linux = linux();
+        let float = types.float(FloatKind::Float);
+        let double = types.float(FloatKind::Double);
+        let long_double = types.float(FloatKind::LongDouble);
+        let ullong = types.int(IntKind::ULongLong);
+        let int = types.int(IntKind::Int);
+
+        assert_eq!(usual_arithmetic(&mut types, int, float, &linux), Some(float));
+        assert_eq!(usual_arithmetic(&mut types, float, double, &linux), Some(double));
+        assert_eq!(usual_arithmetic(&mut types, double, long_double, &linux), Some(long_double));
+        // Sixty four bits of unsigned integer against a `float`, which is a `float` and loses
+        // most of them. That is the rule rather than an oversight.
+        assert_eq!(usual_arithmetic(&mut types, ullong, float, &linux), Some(float));
+    }
+
+    #[test]
+    fn a_mask_is_the_signed_integers_of_the_lane_width() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let float = types.float(FloatKind::Float);
+        let short = types.int(IntKind::Short);
+
+        // A signed lane is already its own mask, so the answer is the vector it was given.
+        let four_ints = types.vector(int, 4);
+        assert_eq!(mask_of(&mut types, four_ints, &linux), Some(four_ints));
+
+        // An unsigned lane answers as the signed type of the same width, which is what GCC
+        // gives a comparison of two `unsigned int` vectors.
+        let uint = types.int(IntKind::UInt);
+        let four_uints = types.vector(uint, 4);
+        assert_eq!(mask_of(&mut types, four_uints, &linux), Some(four_ints));
+
+        // A float lane answers as an integer of the same width, since the mask is bits and not
+        // a number and there is no float that is all ones.
+        let four_floats = types.vector(float, 4);
+        assert_eq!(mask_of(&mut types, four_floats, &linux), Some(four_ints));
+
+        // The width is the lane's own and not a word, so a `short` lane keeps its two bytes.
+        let two_shorts = types.vector(short, 2);
+        assert_eq!(mask_of(&mut types, two_shorts, &linux), Some(two_shorts));
+
+        // Not a vector, so there is no mask to give.
+        assert_eq!(mask_of(&mut types, int, &linux), None);
+    }
+
+    #[test]
+    fn two_vectors_convert_between_each_other_when_the_bytes_line_up() {
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let float = types.float(FloatKind::Float);
+        let short = types.int(IntKind::Short);
+
+        let four_ints = types.vector(int, 4);
+        let four_uints = types.vector(uint, 4);
+        let four_floats = types.vector(float, 4);
+        let eight_shorts = types.vector(short, 8);
+        let two_ints = types.vector(int, 2);
+
+        // The case the whole thing exists for: a mask assigned to the unsigned vector it came
+        // from, which GNU C converts and the standard rules would refuse.
+        assert!(vectors_convertible(&types, four_uints, four_ints, &linux));
+        // Both ways round, since assignment happens in both directions.
+        assert!(vectors_convertible(&types, four_ints, four_uints, &linux));
+        // The same sixteen bytes cut into eight lanes rather than four, which GCC also allows.
+        assert!(vectors_convertible(&types, four_ints, eight_shorts, &linux));
+        // Two floats of the same width, which is the other half of the rule.
+        assert!(vectors_convertible(&types, four_floats, four_floats, &linux));
+
+        // An integer lane against a float lane, which GCC refuses even at the same size,
+        // because reading one as the other is a cast and not a conversion.
+        assert!(!vectors_convertible(&types, four_ints, four_floats, &linux));
+        // Different sizes, so there is nothing to reinterpret.
+        assert!(!vectors_convertible(&types, four_ints, two_ints, &linux));
+        // A scalar is not a vector, whichever side it is on.
+        assert!(!vectors_convertible(&types, four_ints, int, &linux));
+        assert!(!vectors_convertible(&types, int, four_ints, &linux));
+    }
+
+    /// Insists that `a + b` and `b + a` are both `expected` on this target.
+    ///
+    /// Both ways round, because the operands of `+` are not ordered and an implementation that
+    /// keeps the left one when it cannot decide would pass half of these and be wrong.
+    fn combines(target: &TargetInfo, a: FloatKind, b: FloatKind, expected: FloatKind) {
+        let mut types = Types::new();
+        let left = types.float(a);
+        let right = types.float(b);
+        let want = types.float(expected);
+        assert_eq!(usual_arithmetic(&mut types, left, right, target), Some(want), "{a:?} + {b:?}");
+        assert_eq!(usual_arithmetic(&mut types, right, left, target), Some(want), "{b:?} + {a:?}");
+    }
+
+    #[test]
+    fn two_floating_types_of_the_same_format_are_still_two_types_and_one_of_them_wins() {
+        // Every line here was read off gcc 16 with `_Generic` rather than off the standard, on
+        // x86-64 Linux, where `long double` and `_Float64x` are both the x87 format and the
+        // standard type is the one that comes out.
+        let x86 = linux();
+        combines(&x86, FloatKind::Double, FloatKind::Float64, FloatKind::Float64);
+        combines(&x86, FloatKind::Float, FloatKind::Float32, FloatKind::Float32);
+        combines(&x86, FloatKind::Double, FloatKind::Float32x, FloatKind::Double);
+        combines(&x86, FloatKind::LongDouble, FloatKind::Float64x, FloatKind::LongDouble);
+        combines(&x86, FloatKind::Float128, FloatKind::LongDouble, FloatKind::Float128);
+        combines(&x86, FloatKind::Float64x, FloatKind::Float128, FloatKind::Float128);
+        combines(&x86, FloatKind::Double, FloatKind::LongDouble, FloatKind::LongDouble);
+        combines(&x86, FloatKind::Float32x, FloatKind::Float64, FloatKind::Float64);
+        combines(&x86, FloatKind::Float64x, FloatKind::Float64, FloatKind::Float64x);
+        combines(&x86, FloatKind::LongDouble, FloatKind::Float64, FloatKind::LongDouble);
+    }
+
+    #[test]
+    fn the_widest_floating_type_is_a_question_about_the_target_and_not_about_the_names() {
+        // The same reading against gcc 16 on aarch64-apple-darwin, where `long double` is a
+        // `double` and loses to the `_Float64x` it beats on x86-64. The name says nothing about
+        // which of the two is wider, which is why the ordering is worked out from the formats.
+        let mac = target("aarch64-apple-darwin");
+        combines(&mac, FloatKind::LongDouble, FloatKind::Float64x, FloatKind::Float64x);
+        combines(&mac, FloatKind::Double, FloatKind::LongDouble, FloatKind::LongDouble);
+        combines(&mac, FloatKind::Float128, FloatKind::LongDouble, FloatKind::Float128);
+        combines(&mac, FloatKind::Float64x, FloatKind::Float64, FloatKind::Float64x);
+        combines(&mac, FloatKind::Float32x, FloatKind::Float32, FloatKind::Float32x);
+        combines(&mac, FloatKind::Float32x, FloatKind::Float64, FloatKind::Float64);
+        combines(&mac, FloatKind::Double, FloatKind::Float64, FloatKind::Float64);
+        // `_Float16` is the narrowest type there is and does not promote on the way in, so it
+        // survives an operation only when nothing wider is there.
+        combines(&mac, FloatKind::Float16, FloatKind::Float, FloatKind::Float);
+        combines(&mac, FloatKind::Float16, FloatKind::Double, FloatKind::Double);
+        combines(&mac, FloatKind::Float16, FloatKind::Float16, FloatKind::Float16);
+    }
+
+    #[test]
+    fn a_complex_operand_makes_the_answer_complex_after_the_real_types_have_combined() {
+        let mut types = Types::new();
+        let linux = linux();
+        let cfloat = types.complex_float(FloatKind::Float);
+        let cdouble = types.complex_float(FloatKind::Double);
+        let cldouble = types.complex_float(FloatKind::LongDouble);
+        let double = types.float(FloatKind::Double);
+        let long_double = types.float(FloatKind::LongDouble);
+        let float = types.float(FloatKind::Float);
+        let int = types.int(IntKind::Int);
+
+        assert_eq!(usual_arithmetic(&mut types, cfloat, double, &linux), Some(cdouble));
+        assert_eq!(usual_arithmetic(&mut types, cfloat, int, &linux), Some(cfloat));
+        assert_eq!(usual_arithmetic(&mut types, cdouble, long_double, &linux), Some(cldouble));
+        assert_eq!(usual_arithmetic(&mut types, cfloat, float, &linux), Some(cfloat));
+    }
+
+    #[test]
+    fn an_operand_that_is_not_arithmetic_has_no_common_type() {
+        // The caller is the one holding the span, so this says no rather than guessing.
+        let mut types = Types::new();
+        let linux = linux();
+        let int = types.int(IntKind::Int);
+        let pointer = types.pointer(int);
+        assert_eq!(usual_arithmetic(&mut types, pointer, int, &linux), None);
+        assert_eq!(usual_arithmetic(&mut types, pointer, pointer, &linux), None);
+        let void = types.void();
+        assert_eq!(usual_arithmetic(&mut types, void, int, &linux), None);
+        // And a type that is not arithmetic is still its own promotion, so a caller may promote
+        // first and ask questions afterwards.
+        assert_eq!(promote(&mut types, pointer, &linux), pointer);
+    }
+
+    #[test]
+    fn the_conversions_read_through_sugar() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let linux = linux();
+        let char_ = types.int(IntKind::Char);
+        let name = types.typedef(interner.intern("byte"), char_);
+        let int = types.int(IntKind::Int);
+        assert_eq!(promote(&mut types, name, &linux), int);
+    }
+
+    /// A prototype returning `void`.
+    fn prototype(types: &mut Types, params: Vec<TypeId>, variadic: bool) -> TypeId {
+        let ret = types.void();
+        types.function(FunctionType {
+            ret,
+            params,
+            variadic,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        })
+    }
+
+    /// `void f()` as it means before C23: a declaration that says nothing about the parameters.
+    fn old_style(types: &mut Types) -> TypeId {
+        let ret = types.void();
+        types.function(FunctionType {
+            ret,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        })
+    }
+
+    /// A complete record with the given tag and members.
+    fn tagged(types: &mut Types, tag: Symbol, fields: &[FieldDecl]) -> RecordId {
+        let id = types.declare_record(RecordKind::Struct, Some(tag));
+        let laid_out = lay_out(types, RecordKind::Struct, fields);
+        types.complete_record(id, laid_out);
+        id
+    }
+
+    #[test]
+    fn a_type_is_compatible_with_itself_however_it_was_written() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let name = types.typedef(interner.intern("int32_t"), int);
+        assert!(compatible(&types, name, int), "the sugar is the same type underneath");
+        assert_eq!(composite(&mut types, name, int), Some(name), "and it keeps its name");
+
+        // The qualifiers have to match exactly, which is what keeps `const int *` and `int *`
+        // apart as parameter types.
+        let konst = types.qualified(int, Qualifiers::CONST);
+        assert!(!compatible(&types, konst, int));
+        let konst_pointer = types.pointer(konst);
+        let pointer = types.pointer(int);
+        assert!(!compatible(&types, konst_pointer, pointer));
+        assert_eq!(composite(&mut types, konst_pointer, pointer), None);
+
+        // And a different type is a different type. `char` is not `signed char` even on a target
+        // where the two have the same range, which is why they are separate kinds here.
+        let char_ = types.int(IntKind::Char);
+        let schar = types.int(IntKind::SChar);
+        assert!(!compatible(&types, char_, schar));
+        // `_Atomic int` is not `int` either, since it is a type and not a qualifier.
+        let atomic = types.atomic(int);
+        assert!(!compatible(&types, atomic, int));
+    }
+
+    #[test]
+    fn an_enumeration_is_compatible_with_the_type_it_is_represented_in() {
+        // gcc 13.3 and clang 18 both represent `enum E { A, B }` in `unsigned int`, and both
+        // accept a redeclaration that writes the representation instead of the tag.
+        let mut types = Types::new();
+        let uint = types.int(IntKind::UInt);
+        let int = types.int(IntKind::Int);
+        let id = types.declare_enum(None);
+        types.complete_enum(id, uint, false);
+        let e = types.enumeration(id);
+        assert!(compatible(&types, e, uint));
+        assert!(compatible(&types, uint, e), "and the relation is symmetric");
+        assert!(!compatible(&types, e, int));
+
+        // Two enumeration declarations are two types. Each is compatible with what it is
+        // represented in, and that does not make them compatible with each other.
+        let other = types.declare_enum(None);
+        types.complete_enum(other, uint, false);
+        let other = types.enumeration(other);
+        assert!(!compatible(&types, e, other));
+
+        // One nobody has decided on yet is compatible with nothing but itself, because the
+        // answer is not known rather than no.
+        let undecided = types.declare_enum(None);
+        let undecided = types.enumeration(undecided);
+        assert!(!compatible(&types, undecided, uint));
+        assert!(compatible(&types, undecided, undecided));
+    }
+
+    #[test]
+    fn an_array_without_a_size_is_compatible_with_one_that_has_it() {
+        // `extern int a[]; int a[4];` is a complete array of four afterwards, which gcc reports
+        // as a `sizeof` of sixteen. A compiler that keeps the first type has lost the size.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let five = types.array(int, ArrayLen::Fixed(5));
+        assert!(compatible(&types, unknown, four));
+        assert!(!compatible(&types, four, five));
+        assert_eq!(composite(&mut types, unknown, four), Some(four));
+        assert_eq!(composite(&mut types, four, unknown), Some(four), "either way round");
+        assert_eq!(composite(&mut types, four, five), None);
+
+        // A variable length array is compatible with both, because its size is not something a
+        // declaration can be checked against.
+        let vla = types.array(int, ArrayLen::Variable(VlaId(0)));
+        assert!(compatible(&types, vla, four));
+        assert_eq!(composite(&mut types, vla, four), Some(four));
+
+        // The element types have to be compatible too, and the composite reaches into them.
+        let long = types.int(IntKind::Long);
+        let longs = types.array(long, ArrayLen::Fixed(4));
+        assert!(!compatible(&types, four, longs));
+    }
+
+    #[test]
+    fn a_parameter_declared_as_an_array_is_a_pointer() {
+        // `int fn(int p[3])` and `int fn(int *p)` are one declaration and one definition, which
+        // both compilers accept. The adjustment is part of forming the parameter type, so two
+        // functions written either way are not merely compatible but identical.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let three = types.array(int, ArrayLen::Fixed(3));
+        let pointer = types.pointer(int);
+        assert_eq!(adjust_parameter(&mut types, three), pointer);
+
+        // A function parameter becomes a pointer to the function the same way.
+        let function = prototype(&mut types, vec![int], false);
+        let function_pointer = types.pointer(function);
+        assert_eq!(adjust_parameter(&mut types, function), function_pointer);
+
+        // And the qualifiers on the outermost node go, so `void f(const int)` and `void f(int)`
+        // declare the same function. The pointee of a `const int *` keeps its own.
+        let konst = types.qualified(int, Qualifiers::CONST);
+        assert_eq!(adjust_parameter(&mut types, konst), int);
+        let to_konst = types.pointer(konst);
+        assert_eq!(adjust_parameter(&mut types, to_konst), to_konst);
+    }
+
+    #[test]
+    fn an_old_style_declaration_is_compatible_with_the_prototypes_a_call_could_not_tell_from_it() {
+        // Measured with gcc 13.3 in C17 mode, which is the compiler that still has the old
+        // meaning of `()`. It names the rule in its own diagnostic: an argument type that has a
+        // default promotion cannot match an empty parameter name list declaration.
+        let mut types = Types::new();
+        let old = old_style(&mut types);
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+        let float = types.float(FloatKind::Float);
+        let double = types.float(FloatKind::Double);
+
+        let takes_int = prototype(&mut types, vec![int], false);
+        assert!(compatible(&types, old, takes_int));
+        assert!(compatible(&types, takes_int, old), "and the relation is symmetric");
+        // The composite is the prototype, so the calls written before it can still be checked.
+        assert_eq!(composite(&mut types, old, takes_int), Some(takes_int));
+
+        let pointer = types.pointer(int);
+        for params in [vec![long], vec![double], vec![pointer], vec![int, long]] {
+            let ty = prototype(&mut types, params, false);
+            assert!(compatible(&types, old, ty), "nothing here is touched by a promotion");
+        }
+
+        // A `char` promotes to `int` and a `float` to `double`, so a call through the old style
+        // declaration would have passed something else and the two conflict.
+        for params in [vec![char_], vec![float], vec![int, char_]] {
+            let ty = prototype(&mut types, params, false);
+            assert!(!compatible(&types, old, ty));
+            assert_eq!(composite(&mut types, old, ty), None);
+        }
+
+        // An ellipsis conflicts too, which gcc also says in as many words.
+        let variadic = prototype(&mut types, vec![int], true);
+        assert!(!compatible(&types, old, variadic));
+
+        // An enumeration parameter comes through when what it is represented in does.
+        let uint = types.int(IntKind::UInt);
+        let id = types.declare_enum(None);
+        types.complete_enum(id, uint, false);
+        let e = types.enumeration(id);
+        let takes_enum = prototype(&mut types, vec![e], false);
+        assert!(compatible(&types, old, takes_enum));
+
+        // Two old style declarations agree about nothing and so cannot disagree.
+        assert!(compatible(&types, old, old));
+
+        // The return type still has to match, which is the one part `()` does say.
+        let returns_int = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        assert!(!compatible(&types, returns_int, takes_int));
+    }
+
+    /// An old style definition is held to its parameters when it is redeclared and not when a
+    /// pointer to it is taken, which is where gcc compares it as a function declared with `()`.
+    #[test]
+    fn a_pointer_to_an_old_style_definition_converts_as_one_to_a_function_declared_with_parens() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+        let void = types.void();
+        let defined = types.function(FunctionType {
+            ret: void,
+            params: vec![long],
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        let takes_int = prototype(&mut types, vec![int], false);
+        let takes_two = prototype(&mut types, vec![int, int], false);
+        assert!(!compatible(&types, defined, takes_int), "a redeclaration is still refused");
+        assert!(compatible_pointees(&types, defined, takes_int));
+        assert!(compatible_pointees(&types, takes_two, defined));
+        // What a call through `()` could not have passed is still another function.
+        let takes_char = prototype(&mut types, vec![char_], false);
+        let variadic = prototype(&mut types, vec![int], true);
+        assert!(!compatible_pointees(&types, defined, takes_char));
+        assert!(!compatible_pointees(&types, variadic, defined));
+        // And two prototypes are compared as they always are.
+        assert!(!compatible_pointees(&types, takes_int, takes_two));
+        assert!(!compatible_pointees(&types, int, long));
+    }
+
+    /// gcc's rule: a function of one convention and a function of the other are never
+    /// compatible, however alike the rest of the two types is, and the composite of two that do
+    /// agree keeps the convention.
+    #[test]
+    fn two_conventions_are_two_incompatible_types() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Ms,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let native = types.function(FunctionType {
+            convention: rucc_target::Convention::Target,
+            ..signature.clone()
+        });
+        let ms = types.function(signature);
+        let old_ms = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Ms,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        assert!(!compatible(&types, native, ms));
+        let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
+        assert!(!compatible(&types, to_native, to_ms));
+        assert!(compatible(&types, ms, old_ms));
+        let merged = composite(&mut types, old_ms, ms).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert_eq!(types.signature(id).convention, rucc_target::Convention::Ms);
+        assert!(types.signature(id).prototyped);
+    }
+
+    /// gcc 13 calls a `nocf_check` declaration after a plain one `conflicting types`, and a
+    /// pointer to the one assigned to a pointer to the other an incompatible pointer.
+    #[test]
+    fn a_function_without_a_landing_pad_is_another_type() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: true,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let plain = types.function(FunctionType { nocf: false, ..signature.clone() });
+        let untracked = types.function(signature);
+        let old = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: true,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        });
+        assert!(!compatible(&types, plain, untracked));
+        let (to_plain, to_untracked) = (types.pointer(plain), types.pointer(untracked));
+        assert!(!compatible(&types, to_plain, to_untracked));
+        assert!(compatible(&types, untracked, old));
+        let merged = composite(&mut types, old, untracked).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert!(types.signature(id).nocf);
+    }
+
+    /// gcc 14 calls an `sseregparm` declaration after a plain one `conflicting types`, a pointer to
+    /// the one assigned to a pointer to the other an incompatible pointer, and keeps the attribute
+    /// through an old style redeclaration.
+    #[test]
+    fn a_function_with_floats_in_sse_registers_is_another_type() {
+        let mut types = Types::new();
+        let double = types.float(FloatKind::Double);
+        let signature = FunctionType {
+            ret: double,
+            params: vec![double],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: true,
+            sme: Sme::NONE,
+        };
+        let plain = types.function(FunctionType { sse_regparm: false, ..signature.clone() });
+        let sse = types.function(signature.clone());
+        let old =
+            types.function(FunctionType { params: Vec::new(), prototyped: false, ..signature });
+        assert!(!compatible(&types, plain, sse));
+        let (to_plain, to_sse) = (types.pointer(plain), types.pointer(sse));
+        assert!(!compatible(&types, to_plain, to_sse));
+        assert!(compatible(&types, sse, old));
+        let merged = composite(&mut types, old, sse).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert!(types.signature(id).sse_regparm);
+    }
+
+    /// gcc holds the AArch64 SME mode and state of a function against a type without them, and
+    /// two that share ZA in different ways are two types. tamnd/rucc#4225.
+    #[test]
+    fn a_function_with_another_sme_mode_or_state_is_another_type() {
+        let mut types = Types::new();
+        let void = types.void();
+        let signature = FunctionType {
+            ret: void,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let with =
+            |types: &mut Types, sme: Sme| types.function(FunctionType { sme, ..signature.clone() });
+        let plain = with(&mut types, Sme::NONE);
+        let streaming = with(&mut types, Sme { mode: SmeMode::Streaming, ..Sme::NONE });
+        let either = with(&mut types, Sme { mode: SmeMode::Compatible, ..Sme::NONE });
+        let za_in = with(&mut types, Sme { za: Some(SmeShare::In), ..Sme::NONE });
+        let za_inout = with(&mut types, Sme { za: Some(SmeShare::Inout), ..Sme::NONE });
+        for (a, b) in [(plain, streaming), (plain, either), (streaming, either)] {
+            assert!(!compatible(&types, a, b));
+        }
+        assert!(!compatible(&types, plain, za_in));
+        assert!(!compatible(&types, za_in, za_inout));
+        let (to_plain, to_streaming) = (types.pointer(plain), types.pointer(streaming));
+        assert!(!compatible(&types, to_plain, to_streaming));
+        let again = with(&mut types, Sme { za: Some(SmeShare::In), ..Sme::NONE });
+        assert!(compatible(&types, za_in, again));
+        let merged = composite(&mut types, za_in, again).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert_eq!(types.signature(id).sme.za, Some(SmeShare::In));
+    }
+
+    /// gcc 13 takes a pointer to an `indirect_return` function for a pointer to a plain one in
+    /// silence and keeps the attribute through a redeclaration that does not repeat it.
+    #[test]
+    fn a_function_that_returns_by_a_jump_is_the_same_type() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let plain = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let jumps = types.function(FunctionType { indirect_return: true, ..plain.clone() });
+        let plain = types.function(plain);
+        assert!(compatible(&types, plain, jumps));
+        let (to_plain, to_jumps) = (types.pointer(plain), types.pointer(jumps));
+        assert!(compatible(&types, to_plain, to_jumps));
+        for (left, right) in [(plain, jumps), (jumps, plain)] {
+            let merged = composite(&mut types, left, right).expect("the two agree");
+            let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+            assert!(types.signature(id).indirect_return);
+        }
+    }
+
+    /// gcc does not hold `callee_pop_aggregate_return` against a type that says the other thing
+    /// or nothing, and a redeclaration that does not repeat it keeps it.
+    #[test]
+    fn who_pops_a_returned_address_is_no_difference_between_types() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let plain = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let kept =
+            types.function(FunctionType { return_pointer_popped: Some(false), ..plain.clone() });
+        let popped =
+            types.function(FunctionType { return_pointer_popped: Some(true), ..plain.clone() });
+        let plain = types.function(plain);
+        assert!(compatible(&types, plain, kept));
+        assert!(compatible(&types, kept, popped));
+        let (to_kept, to_popped) = (types.pointer(kept), types.pointer(popped));
+        assert!(compatible(&types, to_kept, to_popped));
+        for (left, right, said) in
+            [(plain, kept, false), (kept, plain, false), (popped, kept, true)]
+        {
+            let merged = composite(&mut types, left, right).expect("the two agree");
+            let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+            assert_eq!(types.signature(id).return_pointer_popped, Some(said));
+        }
+    }
+
+    #[test]
+    fn from_c23_an_empty_parameter_list_is_a_prototype_and_conflicts_where_it_used_to_merge() {
+        // The dialect decides what `()` means and the parser records the decision, so the same
+        // pair of declarations is a redeclaration in C17 and a conflict in C23. Both compilers
+        // report exactly that.
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let takes_int = prototype(&mut types, vec![int], false);
+        let takes_nothing = prototype(&mut types, Vec::new(), false);
+        let old = old_style(&mut types);
+        assert!(!compatible(&types, takes_nothing, takes_int));
+        assert!(compatible(&types, old, takes_int), "the C17 reading of the same source");
+    }
+
+    #[test]
+    fn two_prototypes_have_to_agree_about_everything() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let base = prototype(&mut types, vec![int, int], false);
+        for other in [vec![int], vec![int, long], vec![int, int, int], Vec::new()] {
+            let other = prototype(&mut types, other, false);
+            assert!(!compatible(&types, base, other));
+        }
+        let variadic = prototype(&mut types, vec![int, int], true);
+        assert!(!compatible(&types, base, variadic), "`...` is part of the type");
+
+        // The parameters are compared with the same rules as anything else, so an array size
+        // inside a parameter's type is compared and an unknown one is not.
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let to_four = types.pointer(four);
+        let to_unknown = types.pointer(unknown);
+        let a = prototype(&mut types, vec![to_four], false);
+        let b = prototype(&mut types, vec![to_unknown], false);
+        assert!(compatible(&types, a, b));
+        // And the composite takes the size, which is the whole reason it exists.
+        assert_eq!(composite(&mut types, a, b), Some(a));
+    }
+
+    #[test]
+    fn a_pointer_composite_reaches_through_to_what_is_pointed_at() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let four = types.array(int, ArrayLen::Fixed(4));
+        let unknown = types.array(int, ArrayLen::Unknown);
+        let to_four = types.pointer(four);
+        let to_unknown = types.pointer(unknown);
+        assert_eq!(composite(&mut types, to_unknown, to_four), Some(to_four));
+
+        // The pointer's own qualifiers survive, since a compatible pair has the same ones.
+        let konst_to_unknown = types.qualified(to_unknown, Qualifiers::CONST);
+        let konst_to_four = types.qualified(to_four, Qualifiers::CONST);
+        assert_eq!(composite(&mut types, konst_to_unknown, konst_to_four), Some(konst_to_four));
+    }
+
+    #[test]
+    fn two_record_declarations_with_the_same_tag_and_the_same_members_are_compatible() {
+        // C23 6.2.7p1, which is what lets one header be included twice. clang 18 implements it
+        // and gcc 13.3 still rejects the redefinition, so this is a divergence rather than a
+        // reading; in the older dialects the redefinition never gets as far as being compared.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let tag = interner.intern("point");
+        let x = interner.intern("x");
+        let y = interner.intern("y");
+        let int = types.int(IntKind::Int);
+        let members = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(y), int)];
+
+        let first = tagged(&mut types, tag, &members);
+        let second = tagged(&mut types, tag, &members);
+        let first = types.record(first);
+        let second = types.record(second);
+        assert_ne!(first, second, "still two declarations and two types");
+        assert!(compatible(&types, first, second));
+
+        // A different member name, a different member type, a different count, a different tag
+        // and a different keyword are each enough to make them different types.
+        let z = interner.intern("z");
+        let long = types.int(IntKind::Long);
+        let renamed = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(z), int)];
+        let retyped = [FieldDecl::new(Some(x), int), FieldDecl::new(Some(y), long)];
+        for other in [&renamed[..], &retyped[..], &members[..1]] {
+            let other = tagged(&mut types, tag, other);
+            let other = types.record(other);
+            assert!(!compatible(&types, first, other));
+        }
+        let elsewhere = tagged(&mut types, interner.intern("pair"), &members);
+        let elsewhere = types.record(elsewhere);
+        assert!(!compatible(&types, first, elsewhere));
+
+        // An anonymous record is compatible with nothing but itself: there is no name by which
+        // a second declaration could be claiming to be the same type.
+        let anonymous = record(&mut types, RecordKind::Struct, &members);
+        let also_anonymous = record(&mut types, RecordKind::Struct, &members);
+        assert!(!compatible(&types, anonymous, also_anonymous));
+
+        // Nor is an incomplete declaration, which has no members to compare.
+        let incomplete = types.declare_record(RecordKind::Struct, Some(tag));
+        let incomplete = types.record(incomplete);
+        assert!(!compatible(&types, first, incomplete));
+        assert!(compatible(&types, incomplete, incomplete));
+    }
+
+    #[test]
+    fn a_self_referential_record_is_compared_without_going_round_forever() {
+        // `struct node { int value; struct node *next; }` declared twice. Comparing the two
+        // reaches the same pair again through the pointer, and the second time it is an
+        // assumption rather than a question.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let tag = interner.intern("node");
+        let value = interner.intern("value");
+        let next = interner.intern("next");
+        let int = types.int(IntKind::Int);
+
+        let node = |types: &mut Types| {
+            let id = types.declare_record(RecordKind::Struct, Some(tag));
+            let ty = types.record(id);
+            let pointer = types.pointer(ty);
+            let members = [FieldDecl::new(Some(value), int), FieldDecl::new(Some(next), pointer)];
+            let laid_out = lay_out(types, RecordKind::Struct, &members);
+            types.complete_record(id, laid_out);
+            ty
+        };
+        let first = node(&mut types);
+        let second = node(&mut types);
+        assert_ne!(first, second);
+        assert!(compatible(&types, first, second));
+
+        // The guard is an assumption and not an answer, so a difference below the cycle is still
+        // found: the same structure with the two members the other way round is a different one.
+        let id = types.declare_record(RecordKind::Struct, Some(tag));
+        let ty = types.record(id);
+        let pointer = types.pointer(ty);
+        let members = [FieldDecl::new(Some(next), pointer), FieldDecl::new(Some(value), int)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &members);
+        types.complete_record(id, laid_out);
+        assert!(!compatible(&types, first, ty));
+    }
+
+    #[test]
+    fn layout_reads_through_sugar() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let long = types.int(IntKind::Long);
+        let name = types.typedef(interner.intern("word"), long);
+        let array = types.array(name, ArrayLen::Fixed(4));
+        assert_eq!(layout(&types, array, &linux()).unwrap(), Layout::new(32, 8));
+    }
+
+    /// A recipe worked out, with `sizes` standing for how large each member turned out to be.
+    ///
+    /// The lowering does this with instructions and this does it with numbers, which is what
+    /// makes a recipe testable here: the tree is the whole answer, and what a member is as long
+    /// as is the only thing either side has to be told.
+    fn work_out(recipe: &Extent, sizes: &[u64]) -> u64 {
+        match recipe {
+            Extent::Bytes(count) => *count,
+            Extent::Member(index) => sizes[*index as usize],
+            Extent::Sum(parts) => parts.iter().map(|part| work_out(part, sizes)).sum(),
+            Extent::RoundUp(inner, to) => work_out(inner, sizes).next_multiple_of(*to),
+            Extent::Max(parts) => parts.iter().map(|part| work_out(part, sizes)).max().unwrap_or(0),
+        }
+    }
+
+    /// An array of `int` whose length the program computes.
+    fn measured(types: &mut Types, which: u32) -> TypeId {
+        let int = types.int(IntKind::Int);
+        types.array(int, ArrayLen::Variable(VlaId(which)))
+    }
+
+    #[test]
+    fn a_member_of_no_fixed_size_leaves_the_size_and_what_follows_it_to_the_program() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let rows = measured(&mut types, 0);
+        let laid_out = lay_out(&types, RecordKind::Struct, &[member(rows), member(int)]);
+
+        // Nothing is known here but the alignment, which never varies: it is decided by the
+        // members rather than by where they land.
+        assert_eq!(laid_out.layout, Layout::new(0, 4));
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        // The member in front of the variable one sits where its number says, and the one after
+        // it does not. There is no rounding in between, because an array of `int` ends on a four
+        // byte boundary however long it is.
+        assert_eq!(variable.offsets[0], None);
+        let after = variable.offsets[1].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [4 * count, 4];
+            assert_eq!(work_out(after, &sizes), 4 * count);
+            assert_eq!(work_out(&variable.size, &sizes), 4 * count + 4);
+        }
+        assert_eq!(laid_out.fields[1].align, 4);
+    }
+
+    #[test]
+    fn a_member_after_one_of_no_fixed_size_is_rounded_up_where_its_alignment_asks_for_it() {
+        let mut types = Types::new();
+        let char_ty = types.int(IntKind::Char);
+        let rows = measured(&mut types, 0);
+        let double = types.float(FloatKind::Double);
+        let fields = [member(char_ty), member(rows), member(double)];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+
+        assert_eq!(laid_out.layout, Layout::new(0, 8));
+        assert_eq!(offsets(&laid_out)[..2], [0, 32]);
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        assert_eq!(variable.offsets[..2], [None, None]);
+        let after = variable.offsets[2].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [1, 4 * count, 8];
+            let at = (4 + 4 * count).next_multiple_of(8);
+            assert_eq!(work_out(after, &sizes), at);
+            assert_eq!(work_out(&variable.size, &sizes), at + 8);
+        }
+    }
+
+    #[test]
+    fn a_union_with_a_member_of_no_fixed_size_is_as_long_as_the_longest_of_them() {
+        let mut types = Types::new();
+        let rows = measured(&mut types, 0);
+        let double = types.float(FloatKind::Double);
+        let laid_out = lay_out(&types, RecordKind::Union, &[member(rows), member(double)]);
+
+        assert_eq!(laid_out.layout, Layout::new(0, 8));
+        let variable = laid_out.variable.expect("a union with a member of no fixed size");
+        // Every member of a union starts where the union does, so none of them has an offset the
+        // program has to work out.
+        assert!(variable.offsets.iter().all(Option::is_none));
+        for count in 0..6u64 {
+            let sizes = [4 * count, 8];
+            let want = (4 * count).max(8).next_multiple_of(8);
+            assert_eq!(work_out(&variable.size, &sizes), want);
+        }
+    }
+
+    #[test]
+    fn packed_takes_the_rounding_out_of_a_record_the_program_measures() {
+        let mut types = Types::new();
+        let char_ty = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let rows = measured(&mut types, 0);
+        let fields = [member(char_ty), member(rows), member(int)];
+        let options = RecordOptions { packed: true, ..RecordOptions::default() };
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &options, &linux())
+            .expect("a packed record with a member of no fixed size");
+
+        assert_eq!(laid_out.layout, Layout::new(0, 1));
+        assert_eq!(laid_out.fields[2].align, 1);
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        let after = variable.offsets[2].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [1, 4 * count, 4];
+            assert_eq!(work_out(after, &sizes), 1 + 4 * count);
+            assert_eq!(work_out(&variable.size, &sizes), 1 + 4 * count + 4);
+        }
+    }
+
+    #[test]
+    fn bit_fields_after_a_member_of_no_fixed_size_are_placed_one_after_another() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let char_ty = types.int(IntKind::Char);
+        let rows = measured(&mut types, 0);
+        let fields = [
+            member(rows),
+            bits(&mut interner, "b", int, 3),
+            bits(&mut interner, "c", int, 30),
+            member(char_ty),
+        ];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+
+        // `c` would straddle its `int` if the offset were a number, and gcc 16 puts it at bit
+        // three all the same, because it only asks that question of an offset it knows. So the
+        // `char` is five bytes past the array and the record is `4 * n + 8` long.
+        assert_eq!((laid_out.fields[2].offset, laid_out.fields[2].bit), (0, 3));
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        let after = variable.offsets[3].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [4 * count, 4, 4, 1];
+            assert_eq!(work_out(after, &sizes), 4 * count + 5);
+            assert_eq!(work_out(&variable.size, &sizes), 4 * count + 8);
+        }
+    }
+
+    #[test]
+    fn a_zero_width_bit_field_that_needs_more_alignment_than_is_known_is_turned_down() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let char_ty = types.int(IntKind::Char);
+        let letters = types.array(char_ty, ArrayLen::Variable(VlaId(0)));
+        let fields = [member(letters), unnamed_bits(int, 0)];
+        let options = RecordOptions::default();
+        let failed = layout_record(&types, RecordKind::Struct, &fields, &options, &linux());
+
+        // A `char` array may end on any byte, so which four byte boundary `int : 0` rounds to is a
+        // question about an address the program has not worked out yet. The layout says so
+        // rather than putting the member somewhere plausible.
+        assert_eq!(failed, Err(RecordError::VariableBitField { index: 1 }));
+    }
+}

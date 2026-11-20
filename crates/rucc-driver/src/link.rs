@@ -1,0 +1,4394 @@
+//! Finding a linker and telling it what to link.
+//!
+//! Design: `spec/04-driver-and-cli.md` section 4.9. There is no linker of our own before 1.0, so
+//! this finds one on the machine and builds the command line it wants.
+//!
+//! The linker is invoked directly rather than through the system compiler driver. Going through
+//! `cc` would be shorter to write and would borrow that compiler's idea of where everything is,
+//! and it would also mean this compiler cannot link on a machine that has no other compiler on
+//! it, which is most of the machines a compiler ends up on. It would also make `-###` output a
+//! line that does not say what happens, since the interesting half would be inside the program
+//! being spawned.
+//!
+//! # What is not decided here
+//!
+//! The startup files and the library directories are looked for rather than configured, for the
+//! same reason `library` looks for the headers: gcc settles this when it is built because a gcc
+//! is built for the machine it will run on, and this is one binary that runs wherever it is
+//! copied. So the shape of the answer is a list of candidates per platform of which the ones
+//! that exist are taken, and a cross build says where the rest is with `--sysroot`.
+//!
+//! # The compiler's own runtime
+//!
+//! `crtbegin`, `crtend` and the runtime libraries are found the same way, on the machine rather
+//! than by configuration. Ours is `librucc_builtins.a`, looked for beside the compiler, and the
+//! machine's `libgcc` goes on after it for the parts we have not written, which today is the
+//! unwinder and its personality routine. The C library goes in front of both, so that on a target
+//! that has one its `memcpy` is the one that answers rather than ours. `-fno-builtins-lib` leaves
+//! ours off, for somebody who wants libgcc to answer for everything.
+//!
+//! On a static link the three archives go inside `--start-group`, because `libc.a` refers to the
+//! unwinder and the unwinder refers back to `libc.a`, and a linker walking a list once resolves
+//! whichever of the two it reaches first and leaves the other undefined. That circularity is the
+//! whole reason `-static` failed before this, and it is issue #277.
+//!
+//! # Linking for a machine that is not this one
+//!
+//! Everything above describes a link against the machine running the compiler, and it is what runs
+//! when the target is that machine. A target that is not is a different problem: there is no
+//! `crt1.o` for it in `/usr/lib`, the `libc.so` there is the wrong architecture, and a line built
+//! out of what is lying around either fails at the first input or, worse, links. So a cross link
+//! does not look at this machine at all. It is built by [`rucc_sysroot::argv`] out of the target
+//! and a sysroot under the cache directory, and `spec/cross-compile/11-linking.md` section 11.3 is
+//! the design. [`cross_sysroot`] is the one place that decides which of the two it is.
+//!
+//! Two conditions keep that out of the way of everything that works today. The target has to differ
+//! from the host, and `--sysroot` must not have been given: somebody who assembled a tree and named
+//! it is asking for the line above with their own root in front of every path, which is what a
+//! cross compile with a real distribution tree in it has always been.
+//!
+//! That second condition is also the escape hatch for a machine which has a distribution's own cross
+//! files installed, where `/usr/lib/aarch64-linux-gnu` really does hold an AArch64 `crt1.o`.
+//! `--sysroot=/` takes the line above, and then every directory it decides is that machine's again.
+//!
+//! # Windows in Microsoft's environment
+//!
+//! `lld-link` takes a line of its own, which [`rucc_sysroot::argv`] writes as it writes the others,
+//! and the libraries on it come out of a tree nobody may redistribute. `--fetch` and
+//! `--fetch-msvc-sdk` lay that tree out from Microsoft's own downloads once the person asking has
+//! accepted Microsoft's licence, and say which `--sysroot` to pass, so the tree is always one
+//! somebody named, and `msvc_sysroot` is the one place that says so. A mingw-w64 target links
+//! against the cache like every other cross target, because PE in that environment is written in
+//! the GNU style and the import libraries for it are ours. With `--sysroot` it links against the
+//! tree named instead, MSYS2's `/ucrt64` or one laid out like it, through the same line, and
+//! `named_mingw` is where that is decided.
+//!
+//! Darwin has a line of its own, [`darwin_line`], and it is the same line on a Mac and anywhere
+//! else. Everything it links against is in the SDK, which is found the way the header search finds
+//! it, so a machine that is not a Mac links for one exactly when somebody has named an SDK with
+//! `-isysroot` or `SDKROOT` and there is an `ld64.lld` to hand it to.
+//!
+//! The headers are the other half of a cross compile and [`crate::library::header_dirs`] is where
+//! they are decided. It asks [`cross_sysroot`] the same question this file asks it, which is the
+//! point: a compile that took its libc from the sysroot and its declarations from this machine would
+//! be wrong in the quietest way available, and one function answering for both is what stops that
+//! being possible.
+
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use rucc_session::Compress;
+use rucc_sysroot::layout::{Kernel, Sysroot};
+use rucc_sysroot::{Chip, Crt, LinkMode, argv};
+use rucc_target::{Arch, Env, Os, Preview, Triple};
+use rucc_tuple::TargetTuple;
+
+mod bsd;
+
+/// What the command line said about linking.
+///
+/// Kept apart from `Options` because none of it reaches the compilation. A flag here changes what
+/// the linker is told and changes nothing about the object files handed to it, which is why `-lm`
+/// on a `-c` line is a note rather than an error.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LinkOptions {
+    /// Whether gcc's `libgcov` goes on the line, from `-fprofile-arcs`, for the `__gcov_init` the
+    /// objects built with it call.
+    pub gcov: bool,
+    /// `-fuse-ld=<name>`, which names a linker rather than a path to one.
+    pub use_ld: Option<String>,
+    /// `-L<dir>`, in order, because the linker takes the first library it finds.
+    pub search: Vec<PathBuf>,
+    /// `-B<prefix>`, which is where to look for the linker before looking on the path.
+    pub prefixes: Vec<PathBuf>,
+    /// `--sysroot=<dir>`, which prefixes the directories this looks in.
+    pub sysroot: Option<PathBuf>,
+    /// `--gcc-toolchain=<dir>`, the prefix a GCC is installed under, as in clang. Its
+    /// `lib/gcc/<triple>/<version>` is the GCC directory of a native link, in place of the one
+    /// on the machine.
+    pub gcc_toolchain: Option<PathBuf>,
+    /// Where the generated sysroots are, which is [`crate::cache::dir`] on a real command line.
+    ///
+    /// [`None`] is a caller that was not given one, which outside a test is nothing, and then there
+    /// is no cross link line and a foreign target is refused the way it was before there was one.
+    /// It is a field rather than a call inside this module because a link line that read the
+    /// environment could only be tested on a machine whose environment said the right thing.
+    pub cache: Option<PathBuf>,
+    /// Where a distribution's cross packages put the tree for another architecture, which is
+    /// `/usr` on a real command line.
+    ///
+    /// Debian and Ubuntu install `libc6-dev-arm64-cross` and its friends as `/usr/<multiarch>/include`
+    /// and `/usr/<multiarch>/lib`, and gcc's own files for that target under
+    /// `/usr/lib/gcc-cross/<multiarch>`. [`distro_cross`] reads it. A field for the reason
+    /// [`LinkOptions::cache`] is one, and [`None`] in a test is a machine with no such packages.
+    ///
+    /// On Windows it is the tree the `gcc.exe` on the path is in, which is MSYS2's `/ucrt64` and
+    /// has gcc's files under `lib/gcc` the way `/usr` does. See [`usr`].
+    pub usr: Option<PathBuf>,
+    /// `-mexec-model=reactor` on a wasm row. A reactor has `_initialize` and no `main`, and the
+    /// host calls its exports. A command, which is the default, has `_start`, which runs `main`.
+    pub reactor: bool,
+    /// `-static`.
+    pub is_static: bool,
+    /// `-shared`.
+    pub shared: bool,
+    /// `-pie` or `-no-pie`, and the platform's default when neither was written.
+    pub pie: Option<bool>,
+    /// `-nostdlib`, which is `-nostartfiles` and `-nodefaultlibs` together.
+    pub no_stdlib: bool,
+    /// `-nostartfiles`.
+    pub no_startfiles: bool,
+    /// `-nodefaultlibs`.
+    pub no_defaultlibs: bool,
+    /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
+    pub export_dynamic: bool,
+    /// `-fhardened` on a link that names no other link option against it. The line then has `-z now`
+    /// and `-z relro`, as gcc's has.
+    pub hardened: bool,
+    /// `-s`, which drops the symbol table.
+    pub strip: bool,
+    /// `-mwindows` rather than `-mconsole`, whichever came last. Only a Windows line reads it.
+    pub gui: bool,
+    /// `-municode`, which only a Windows line reads.
+    pub unicode: bool,
+    /// `-fms-runtime-lib=`, which is `/MT` or `/MD` and which only an MSVC line reads.
+    pub crt: Crt,
+    /// `-fno-builtins-lib`, which leaves our own runtime off the line so that the machine's
+    /// libgcc answers for everything instead.
+    pub no_builtins_lib: bool,
+    /// The whole ten field target when `--target=` spelled one, which is where a pinned libc
+    /// release is.
+    ///
+    /// [`None`] is a command line that named no target at all, and then there is nothing pinned and
+    /// this machine is the target. A `Triple` has room for an architecture, an OS and an
+    /// environment and nowhere to put a release, so the release arrives here instead of there, and
+    /// [`cross_sysroot`] reads it for both of the things it decides: whether this is a cross link
+    /// and which directory under the cache it is against.
+    pub pinned: Option<TargetTuple>,
+    /// `-pg`, which changes the link as well as the code.
+    ///
+    /// The counts a profiled program keeps have to be started before `main` runs and written out
+    /// after it returns, and what does both is a start file of its own. So a build that compiles
+    /// with the flag and links without it produces a program that calls the hook on every function
+    /// and never writes a profile.
+    pub profile: bool,
+    /// Whether `-Ofast`, `-ffast-math` or `-funsafe-math-optimizations` was in force at the end
+    /// of the command line, which links `crtfastmath.o` into anything that is not a shared object.
+    ///
+    /// That file is a constructor which sets flush to zero and denormals are zero before `main`,
+    /// so the mode is the process's rather than the unit's, and it is the half of fast math the
+    /// compiler cannot give from inside a function.
+    pub fast_math: bool,
+    /// `-mdaz-ftz` or `-mno-daz-ftz`, which decides the same file outright and for a shared
+    /// object as well.
+    pub daz_ftz: Option<bool>,
+    /// `-r`, which joins objects into one bigger object rather than into something that runs.
+    ///
+    /// Kbuild builds every directory into a `built-in.o` this way. The result is still an input to a
+    /// later link, so it takes no startup files, no libraries and nothing about how it will be
+    /// loaded, which is what gcc leaves off the line when it sees the flag.
+    pub relocatable: bool,
+    /// `-m32` or `-m16` on an x86-64 target, which makes the program i386 and leaves the GCC and
+    /// its linker those of amd64. NetBSD's GCC then links with the linker of amd64 and gives it
+    /// `-m elf_i386`.
+    pub narrowed: bool,
+    /// The deployment target on an Apple platform, from `-mmacosx-version-min=` and its friends or
+    /// from the tuple, which `ld64` is told in `-platform_version` and checks every object against.
+    ///
+    /// [`None`] is the platform's default, the same one the object writer puts in
+    /// `LC_BUILD_VERSION`, so that the two agree when neither was told anything.
+    pub os_version: Option<rucc_tuple::Version>,
+    /// `-gz`, which the linker is told so that what it writes stays compressed.
+    pub compress: Compress,
+    /// `-bundle`, which asks an Apple linker for an `MH_BUNDLE`: a file nothing links against and
+    /// a program loads with `dlopen`, which is what every Postgres module is on a Mac.
+    ///
+    /// Apart from [`LinkOptions::shared`] because the two are different files. `-shared` and
+    /// `-dynamiclib` are a library that other links name, and `-bundle` beside either of them is
+    /// refused the way clang refuses it.
+    pub bundle: bool,
+    /// The Apple linker flags the driver takes as its own, each with its argument when it has one,
+    /// in the order they were written: `-install_name`, `-bundle_loader`,
+    /// `-exported_symbols_list` and the rest of [`APPLE_FLAGS`].
+    ///
+    /// Kept as written rather than as the words `ld64` is given, because three of them are spelt
+    /// differently to the linker and are only allowed on a dynamic library, and both are decided
+    /// in [`darwin_line`] where the kind of file is known. Only an Apple target has any of them:
+    /// the driver refuses them for any other.
+    pub apple: Vec<(String, Option<String>)>,
+}
+
+/// The Apple linker flags the driver takes itself, and whether each has an argument.
+///
+/// These are the ones clang's Darwin driver hands to `ld64` and that a build writes on the compiler
+/// line rather than behind `-Wl,`. Postgres writes `-install_name`, `-compatibility_version`,
+/// `-current_version` and `-exported_symbols_list` in `Makefile.shlib` and `-bundle_loader` in
+/// `Makefile.darwin` and `meson.build`, and the rest are the ones a Mac build of anything else
+/// reaches for next. `-bundle` and `-dynamiclib` are not here because they choose the kind of file
+/// rather than being passed on.
+pub const APPLE_FLAGS: &[(&str, bool)] = &[
+    ("-bundle_loader", true),
+    ("-install_name", true),
+    ("-compatibility_version", true),
+    ("-current_version", true),
+    ("-exported_symbols_list", true),
+    ("-unexported_symbols_list", true),
+    ("-undefined", true),
+    ("-multiply_defined", true),
+    ("-framework", true),
+    ("-headerpad_max_install_names", false),
+    ("-dead_strip", false),
+    ("-flat_namespace", false),
+    ("-twolevel_namespace", false),
+    ("-bind_at_load", false),
+];
+
+impl LinkOptions {
+    /// Whether gcc's `crtfastmath.o` goes on the line, which is its end file spec on x86-64.
+    fn wants_fastmath(&self) -> bool {
+        self.daz_ftz.unwrap_or(self.fast_math && !self.shared)
+    }
+
+    /// Whether the startup files go on the line.
+    fn wants_startfiles(&self) -> bool {
+        !self.no_stdlib && !self.no_startfiles && !self.relocatable
+    }
+
+    /// Whether the library the program was written against goes on the line.
+    fn wants_defaultlibs(&self) -> bool {
+        !self.no_stdlib && !self.no_defaultlibs && !self.relocatable
+    }
+
+    /// Whether the compiler's own runtime goes on the line.
+    ///
+    /// The same switch as the C library, because `-nodefaultlibs` in GCC means the compiler's
+    /// runtime too, and a link that keeps `libgcc` while dropping `libc` is not a thing anyone
+    /// asks for on purpose.
+    fn wants_runtime(&self) -> bool {
+        !self.no_stdlib && !self.no_defaultlibs && !self.relocatable
+    }
+}
+
+/// One item on the link line, in the order it was written, because link order is semantic.
+///
+/// A library named before the object that needs it is not found on a static link, which is the
+/// oldest surprise in the toolchain and the reason this is one ordered list rather than a list of
+/// files and a list of libraries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    /// A file: an object this compilation produced, or one named on the command line.
+    File(String),
+    /// `-l<name>`, which the linker resolves against its search path.
+    Library(String),
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    ///
+    /// Here rather than in a list of its own because a great many of the linker's options are a
+    /// bracket around the files after them, and an option moved away from what it brackets means
+    /// something else or nothing at all. `--whole-archive` says that every member of every archive
+    /// named after it goes in whether anything referenced it or not, `--start-group` says that the
+    /// archives after it are searched again until nothing more comes out, and `-Bstatic` says which
+    /// half of a library that ships both is wanted. Collecting them and appending them to the end
+    /// leaves each of those pointing at nothing.
+    Linker(String),
+}
+
+impl std::fmt::Display for Item {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Item::File(path) => f.write_str(path),
+            Item::Library(name) => write!(f, "-l{name}"),
+            Item::Linker(arg) => write!(f, "-Wl,{arg}"),
+        }
+    }
+}
+
+/// Why a link could not be run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// No linker was found, after looking everywhere there was to look.
+    NoLinker {
+        /// The names that were tried, in the order they were tried.
+        tried: Vec<String>,
+    },
+    /// `-fuse-ld=` named one that is not on this machine.
+    Named {
+        /// What it named.
+        name: String,
+    },
+    /// A target this does not know how to build a link line for.
+    Target {
+        /// The triple that was asked for.
+        triple: String,
+    },
+    /// A cross link this scheme cannot produce, which [`rucc_sysroot::argv`] has explained.
+    ///
+    /// The reason is carried as a sentence rather than as a variant per cause, because the causes
+    /// live in `rucc-sysroot` and a second enumeration here would be a second thing to keep in step
+    /// with them. What this adds is that the sentence came from a link rather than from a
+    /// compilation.
+    Cross {
+        /// Why, in full, ready to print.
+        why: String,
+    },
+    /// The sysroot a cross link needs is not on this machine.
+    Sysroot {
+        /// The target that was asked for.
+        target: String,
+        /// Where its sysroot would be.
+        dir: String,
+        /// Whether this release pins an artifact for that target, which decides whether the message
+        /// can name a command that would fix it.
+        pinned: bool,
+    },
+    /// The linker was found and cannot do this target's link.
+    ///
+    /// Separate from [`Error::NoLinker`] because the linker is there and runs, and separate from
+    /// [`Error::Refused`] because the refusal is ours rather than its own: this is the case the
+    /// linker would not complain about at all.
+    TooOld {
+        /// What it was found as, which is what to look for when replacing it.
+        name: String,
+        /// The major version it reported.
+        found: u32,
+        /// The target whose link it cannot do.
+        target: String,
+    },
+    /// The linker was found and could not be started.
+    Spawn {
+        /// Where it was.
+        path: String,
+        /// What the operating system said.
+        why: String,
+    },
+    /// rucc is running as WebAssembly, where it cannot start a linker.
+    NoProcesses,
+    /// A WASI target whose program is a component, and the two programs that make one were not
+    /// both found: [`COMPONENT_LD`], and the `wasm-ld` of lld [`LLD_WASI`] or newer that it runs.
+    NoComponentLinker {
+        /// The target, in its short form.
+        target: String,
+        /// Whether a `wasm-ld` was found, so that the message names only what is missing.
+        wasm_ld: bool,
+    },
+    /// The linker inside rucc refused the line or the link, or was asked for a target it does not
+    /// link.
+    InProcess {
+        /// Why, in full, ready to print.
+        why: String,
+    },
+    /// The linker ran and said no.
+    Refused {
+        /// What it exited with, or a description when it was killed instead.
+        status: String,
+    },
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NoLinker { tried } => {
+                // There is no sentence for wasm-ld here, because a wasm link that finds none is
+                // done by the linker inside rucc.
+                write!(f, "no linker was found; tried {}", tried.join(", "))?;
+                // The native ELF line, where GNU ld is the linker that the machine is most likely
+                // to have and one package gives it. Apple's `ld` is on the Darwin list too, and
+                // `ld64.lld` is there with it. tamnd/rucc#3276.
+                let gnu = |name: &str| tried.iter().any(|tried| tried == name);
+                if gnu("ld") && !gnu("ld64.lld") {
+                    return write!(
+                        f,
+                        ". Install the binutils package, which has ld, and it has that name on \
+                         Debian, Ubuntu, Fedora, Arch and Alpine"
+                    );
+                }
+                // Only when lld was one of the names, because that is the linker every cross
+                // target here is linked with and the one there is a single answer for.
+                if tried.iter().any(|name| is_lld(name)) {
+                    write!(
+                        f,
+                        ". lld {LLD_EXPORTAS} or newer links for every target, and {}",
+                        lld_advice()
+                    )?;
+                }
+                Ok(())
+            }
+            Error::Named { name } => {
+                write!(f, "-fuse-ld={name} asks for a linker that is not on this machine")
+            }
+            Error::Target { triple } => {
+                write!(f, "there is no link line for {triple} in this compiler yet")
+            }
+            Error::Cross { why } => f.write_str(why),
+            // Two sentences and the second one changes, because a person whose link just failed
+            // wants the command that fixes it and there is only a command to name when this release
+            // pins an artifact for that target. Section 13.8's rule is that a compile which is
+            // missing a sysroot says what to run rather than running it, and this is where it says
+            // it.
+            Error::Sysroot { target, dir, pinned: true } => write!(
+                f,
+                "there is no sysroot for {target} at {dir}, so there is nothing to link it \
+                 against. `rucc --fetch {target}` gets the one this release pins, or pass \
+                 --sysroot=<dir> to name a tree you have already"
+            ),
+            Error::Sysroot { target, dir, pinned: false } => write!(
+                f,
+                "there is no sysroot for {target} at {dir}, so there is nothing to link it \
+                 against, and this release pins none for it to fetch. Pass --sysroot=<dir> to name \
+                 a tree you have already, or see spec/cross-compile/13-distribution.md section \
+                 13.2 for the cache that will hold one"
+            ),
+            // The wasi-libc that `rucc --fetch` installs is the one in wasi-sdk 34, and its `sbrk`
+            // and dlmalloc refer to a symbol that only the linker defines. An older lld stops with
+            // "undefined symbol: __wasm_first_page_end", which says nothing about the cause.
+            Error::TooOld { name, found, target } if target.starts_with("wasm") => write!(
+                f,
+                "{name} is lld {found} and cannot link for {target}. The wasi-libc that `rucc \
+                 --fetch` installs, from wasi-sdk 34, refers to `__wasm_first_page_end`, which lld \
+                 defines from {LLD_WASI} on, so an older one stops on the first program that calls \
+                 malloc. No newer lld was found either. wasi-sdk 34 has one in its bin directory, \
+                 which rucc finds when WASI_SDK_PATH names it, or name one with -fuse-ld="
+            ),
+            // The whole message, because the person reading it has a linker that works, a link that
+            // succeeded on their last try, and no reason to suspect the thing that is wrong.
+            Error::TooOld { name, found, target } => write!(
+                f,
+                "{name} is lld {found} and cannot link for {target}. mingw-w64 writes a few hundred \
+                 of its aliases, `_crt_atexit == atexit` among them, as IMPORT_NAME_EXPORTAS \
+                 records in its import libraries, which lld learned to read in {LLD_EXPORTAS}. An \
+                 older one neither reads them nor says so: it writes an import by ordinal zero, the \
+                 link succeeds, and the program dies at startup. No newer lld was found either. \
+                 For lld {LLD_EXPORTAS} or newer, {}, or name one with -fuse-ld=",
+                lld_advice()
+            ),
+            Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
+            Error::NoProcesses => write!(
+                f,
+                "{}, so it cannot run a linker. Compile with -c and link the objects outside the \
+                 module",
+                crate::host::NO_PROCESSES
+            ),
+            Error::Refused { status } => write!(f, "the linker {status}"),
+            Error::InProcess { why } => f.write_str(why),
+            // Both programs are in the bin directory of wasi-sdk 34, so that is the first advice,
+            // and `wasm-component-ld` alone is a Rust crate that `cargo install` builds.
+            Error::NoComponentLinker { target, wasm_ld: true } => write!(
+                f,
+                "{target} is linked into a component by {COMPONENT_LD}, which was not found. \
+                 wasi-sdk 34 has it in its bin directory, which rucc finds when WASI_SDK_PATH \
+                 names it, and `cargo install wasm-component-ld` puts it on PATH. -c writes the \
+                 object without it"
+            ),
+            Error::NoComponentLinker { target, wasm_ld: false } => write!(
+                f,
+                "{target} is linked into a component by {COMPONENT_LD}, which runs wasm-ld, and no \
+                 wasm-ld of lld {LLD_WASI} or newer was found. The linker inside rucc writes a \
+                 core module and not a component. wasi-sdk 34 has both programs in its bin \
+                 directory, which rucc finds when WASI_SDK_PATH names it"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// A linker, found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linker {
+    /// The name it is known by, which is what `--print-config` reports.
+    pub name: String,
+    /// Where it is, which is what gets spawned. Empty for the linker inside rucc.
+    pub path: PathBuf,
+    /// The `wasm-ld` that [`COMPONENT_LD`] runs, which goes first on its line as `--wasm-ld-path`.
+    /// Nothing for every other linker.
+    pub wasm_ld: Option<PathBuf>,
+}
+
+/// The program that links a component for wasm32-wasip2 and wasm32-wasip3. It takes the line of
+/// `wasm-ld`, runs `wasm-ld` with it, and makes a component of the core module, as clang 23 does
+/// for these targets.
+pub const COMPONENT_LD: &str = "wasm-component-ld";
+
+/// The name `-fuse-ld=` takes for the linker inside rucc.
+pub const IN_PROCESS: &str = "rucc";
+
+impl Linker {
+    /// The wasm linker inside rucc, which reads the line `wasm-ld` would get and runs in this
+    /// process.
+    #[must_use]
+    pub fn in_process() -> Self {
+        Linker { name: "rucc-wasm-link".to_owned(), path: PathBuf::new(), wasm_ld: None }
+    }
+
+    /// The words of the command after the program: the line, with the `wasm-ld` that a component
+    /// linker runs in front of it. The path is given so that the `wasm-ld` that rucc chose is the
+    /// one that runs, and not the first one on `PATH`, which can be too old.
+    #[must_use]
+    pub fn words(&self, args: &[String]) -> Vec<String> {
+        let mut words = Vec::with_capacity(args.len() + 2);
+        if let Some(wasm_ld) = &self.wasm_ld {
+            words.push("--wasm-ld-path".to_owned());
+            words.push(wasm_ld.display().to_string());
+        }
+        words.extend_from_slice(args);
+        words
+    }
+
+    /// Whether this is the linker inside rucc, which is called and not started.
+    #[must_use]
+    pub fn is_in_process(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+}
+
+/// The names to look for, in the order section 4.9 gives.
+///
+/// On a Linux machine, a program for that machine is linked by its own `ld` first, as GCC does it.
+/// Otherwise `mold` is first because it is dramatically faster, then `lld`, then the platform's
+/// own. Each is looked for under both the bare name and the `ld.` prefix, because a distribution
+/// installs `mold` under its own name and `ld.mold` for exactly this lookup.
+#[must_use]
+pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
+    if let Some(named) = &opts.use_ld {
+        // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
+        return vec![format!("ld.{named}"), named.clone()];
+    }
+    // One linker writes wasm. It is lld under the name that selects its wasm flavour, and
+    // `ld.lld` would read the same line as ELF and fail on the first object.
+    if target.arch.is_wasm() {
+        return vec!["wasm-ld".to_owned()];
+    }
+    // Apple's `ld` and lld's Mach-O flavour, and nothing from the list below. mold and `ld.lld` write
+    // ELF, and a Mac with Homebrew's llvm on its `PATH` has an `ld.lld` that would take the line and
+    // fail on its first flag.
+    if target.os == Os::Darwin {
+        return vec!["ld".to_owned(), "ld64.lld".to_owned()];
+    }
+    // The two linkers that read Microsoft's line, on every host. `ld.lld` is the same program as
+    // `lld-link`, and which line it reads is decided by the name it was started under, so the name
+    // is the whole of the choice.
+    if is_msvc(target) {
+        return vec!["lld-link".to_owned(), "link.exe".to_owned()];
+    }
+    if target.os.is_bsd() {
+        return bsd::order(target, opts.pinned, opts.narrowed, Triple::host(), &opts.prefixes);
+    }
+    if cross_sysroot(target, opts).is_some() {
+        let mut names = cross_order(target);
+        // The mingw-w64 sysroot this release fetches has import libraries that GNU ld cannot link
+        // against: the `==` aliases are IMPORT_NAME_EXPORTAS records, and binutils reports every
+        // one of them as an undefined reference to a symbol like `__imp__fmode`. So on this path
+        // lld is the only linker worth finding, and a machine without one is told how to get it
+        // instead of being handed a page of undefined references.
+        if (target.os, target.env) == (Os::Windows, Env::Gnu) {
+            names.retain(|name| is_lld(name));
+        }
+        return names;
+    }
+    // A tree somebody named, which is MSYS2's own and was written for its own binutils, so GNU ld
+    // reads its import libraries as well as lld does and both are worth finding.
+    if named_tree(target, opts).is_some() || distro_cross(target, opts).is_some() {
+        return cross_order(target);
+    }
+    match target.os {
+        Os::Windows => vec!["lld-link".to_owned(), "link.exe".to_owned()],
+        _ => elf_order(target, Triple::host()),
+    }
+}
+
+/// The ELF linkers, with the host as a parameter so that both orders are testable on one machine.
+fn elf_order(target: Triple, host: Option<Triple>) -> Vec<String> {
+    let mut names = vec![
+        "ld.mold".to_owned(),
+        "mold".to_owned(),
+        "ld.lld".to_owned(),
+        "lld".to_owned(),
+        "ld".to_owned(),
+    ];
+    // A Linux program for this machine is linked by GNU ld first, as GCC links it, so that a build
+    // gets the same linker with rucc as with GCC. `-fuse-ld=mold` and `-fuse-ld=lld` are there for
+    // speed. The machine's `ld` reads only its own architecture, so a link for another one keeps
+    // the order above. Document 18 Q5 of the Linux plan.
+    if target.os == Os::Linux && host.is_some_and(|host| runs_on(host, target)) {
+        names.rotate_right(1);
+    }
+    names
+}
+
+/// Whether the `ld` of the host reads objects of the target. The x86-64 `ld` links `-m32` too.
+fn runs_on(host: Triple, target: Triple) -> bool {
+    host.os == Os::Linux
+        && (host.arch == target.arch || (host.arch, target.arch) == (Arch::X86_64, Arch::X86))
+}
+
+/// Whether this is a Windows target in Microsoft's environment, which is linked by `lld-link`.
+fn is_msvc(target: Triple) -> bool {
+    (target.os, target.env) == (Os::Windows, Env::Msvc)
+}
+
+/// The tree an MSVC link is against, which is always the one `--sysroot` named.
+///
+/// Never the cache, because the cache holds what a release of this compiler pins and nothing for
+/// this environment ever will be: `spec/cross-compile/13-distribution.md` section 13.4. What
+/// `--fetch` lays out is under a directory named for the versions it fetched, and it ends
+/// by printing the `--sysroot` to pass, so a link with no `--sysroot` is one where that has not
+/// happened yet and the answer is to say what to run.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when no `--sysroot` was given.
+fn msvc_sysroot(target: Triple, opts: &LinkOptions) -> Result<Sysroot, Error> {
+    let tuple = target_tuple(target, opts);
+    match &opts.sysroot {
+        Some(root) => Ok(Sysroot::at(root.clone(), tuple)),
+        None => Err(Error::Cross {
+            why: format!(
+                "a link for {tuple} is against Microsoft's C runtime and the Windows SDK, which \
+                 this compiler may not ship. `rucc --fetch {tuple}` gets them from Microsoft once \
+                 you accept Microsoft's licence and prints the --sysroot=<dir> to pass",
+                tuple = tuple.to_canonical_string()
+            ),
+        }),
+    }
+}
+
+/// The names to look for when the target is not this machine.
+///
+/// A shorter list than the one above and a different one, because most of that list cannot do this.
+/// `spec/cross-compile/11-linking.md` section 11.2 settles it: `ld.lld` is the ELF cross linker,
+/// since one binary of it links for every architecture it was built with and that is all of them.
+/// mold is off the list because it links for the host and `wild` likewise, which is why section 11.2
+/// has them as `-fuse-ld=` choices for a native link rather than as defaults. The platform's own
+/// `ld` is off it for the same reason: a distribution's `/usr/bin/ld` is built for one architecture,
+/// and `-fuse-ld=` is still there for somebody whose is not.
+///
+/// A cross binutils under its prefixed name is last, because a machine that has
+/// `aarch64-linux-gnu-ld` installed has it on purpose. The prefix is a distribution convention and
+/// there are two of them: a Linux target is filed under its multiarch name and a mingw-w64 one under
+/// `<arch>-w64-mingw32`, which is what every distribution's mingw packages install. `ld.lld` is the
+/// same binary for both, because its MinGW mode is a mode of the one linker rather than a second one.
+fn cross_order(target: Triple) -> Vec<String> {
+    let mut names = vec!["ld.lld".to_owned(), "lld".to_owned()];
+    match (target.os, target.env) {
+        (Os::Linux, _) => names.push(format!("{}-ld", gnu_name(target))),
+        (Os::Windows, Env::Gnu) => names.push(format!("{}-w64-mingw32-ld", target.arch.as_str())),
+        _ => {}
+    }
+    names
+}
+
+/// The sysroot a cross link would use, or [`None`] for a link against this machine.
+///
+/// The one place the two paths are told apart, so that the linker that is looked for and the line it
+/// is handed cannot disagree about which kind of link this is.
+///
+/// Three conditions, and two of them are about leaving working configurations alone. A target that
+/// is this machine is linked against this machine, which is what every native compile has always
+/// done and what the directories under `/usr/lib` are for. A `--sysroot` the user wrote is taken as
+/// the root of a tree they assembled, and the line above prefixes every path it decides with it,
+/// which is what cross compiling against a real distribution tree has always meant here. The third
+/// is that there has to be a cache directory to look in, which on a real command line there always
+/// is.
+///
+/// An unknown host counts as different from every target. A machine this compiler cannot name is a
+/// machine whose `/usr/lib` it should not be guessing at.
+///
+/// # A pinned release is a cross compile
+///
+/// The first of those three conditions is about the machine and not about the triple, and a target
+/// that names a libc release is not this machine even when it is this architecture. Somebody on a
+/// 2.44 box writing `--target=x86_64-linux-gnu.2.28` is asking for a binary that runs on a 2.28
+/// machine, and handing them their own headers and their own libc gives them a binary that does not.
+/// So the condition is the triple being the host *and* no release named, and what it costs is that a
+/// pin equal to this machine's own release also stops using this machine's libc. That is not a loss:
+/// the two should be the same text, and if they are not then this machine's copy is patched and the
+/// bundled tree is the one the pin asked for. tamnd/rucc#956.
+#[must_use]
+pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    cross_for(target, opts, Triple::host())
+}
+
+/// Why a compile for a BSD found no system headers, or [`None`] for a target that is not a BSD.
+///
+/// The driver asks this only when it found no system directory and no `--sysroot` was given, and
+/// the answer is the one the link gives in the same case.
+#[must_use]
+pub fn bsd_no_headers(target: Triple) -> Option<String> {
+    target.os.is_bsd().then(|| bsd::no_headers(target))
+}
+
+/// The triple a GCC for the BSD target is configured with, as its `-dumpmachine` prints it.
+/// `pinned` is the target as the command line named it, or nothing for this machine.
+pub(crate) fn bsd_triple(target: Triple, pinned: Option<TargetTuple>) -> String {
+    bsd::triple(target, pinned)
+}
+
+/// The linker of FreeBSD's GCC port, which that GCC answers `-print-prog-name=ld` with and links
+/// with. [`None`] for any other target and for a command line that named no target.
+pub(crate) fn bsd_port_linker(target: Triple, pinned: Option<TargetTuple>) -> Option<PathBuf> {
+    bsd::port_linker(target, pinned)
+}
+
+/// The same answer with the host as a parameter, so that both branches are testable on one machine.
+fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Sysroot> {
+    if opts.sysroot.is_some() {
+        return None;
+    }
+    // A BSD has no tree in the cache and never gets one, so its headers and its libraries come from
+    // `--sysroot` or from this machine. A cache path here sent the header search to a directory
+    // that cannot exist, and the include that failed said nothing about `--sysroot`.
+    if target.os.is_bsd() {
+        return None;
+    }
+    let tuple = target_tuple(target, opts);
+    // Windows is left out because a Windows machine has no C library of its own to compile
+    // against. On an x86-64 Windows box the default target is the host, and the only headers
+    // it can have are the mingw-w64 tree `--fetch` put in the cache.
+    if host == Some(target) && target.os != Os::Windows && tuple.env_version().is_none() {
+        return None;
+    }
+    if distro_for(target, opts, host).is_some() {
+        return None;
+    }
+    let cache = opts.cache.as_deref()?;
+    Some(Sysroot::in_cache(cache, tuple))
+}
+
+/// A tree somebody named with `--sysroot` that is linked by a cross line: a mingw-w64 tree or a
+/// wasi-sysroot.
+fn named_tree(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    named_mingw(target, opts).or_else(|| named_wasi(target, opts))
+}
+
+/// A wasi-sysroot somebody named with `--sysroot`, for a WASI target.
+///
+/// The shape is the one wasi-sdk ships in `share/wasi-sysroot` and the one clang reads with the same
+/// flag: the headers in `include/<tuple>` and the start files and archives in `lib/<tuple>`. A tree
+/// with no directory for the tuple is read the way we lay one out, with everything in `lib`. Before
+/// this, a named tree turned the cache line off and nothing turned another line on, so the link
+/// fell through to the native line and said there was no line for the target. tamnd/rucc#3259.
+fn named_wasi(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    if !target.arch.is_wasm() || !matches!(target.os, Os::Wasi(_)) {
+        return None;
+    }
+    let root = opts.sysroot.as_ref()?;
+    let tuple = target_tuple(target, opts);
+    let sysroot = Sysroot::at(root.clone(), tuple);
+    let own = sysroot.lib().join(tuple.to_canonical_string());
+    Some(if own.is_dir() { sysroot.with_lib(own) } else { sysroot })
+}
+
+/// A mingw-w64 tree somebody named with `--sysroot`, for a windows-gnu target.
+///
+/// The shape is MSYS2's `/ucrt64` or `/mingw64`, which is also the shape [`Sysroot::at`] gives
+/// a root: `crt2.o`, `libmingw32.a`, the import libraries and the rest of what
+/// [`rucc_sysroot::link::LinkLine::mingw`] names are all in `lib`, so the line that is built from
+/// the cache is built from this tree too, and the only thing it adds is gcc's runtime directory,
+/// which is [`mingw_gcc`]. A Linux target with a named tree takes the native line with the tree in
+/// front of every path, and that is not this: there is no native line for Windows to prefix.
+/// tamnd/rucc#2573.
+fn named_mingw(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    if (target.os, target.env) != (Os::Windows, Env::Gnu) {
+        return None;
+    }
+    let root = opts.sysroot.as_ref()?;
+    Some(Sysroot::at(root.clone(), target_tuple(target, opts)))
+}
+
+/// gcc's runtime directory in a named mingw-w64 tree, the newest version when there are several.
+///
+/// `lib/gcc/<arch>-w64-mingw32/<version>`, where MSYS2's gcc keeps `crtbegin.o`, `crtend.o` and
+/// `libgcc.a`. Nothing for a tree with no gcc in it, and nothing for one this compiler fetched,
+/// which never has one, so a line against the cache is the line it always was.
+fn mingw_gcc(target: Triple, opts: &LinkOptions, sysroot: &Sysroot) -> Option<PathBuf> {
+    named_mingw(target, opts)?;
+    let dir = sysroot.lib().join("gcc").join(format!("{}-w64-mingw32", target.arch.as_str()));
+    newest_first(&dir).into_iter().next()
+}
+
+/// Where this machine keeps its packages, which is `/usr` everywhere but Windows.
+///
+/// Windows has no such place, and what [`LinkOptions::usr`] is read for there is the mingw-w64 gcc,
+/// so it is the parent of the first directory on the path with a `gcc.exe` in it. `/usr` when
+/// there is none, which names nothing on Windows and so finds nothing.
+#[must_use]
+pub fn usr() -> PathBuf {
+    let usr = PathBuf::from("/usr");
+    if !cfg!(windows) {
+        return usr;
+    }
+    let Some(path) = std::env::var_os("PATH") else { return usr };
+    std::env::split_paths(&path)
+        .find(|dir| dir.join("gcc.exe").is_file())
+        .and_then(|dir| dir.parent().map(Path::to_path_buf))
+        .unwrap_or(usr)
+}
+
+/// gcc's `libgcc.a` for a mingw-w64 target, for the decimal floating point routines.
+///
+/// The named tree's own when it has a gcc in it, and otherwise the one a distribution's mingw-w64
+/// gcc installed under `<usr>/lib/gcc/<arch>-w64-mingw32/<version>`, which is the same archive a
+/// gcc for the target on this machine would link. Debian names those versions `13-posix` and `13-win32`
+/// and the two hold the same `libgcc.a`. Nothing when there is no gcc for the target anywhere.
+fn mingw_libgcc(target: Triple, opts: &LinkOptions, gcc: Option<&Path>) -> Option<PathBuf> {
+    if target.os != Os::Windows || target.env != Env::Gnu {
+        return None;
+    }
+    let host = opts.usr.as_deref().map(|usr| {
+        newest_first(&usr.join("lib/gcc").join(format!("{}-w64-mingw32", target.arch.as_str())))
+    });
+    let dirs = gcc.map(Path::to_path_buf).into_iter().chain(host.into_iter().flatten());
+    dirs.map(|dir| dir.join("libgcc.a")).find(|path| path.is_file())
+}
+
+/// A tree a distribution's cross packages installed for a Linux target that is not this machine.
+///
+/// What `apt install gcc-aarch64-linux-gnu` leaves behind: the C library's headers and files under
+/// `/usr/aarch64-linux-gnu`, and gcc's `crtbegin.o` and `libgcc.a` for that target under
+/// `/usr/lib/gcc-cross/aarch64-linux-gnu/<version>`. The library's `libc.so` script names its files
+/// by their full path, so the tree is linked where it is and not under a `--sysroot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Distro {
+    /// `/usr/<multiarch>`, which has `include` and `lib` under it.
+    pub root: PathBuf,
+    /// gcc's directories for the target, newest version first, and empty when only the library
+    /// was installed.
+    pub gcc: Vec<PathBuf>,
+}
+
+impl Distro {
+    /// The C library's headers, and the kernel's, which the same packages put in the same place.
+    #[must_use]
+    pub fn include(&self) -> PathBuf {
+        self.root.join("include")
+    }
+
+    /// The C library's startup files and libraries.
+    #[must_use]
+    pub fn lib(&self) -> PathBuf {
+        self.root.join("lib")
+    }
+}
+
+/// The distribution's tree for this target, when a cross compile should use it.
+///
+/// Only when nothing better was asked for or is there. A `--sysroot` is a tree somebody named, a
+/// pinned release is a request for our tree cut at that release, and a sysroot already fetched into
+/// the cache is the one this release pins, so each of those wins. What is left is a machine that
+/// has the distribution's cross packages and nothing of ours, and there the packages are what a
+/// prefixed gcc on the same machine would use, so they are what this uses too.
+#[must_use]
+pub fn distro_cross(target: Triple, opts: &LinkOptions) -> Option<Distro> {
+    distro_for(target, opts, Triple::host())
+}
+
+/// The same answer with the host as a parameter, for the same reason as [`cross_for`].
+fn distro_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Distro> {
+    if opts.sysroot.is_some() || target.os != Os::Linux || host == Some(target) {
+        return None;
+    }
+    let tuple = target_tuple(target, opts);
+    if tuple.env_version().is_some() {
+        return None;
+    }
+    if opts.cache.as_deref().is_some_and(|cache| Sysroot::in_cache(cache, tuple).lib().is_dir()) {
+        return None;
+    }
+    let usr = opts.usr.as_deref()?;
+    let name = gnu_name(target);
+    let root = usr.join(&name);
+    if !root.join("include").is_dir() || !root.join("lib").is_dir() {
+        return None;
+    }
+    let gcc = newest_first(&usr.join("lib/gcc-cross").join(&name));
+    Some(Distro { root, gcc })
+}
+
+/// The target as the model that has room for a release, which is what names the cache directory.
+///
+/// The pinned spelling when there is one, because `x86_64-linux-gnu` and `x86_64-linux-gnu.2.28` are
+/// two sysroots and not one: the release is in the tuple for the reason
+/// `spec/cross-compile/03-target-model.md` section 3.2 admits a field at all, which is that it
+/// changes what is compiled. A command line that named no target, or one whose spelling the ten
+/// field parser did not take, falls back to what the three field one did.
+fn target_tuple(target: Triple, opts: &LinkOptions) -> TargetTuple {
+    opts.pinned.unwrap_or_else(|| target.tuple())
+}
+
+/// The kernel headers that go with [`cross_sysroot`], for the targets that have any.
+///
+/// The same three conditions, asked through the same function, because the two halves of one
+/// target's system headers have to be decided together or a compile could read glibc's `sys/stat.h`
+/// against this machine's `asm/stat.h`. A `None` here on a Linux target where the sysroot is `Some`
+/// means only one thing, which is that the cache has no kernel tree for that architecture, and the
+/// directory is still named for the reason [`crate::library::header_dirs`] gives.
+///
+/// Not under the sysroot, because `linux/` and `asm-generic/` are the same nine megabytes for every
+/// target that shares an architecture, and a copy per target is eight copies of one thing.
+#[must_use]
+pub fn cross_kernel(target: Triple, opts: &LinkOptions) -> Option<Kernel> {
+    kernel_for(target, opts, Triple::host())
+}
+
+/// The same answer with the host as a parameter, for the same reason as [`cross_for`].
+fn kernel_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Kernel> {
+    cross_for(target, opts, host)?;
+    Kernel::for_target(opts.cache.as_deref()?, target.tuple())
+}
+
+/// How the result is linked, as the five cases a sysroot link line is written over.
+///
+/// Four booleans reach here and five cases leave, because static and position independent are not
+/// independent of each other and the start file differs in four of the five. The default for `pie`
+/// is the one the native line above uses, so that a command line that says neither gets the same
+/// answer whichever path it takes.
+fn mode(opts: &LinkOptions) -> LinkMode {
+    let pie = opts.pie.unwrap_or(!opts.is_static && !opts.shared);
+    if opts.shared {
+        LinkMode::Shared
+    } else if opts.is_static {
+        if pie { LinkMode::StaticPie } else { LinkMode::Static }
+    } else if pie {
+        LinkMode::Dynamic
+    } else {
+        LinkMode::DynamicNoPie
+    }
+}
+
+/// The line for a machine that is not this one, from the target and the sysroot and nothing else.
+///
+/// Everything this knows is already in `opts`, and all it does is say it in the shape
+/// [`rucc_sysroot::argv`] is written over. There is deliberately no decision here: a second place
+/// that decided what goes on a cross link line would be a second place to get it wrong, and the
+/// recorded lines under `tests/link-lines` would stop describing what this compiler does.
+fn cross_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+    sysroot: &Sysroot,
+) -> Result<Vec<String>, Error> {
+    if opts.profile {
+        // `gcrt1.o` is a compiled object out of the C library's own sources, and a generated sysroot
+        // has the names a libc exports rather than the bodies behind them. Said here rather than
+        // left to the linker, because what the linker would say is that `main` is undefined.
+        return Err(Error::Cross {
+            why: format!(
+                "-pg needs gcrt1.o, or gcrt2.o on Windows, the startup file that starts and stops \
+                 the counting, and a generated sysroot for {target} does not have one. Profile on \
+                 the host, or pass --sysroot=<dir> naming a tree that has it"
+            ),
+        });
+    }
+    let inputs: Vec<argv::Item> = items
+        .iter()
+        .map(|item| match item {
+            Item::File(path) => argv::Item::File(PathBuf::from(path)),
+            Item::Library(name) => argv::Item::Library(name.clone()),
+            Item::Linker(arg) => argv::Item::Linker(arg.clone()),
+        })
+        .collect();
+    let output = PathBuf::from(output);
+    // Ours, from beside the compiler, because that is where `cargo xtask builtins` writes it and a
+    // fetched sysroot will never hold it. The cross line used to name it inside the sysroot, which
+    // is a file nothing puts there, so every cross link either failed at the linker or quietly ran
+    // against somebody else's `libgcc` copied in under the name. tamnd/rucc#1514.
+    let ours = builtins_archive(target, &opts.prefixes);
+    // On wasm too, where it takes the place of `libclang_rt.builtins.a` on clang's line and holds
+    // the `long double` arithmetic and the `__int128` multiply and shifts that the back end calls.
+    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib {
+        // Said here rather than left to the linker, which on a Windows target says `___chkstk_ms`
+        // is undefined and names mingw-w64's objects as the callers, and on a musl one says
+        // `__udivti3` is. Neither of those is a person's first guess at a missing archive.
+        let tuple = target.tuple().to_canonical_string();
+        return Err(Error::Cross {
+            why: format!(
+                "a cross link ends with librucc_builtins.a, this compiler's own runtime for \
+                 {tuple}, and there is none beside the compiler or under a -B prefix. A sysroot \
+                 does not carry it, because it is our output rather than the platform's. Build it \
+                 with `cargo xtask builtins --target={tuple}`, or pass -fno-builtins-lib to link \
+                 without it"
+            ),
+        });
+    }
+    let gcc = mingw_gcc(target, opts, sysroot);
+    let libgcc = mingw_libgcc(target, opts, gcc.as_deref());
+    let invocation = argv::Invocation {
+        inputs: &inputs,
+        output: Some(&output),
+        mode: mode(opts),
+        search: &opts.search,
+        no_startfiles: !opts.wants_startfiles(),
+        no_defaultlibs: !opts.wants_defaultlibs(),
+        no_builtins_lib: opts.no_builtins_lib,
+        builtins: ours.as_deref(),
+        export_dynamic: opts.export_dynamic,
+        strip: opts.strip,
+        gui: opts.gui,
+        unicode: opts.unicode,
+        crt: opts.crt,
+        reactor: opts.reactor,
+        gcc: gcc.as_deref(),
+        libgcc: libgcc.as_deref(),
+    };
+    argv::argv(target.tuple(), sysroot, &invocation)
+        .map_err(|why| Error::Cross { why: why.to_string() })
+}
+
+/// Whether this link can be run at all, asked before anything is compiled.
+///
+/// Two questions that have answers before the first object exists: whether there is a line for this
+/// target and mode at all, and whether the sysroot it would read is on the machine. Both are worth a
+/// second at the start rather than a message after a minute of compiling, which is the same reason
+/// the linker itself is looked for first.
+///
+/// The line is built rather than inspected, with no inputs and a name nothing will be written to,
+/// because the refusals belong to the one function that builds it. A link against this machine has
+/// nothing to answer here: its directories are looked for as the line is built and a missing one is
+/// simply a directory that is not offered.
+///
+/// # Errors
+///
+/// [`Error::Cross`] for a target or a mode that has no line, and [`Error::Sysroot`] when the sysroot
+/// it would be linked against is not there.
+pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    if opts.relocatable {
+        return relocatable_line(target, opts, &[], "a.out").map(drop);
+    }
+    // Whether there is an SDK, which is the one thing a Darwin link can be missing that is worth
+    // saying before everything has been compiled.
+    if target.os == Os::Darwin {
+        return darwin_line(target, opts, &[], "a.out").map(drop);
+    }
+    if is_msvc(target) {
+        return msvc_preflight(target, opts);
+    }
+    if target.os.is_bsd() {
+        return bsd_preflight(target, opts);
+    }
+    let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) else {
+        return Ok(());
+    };
+    // Whether there is a line for this target and mode at all, asked with our own runtime left off
+    // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
+    // report the same thing, and the archive is the smaller of the two problems by a long way.
+    let shape = LinkOptions { no_builtins_lib: true, ..opts.clone() };
+    cross_line(target, &shape, &[], "a.out", &sysroot)?;
+    // The library directory rather than the root, because the root of a cache directory that has
+    // been created and never populated is there and holds nothing. Section 11.6's rule is that
+    // suitable is checked and not assumed, and this is the cheapest form of that. wasm32-none is
+    // the one line that reads nothing from a sysroot, so it needs none.
+    let reads_nothing = target.arch.is_wasm()
+        && rucc_sysroot::link::libc(target_tuple(target, opts)) == rucc_sysroot::link::Libc::None;
+    if !sysroot.lib().is_dir() && !reads_nothing {
+        let tuple = target_tuple(target, opts).to_canonical_string();
+        return Err(Error::Sysroot {
+            dir: sysroot.root().display().to_string(),
+            pinned: rucc_sysroot::pinned_for_target(target_tuple(target, opts)).is_some(),
+            target: tuple,
+        });
+    }
+    // And now the whole line, which is the sysroot's files plus ours, so that a missing runtime is
+    // said here rather than by the linker after everything has been compiled.
+    cross_line(target, opts, &[], "a.out", &sysroot)?;
+    Ok(())
+}
+
+/// [`preflight`] for a BSD, which is whether there is a line and whether the tree `--sysroot`
+/// named has a library directory.
+fn bsd_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    bsd::line(target, opts, &[], "a.out", Triple::host(), bsd::Ld::Lld)?;
+    if let Some(root) = &opts.sysroot {
+        let lib = under(Some(root), "/usr/lib");
+        if !lib.is_dir() {
+            return Err(Error::Cross {
+                why: format!(
+                    "--sysroot={} is not the root of a copy of {}, because it has no usr/lib \
+                     in it",
+                    root.display(),
+                    target.tuple().to_canonical_string()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// [`preflight`] for Microsoft's environment, which is the same three questions about a tree
+/// somebody named rather than one in the cache.
+///
+/// Whether the tree is one is asked of the CRT's directory for this architecture, because that is
+/// the one every line needs and the one a tree fetched for another architecture does not have.
+fn msvc_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    let sysroot = msvc_sysroot(target, opts)?;
+    let shape = LinkOptions { no_builtins_lib: true, ..opts.clone() };
+    cross_line(target, &shape, &[], "a.exe", &sysroot)?;
+    let tuple = target_tuple(target, opts);
+    if let Some(chip) = Chip::of(tuple) {
+        let crt = sysroot.root().join("crt").join("lib").join(chip.in_tree());
+        if !crt.is_dir() {
+            return Err(Error::Cross {
+                why: format!(
+                    "{} has no {}, so it is not a tree for {tuple} to link against. `rucc \
+                     --fetch {tuple}` lays one out and prints where",
+                    sysroot.root().display(),
+                    crt.display(),
+                    tuple = tuple.to_canonical_string()
+                ),
+            });
+        }
+    }
+    cross_line(target, opts, &[], "a.exe", &sysroot)?;
+    Ok(())
+}
+
+/// Writes the stub libraries a glibc cross link reads, into [`Sysroot::stubs`].
+///
+/// `spec/cross-compile/09-libc-stubs.md` section 9.1: the stubs are generated on demand rather than
+/// shipped, out of the description `rucc-stub` carries, cut at the release the tuple names or at
+/// the bundled one when it names none. So there is nothing to fetch for them and nothing to go
+/// stale, and a pin is a different directory rather than a different download.
+///
+/// A file is written only when its bytes differ from what is there, and then through a temporary
+/// name and a rename, because two builds for one target run side by side all the time and a
+/// linker must never read a half written `libc.so`. The bytes are the same on every host, so two
+/// processes racing to write them race to write the same thing.
+///
+/// Nothing for a link against this machine, a `--sysroot` the user named, or a target that is not
+/// glibc. A glibc release newer than the bundled tree was already refused when the headers were
+/// chosen, so it is quietly nothing here too.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when the stubs cannot be generated for this target or cannot be written.
+pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
+    let tuple = sysroot.target();
+    if rucc_stub::glibc::architecture(tuple).is_none() {
+        return Ok(());
+    }
+    let Ok(Some(minor)) = rucc_sysroot::bundled_glibc_minor(tuple) else { return Ok(()) };
+    let files = rucc_stub::glibc::stubs(tuple, minor).map_err(|why| Error::Cross {
+        why: format!("the glibc stubs for {}: {why}", tuple.to_canonical_string()),
+    })?;
+    let dir = sysroot.stubs();
+    let failed = |path: &Path, why: std::io::Error| Error::Cross {
+        why: format!("{} cannot be written: {why}", path.display()),
+    };
+    fs::create_dir_all(dir).map_err(|why| failed(dir, why))?;
+    for file in files {
+        let path = dir.join(&file.name);
+        if fs::read(&path).is_ok_and(|there| there == file.bytes) {
+            continue;
+        }
+        let temporary = dir.join(format!(".{}.{}", file.name, crate::host::id()));
+        fs::write(&temporary, &file.bytes).map_err(|why| failed(&temporary, why))?;
+        fs::rename(&temporary, &path).map_err(|why| {
+            let _ = fs::remove_file(&temporary);
+            failed(&path, why)
+        })?;
+    }
+    Ok(())
+}
+
+/// The linker to use, looked for where a linker is.
+///
+/// `-B` prefixes first, since the point of one is to put a toolchain in front of the machine's,
+/// then the path. A name that contains a separator is a path and is taken as one, which is what
+/// gcc does with `-fuse-ld=/usr/bin/ld.gold` and what a build system relying on that expects.
+///
+/// # Errors
+///
+/// A wasm target has the linker inside rucc as well. `-fuse-ld=rucc` asks for it, rucc running as
+/// wasm has no other, and a machine with no `wasm-ld` of lld [`LLD_WASI`] or newer gets it in place
+/// of an error. It links a static module only, and refuses by name an option that it does not take.
+///
+/// # Errors
+///
+/// [`Error::Named`] when `-fuse-ld=` asked for one that is not here, and [`Error::NoLinker`] when
+/// nothing was, which name the candidates so that the message says what was looked for.
+/// [`Error::InProcess`] for `-fuse-ld=rucc` on a target that is not wasm, or whose program is a
+/// component. [`Error::NoComponentLinker`] when the target is a component and one of the two
+/// programs that link it was not found.
+pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
+    let wasm = target.arch.is_wasm();
+    if opts.use_ld.as_deref() == Some(IN_PROCESS) {
+        if !wasm {
+            return Err(Error::InProcess {
+                why: format!(
+                    "-fuse-ld={IN_PROCESS} links only wasm, and the target is {}",
+                    target.tuple().to_canonical_string()
+                ),
+            });
+        }
+        // The libc of wasm32-wasip2 and wasm32-wasip3 has relocations that the linker inside rucc
+        // does not take, and the program of those targets is a component, which it does not write.
+        if is_component(target) {
+            return Err(Error::InProcess {
+                why: format!(
+                    "-fuse-ld={IN_PROCESS} links a core module, and {} is linked into a component \
+                     by {COMPONENT_LD}",
+                    wasi_row(target)
+                ),
+            });
+        }
+        return Ok(Linker::in_process());
+    }
+    if crate::host::WASM {
+        if wasm && opts.use_ld.is_none() && !is_component(target) {
+            return Ok(Linker::in_process());
+        }
+        return Err(Error::NoProcesses);
+    }
+    // wasm32-wasip2 and wasm32-wasip3 are linked by `wasm-component-ld`, which runs the `wasm-ld`
+    // that the search below finds, unless `-fuse-ld=` names a linker, which then writes a core
+    // module, as with clang.
+    let component = is_component(target) && opts.use_ld.is_none();
+    let tried = order(target, opts);
+    let mut places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
+    // The wasi-sdk that WASI_SDK_PATH names, after PATH and before the other places, which is the
+    // variable that the CMake toolchain file of wasi-sdk and most build scripts for it read.
+    if target.arch.is_wasm() {
+        if let Some(sdk) = std::env::var_os("WASI_SDK_PATH").filter(|sdk| !sdk.is_empty()) {
+            places.insert(0, PathBuf::from(sdk).join("bin"));
+        }
+    }
+    // The first linker [`suitable`] turned down, which is the answer when nothing after it is any
+    // better. Ubuntu 24.04 has lld 18 on PATH and lld 19 under /usr/lib/llvm-19/bin once somebody
+    // installs `lld-19`, and the second is the one to use without asking them to change PATH.
+    let mut refused = None;
+    for name in &tried {
+        for path in linker_candidates(name, opts, &places) {
+            let linker = Linker { name: name.clone(), path, wasm_ld: None };
+            match suitable(target, &linker) {
+                Ok(()) if component => return wrap(target, linker, opts, &places),
+                Ok(()) => return Ok(linker),
+                Err(why) => {
+                    refused.get_or_insert(why);
+                }
+            }
+        }
+    }
+    // A wasm link does not stop here, because the linker inside rucc links what the driver writes.
+    // An lld that is too old is passed over for it too, as a newer one somewhere else would be.
+    // A component is not something it writes, so a component target stops.
+    if component {
+        return Err(Error::NoComponentLinker { target: wasi_row(target), wasm_ld: false });
+    }
+    if wasm && opts.use_ld.is_none() {
+        return Ok(Linker::in_process());
+    }
+    if let Some(why) = refused {
+        return Err(why);
+    }
+    match &opts.use_ld {
+        Some(name) => Err(Error::Named { name: name.clone() }),
+        None => Err(Error::NoLinker { tried }),
+    }
+}
+
+/// Whether the program of this target is a component, which is so for wasm32-wasip2 and
+/// wasm32-wasip3.
+#[must_use]
+pub fn is_component(target: Triple) -> bool {
+    target.arch.is_wasm() && matches!(target.os, Os::Wasi(Preview::P2 | Preview::P3))
+}
+
+/// The short name of a WASI target, such as `wasm32-wasip2`, for the messages.
+fn wasi_row(target: Triple) -> String {
+    target.tuple().to_canonical_string()
+}
+
+/// [`COMPONENT_LD`] around the `wasm-ld` that was found, from the same places, or the error that
+/// says that it is not there.
+fn wrap(
+    target: Triple,
+    wasm_ld: Linker,
+    opts: &LinkOptions,
+    places: &[PathBuf],
+) -> Result<Linker, Error> {
+    match linker_candidates(COMPONENT_LD, opts, places).into_iter().next() {
+        Some(path) => {
+            Ok(Linker { name: COMPONENT_LD.to_owned(), path, wasm_ld: Some(wasm_ld.path) })
+        }
+        None => Err(Error::NoComponentLinker { target: wasi_row(target), wasm_ld: true }),
+    }
+}
+
+/// Every file a linker of this name could be, in the order they are asked.
+///
+/// A name with a separator in it is a path and is the only answer. Otherwise the `-B` prefixes,
+/// then every directory on `PATH` rather than the first hit, then the places an lld is installed
+/// without being put on `PATH`. All of them rather than the first, because the first may be an lld
+/// that [`suitable`] turns down and a later one may not be.
+fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<PathBuf> {
+    if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
+        let path = PathBuf::from(name);
+        return if path.is_file() { vec![path] } else { Vec::new() };
+    }
+    let pathext = pathext();
+    let mut found: Vec<PathBuf> = opts
+        .prefixes
+        .iter()
+        .flat_map(|dir| spellings(&dir.join(name), &pathext))
+        .filter(|path| path.is_file())
+        .collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        found.extend(
+            std::env::split_paths(&path)
+                .flat_map(|dir| spellings(&dir.join(name), &pathext))
+                .filter(|p| executable(p)),
+        );
+    }
+    // The same spellings as on PATH, so `ld.lld` here and `ld.lld.exe` on Windows. Only `.exe`
+    // was tried at first, which found nothing in /usr/lib/llvm-19/bin on the Linux machines this
+    // search was written for.
+    if is_lld(name) || name == COMPONENT_LD {
+        for dir in places {
+            for file in spellings(&dir.join(name), &pathext) {
+                if executable(&file) && !found.contains(&file) {
+                    found.push(file);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The extensions a program name is tried with, from `PATHEXT` on Windows and none elsewhere.
+///
+/// `ld.lld` on Windows is `ld.lld.exe`, and looking for the bare name finds nothing, which is how
+/// a Windows host with LLVM installed and on `PATH` used to be told there was no linker. `PATHEXT`
+/// is what `cmd.exe` uses for the same question, and when it is unset the list is the one
+/// Windows ships with.
+fn pathext() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let list = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    list.split(';').filter(|ext| ext.starts_with('.')).map(str::to_ascii_lowercase).collect()
+}
+
+/// A path with each extension added, or as given when there are none or it already ends in one.
+///
+/// `ld.lld` ends in `.lld`, which is not an extension anybody runs, so the check is against the
+/// list rather than against whether there is a dot in the name at all. The bare name is left out
+/// when there is a list, because a file called `ld.lld` in a Git Bash directory on Windows is a
+/// shell script that `CreateProcess` cannot start.
+fn spellings(path: &Path, exts: &[String]) -> Vec<PathBuf> {
+    let has = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| exts.iter().any(|e| e[1..].eq_ignore_ascii_case(ext)));
+    if exts.is_empty() || has {
+        return vec![path.to_path_buf()];
+    }
+    exts.iter()
+        .map(|ext| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(ext);
+            PathBuf::from(name)
+        })
+        .collect()
+}
+
+/// Which linker a BSD link runs: GNU ld when the one [`find`] finds says so in its `--version`,
+/// and lld for any other and when none is found.
+fn bsd_ld(target: Triple, opts: &LinkOptions) -> bsd::Ld {
+    match find(target, opts) {
+        Ok(linker) if !is_lld(&linker.name) => bsd::reads(&reported_version(&linker.path)),
+        _ => bsd::Ld::Lld,
+    }
+}
+
+/// Whether a name is one of the spellings lld is installed under.
+fn is_lld(name: &str) -> bool {
+    matches!(name, "ld.lld" | "ld64.lld" | "lld" | "lld-link" | "wasm-ld")
+}
+
+/// Where lld is installed without being on `PATH`, newest first where a version is in the name.
+///
+/// Homebrew's `lld` and `llvm` formulae, whose `llvm` is keg-only and so never on `PATH` unless
+/// somebody put it there. Debian and Ubuntu's `lld-<N>` packages, which put the real program in
+/// `/usr/lib/llvm-<N>/bin` and only a versioned name in `/usr/bin`. Fedora's compatibility packages,
+/// which do the same under `/usr/lib64/llvm<N>/bin`. And the LLVM installer for Windows, which puts
+/// everything in `%ProgramFiles%\LLVM\bin` and leaves adding it to `PATH` as a checkbox that is off.
+///
+/// `root` is `/` except in the tests, which build the same tree somewhere they are allowed to.
+fn lld_dirs(root: &Path, program_files: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        "opt/homebrew/opt/lld/bin",
+        "opt/homebrew/opt/llvm/bin",
+        "usr/local/opt/lld/bin",
+        "usr/local/opt/llvm/bin",
+        "home/linuxbrew/.linuxbrew/opt/lld/bin",
+        "home/linuxbrew/.linuxbrew/opt/llvm/bin",
+    ]
+    .iter()
+    .map(|dir| root.join(dir))
+    .collect();
+    for (parent, prefix) in [("usr/lib", "llvm-"), ("usr/lib64", "llvm")] {
+        let mut versions: Vec<(u32, PathBuf)> = fs::read_dir(root.join(parent))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let version = name.to_str()?.strip_prefix(prefix)?.parse().ok()?;
+                Some((version, entry.path().join("bin")))
+            })
+            .collect();
+        versions.sort_by_key(|(version, _)| std::cmp::Reverse(*version));
+        dirs.extend(versions.into_iter().map(|(_, dir)| dir));
+    }
+    if let Some(dir) = program_files {
+        dirs.push(dir.join("LLVM").join("bin"));
+    }
+    dirs
+}
+
+/// Where to get an lld on the machine this compiler is running on, as the end of a sentence.
+///
+/// One per host rather than a list of every package manager, because the person reading it has one
+/// machine and wants the one command for it. Each names a place [`lld_dirs`] looks, so that doing
+/// what it says is enough and nobody has to edit `PATH` afterwards.
+fn lld_advice() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "`brew install lld` installs one, and rucc finds it in Homebrew's directory without a \
+         change to PATH"
+    } else if cfg!(windows) {
+        "the LLVM installer from https://github.com/llvm/llvm-project/releases, or `winget install \
+         LLVM.LLVM`, installs one in %ProgramFiles%\\LLVM\\bin, where rucc finds it without a \
+         change to PATH"
+    } else {
+        "on Debian and Ubuntu `apt install lld-19` installs one in /usr/lib/llvm-19/bin and on \
+         Fedora `dnf install lld` installs one on PATH, and rucc finds either without a change to \
+         PATH"
+    }
+}
+
+/// The first lld that reads `IMPORT_NAME_EXPORTAS`, which is what a windows-gnu link needs.
+///
+/// 18 does not read it and does not say so, so the number is not a convenience: below it the
+/// answer is wrong rather than absent. tamnd/rucc#1515.
+pub const LLD_EXPORTAS: u32 = 19;
+
+/// The first lld that defines `__wasm_first_page_end`, which `sbrk` and dlmalloc in the wasi-libc
+/// of wasi-sdk 34 refer to.
+///
+/// lld 18, 19 and 20 stop on any program that calls `malloc` with "undefined symbol:
+/// __wasm_first_page_end". The symbol is in `lld/wasm/Driver.cpp` of LLVM 21.1.0 and not of 20.1.8.
+/// Ubuntu 24.04 has lld 18 on PATH and 19 and 20 in its archive, so the machine this happens on is
+/// an ordinary one, and a newer lld that is installed in some other place must be found first.
+pub const LLD_WASI: u32 = 21;
+
+/// Whether a found linker can do this target's link, asked before it is handed anything.
+///
+/// Section 11.6's rule is that suitable is checked and not assumed, and this is the one check that
+/// cannot be made by looking at a file. A windows-gnu link reads import libraries that mingw-w64's
+/// `==` aliases compiled into `IMPORT_NAME_EXPORTAS` records, which lld reads from
+/// [`LLD_EXPORTAS`] on. An older lld writes an import by ordinal zero instead, without a warning
+/// and with a successful exit, so nothing later in the toolchain has anything to notice: the
+/// program is wrong at startup and the link that made it said nothing. Ubuntu 24.04 is the current
+/// LTS and ships 18, so the machine this happens on is an ordinary one.
+///
+/// A WASI link has a floor too, [`LLD_WASI`], for the C library that `rucc --fetch` installs. Every
+/// other target is left alone, and so is anything that is not an lld.
+///
+/// A linker that will not run or whose version cannot be read is allowed through. What the check
+/// can establish is that a specific old lld is here, and it should not turn every unusual linker
+/// into a refusal on the strength of failing to recognise it.
+///
+/// # Errors
+///
+/// [`Error::TooOld`] when the linker is an lld older than [`LLD_EXPORTAS`] and the target is
+/// windows-gnu, or older than [`LLD_WASI`] and the target is a WASI row.
+pub fn suitable(target: Triple, linker: &Linker) -> Result<(), Error> {
+    let floor = match (target.os, target.env) {
+        (Os::Windows, Env::Gnu) => LLD_EXPORTAS,
+        (Os::Wasi(_), _) => LLD_WASI,
+        _ => return Ok(()),
+    };
+    let Some(found) = lld_major(&reported_version(&linker.path)) else { return Ok(()) };
+    if found >= floor {
+        return Ok(());
+    }
+    Err(Error::TooOld {
+        name: linker.name.clone(),
+        found,
+        target: target.tuple().to_canonical_string(),
+    })
+}
+
+/// What `<linker> --version` prints, or an empty string when it will not say.
+///
+/// A linker that cannot be started is not this function's problem to report, because the link is
+/// about to start it again and say so properly. What this returns for such a one is nothing to
+/// read, which is the same as a linker that ran and said something unrecognisable.
+///
+/// A start that fails because the file is open for writing is tried again a few times. On Linux a
+/// child that another thread forks holds a copy of each open file until it runs its own program,
+/// so a linker that was written a moment ago can be busy for a short time and then start.
+fn reported_version(path: &Path) -> String {
+    let mut tries = 0;
+    loop {
+        match Command::new(path).arg("--version").output() {
+            Ok(out) => return String::from_utf8_lossy(&out.stdout).into_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return String::new(),
+        }
+    }
+}
+
+/// The major version in an lld's `--version`, when the program that printed it was an lld.
+///
+/// What lld prints is `LLD 18.1.8 (compatible with GNU linkers)`, with a distribution's own prefix
+/// in front of it often enough that the word is looked for rather than the line starting with it:
+/// Ubuntu's says `Ubuntu LLD 18.1.3`. Binutils prints `GNU ld (GNU Binutils for Ubuntu) 2.42` and
+/// mold prints its own name, and neither has the word, so both come back as [`None`] and are left
+/// alone.
+fn lld_major(text: &str) -> Option<u32> {
+    let mut words = text.split_whitespace();
+    words.find(|word| *word == "LLD")?;
+    words.next()?.split('.').next()?.parse().ok()
+}
+
+/// Whether a path is a file this process could run.
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether a path is a file this process could run.
+///
+/// Windows has no executable bit and decides by extension, and the names looked for above carry
+/// theirs, so being a file is the whole of the question here.
+#[cfg(not(unix))]
+fn executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// What the linker is told, in order, not counting the linker itself.
+///
+/// Two lines and [`cross_sysroot`] picks which: the one above for this machine, and
+/// [`rucc_sysroot::argv`]'s for any other. Nothing about the machine is read on the second path, so
+/// `-###` prints the same line on every host and prints it whether the sysroot has been built or
+/// not, which is what makes it worth printing. A BSD has a line of its own, the one its GCC writes,
+/// which is in the `bsd` module.
+///
+/// # Errors
+///
+/// [`Error::Target`] for a platform there is no native line for yet, and [`Error::Cross`] for a
+/// cross link that cannot be produced at all.
+pub fn line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    let mut args = line_for(target, opts, items, output)?;
+    // `-gz` on a link, which gcc hands to the linker so the output keeps its debug sections
+    // compressed too. Only an ELF linker has the option, and on the others the sections are left
+    // as the objects had them, which is what the object writer does on those formats as well.
+    if !matches!(target.os, Os::Darwin | Os::Windows) && !target.arch.is_wasm() {
+        match opts.compress {
+            Compress::None => {}
+            how => args.push(format!("--compress-debug-sections={how}")),
+        }
+    }
+    if opts.hardened && target.os == Os::Linux {
+        args.extend(["-z", "now", "-z", "relro"].map(str::to_owned));
+    }
+    Ok(args)
+}
+
+/// [`line`], before `-gz` is added to it.
+fn line_for(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    if opts.relocatable {
+        return relocatable_line(target, opts, items, output);
+    }
+    if target.os == Os::Darwin {
+        return darwin_line(target, opts, items, output);
+    }
+    if is_msvc(target) {
+        return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
+    }
+    if target.os.is_bsd() {
+        return bsd::line(target, opts, items, output, Triple::host(), bsd_ld(target, opts));
+    }
+    if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) {
+        return cross_line(target, opts, items, output, &sysroot);
+    }
+    if target.os != Os::Linux {
+        return Err(Error::Target { triple: target.to_string() });
+    }
+    let machine = emulation(target);
+    let root = opts.sysroot.as_deref();
+    // A distribution's cross tree is linked by the same line, with its two directories in place of
+    // this machine's, because it is laid out the way this machine's own library is.
+    let distro = distro_cross(target, opts);
+    let dirs = match &distro {
+        Some(distro) => vec![distro.lib()],
+        None => library_dirs(target, root),
+    };
+    // Where a gcc on this machine keeps its own runtime, which is a different place from where
+    // the C library keeps its own, and where our runtime is if it was built for this target.
+    let runtime = match distro {
+        Some(distro) => distro.gcc,
+        None => gcc_runtime(target, opts),
+    };
+    let ours = if opts.no_builtins_lib { None } else { builtins_archive(target, &opts.prefixes) };
+    let mut args = vec![
+        "-o".to_owned(),
+        output.to_owned(),
+        // Which of the several formats one `ld` can write is meant. A linker built for more than
+        // one machine guesses from its first input otherwise, and a link of no objects at all has
+        // nothing to guess from.
+        "-m".to_owned(),
+        machine.to_owned(),
+        // The table a program unwinds through, which a C program with no exceptions in it still
+        // needs because `backtrace` and every crash handler read it.
+        "--eh-frame-hdr".to_owned(),
+        // The symbol hash a dynamic loader from this century reads. The old one is still written
+        // alongside by default on some distributions, and asking for this one is what stops a link
+        // from carrying a table nothing has needed since 2006.
+        "--hash-style=gnu".to_owned(),
+        // The note that `debuginfod`, `systemd-coredump` and the distribution debug packages use
+        // to find the debug information of a program. Each distribution GCC passes it.
+        "--build-id".to_owned(),
+    ];
+
+    let pie = opts.pie.unwrap_or(!opts.is_static && !opts.shared);
+    if opts.shared {
+        args.push("-shared".to_owned());
+    } else if opts.is_static && pie {
+        // gcc's line for `-static-pie`: no loader, and relocations the program applies to itself
+        // at start, which it can only do if none of them is in its text.
+        args.extend(["-static", "-pie", "--no-dynamic-linker", "-z", "text"].map(str::to_owned));
+    } else if opts.is_static {
+        args.push("-static".to_owned());
+    } else if pie {
+        args.push("-pie".to_owned());
+    } else {
+        args.push("-no-pie".to_owned());
+    }
+    if !opts.is_static && !opts.shared {
+        args.push("-dynamic-linker".to_owned());
+        args.push(target_path(root, loader(target)));
+    }
+    if opts.export_dynamic {
+        args.push("--export-dynamic".to_owned());
+    }
+    if opts.strip {
+        args.push("-s".to_owned());
+    }
+
+    if opts.wants_startfiles() {
+        for name in startfile(opts, pie).into_iter().chain(["crti.o"]) {
+            if let Some(path) = find_file(&dirs, name) {
+                args.push(path.display().to_string());
+            }
+        }
+        // The compiler's own startup file, which runs the static constructors. Three spellings
+        // of the same thing, and which one is right is about how the code in it refers to
+        // itself: `S` for a position independent result, `T` for a static one, plain for the
+        // rest. Skipped when there is no gcc on the machine to take it from, because a program
+        // with no constructor in it does not miss it.
+        let begin = if opts.shared || pie {
+            "crtbeginS.o"
+        } else if opts.is_static {
+            "crtbeginT.o"
+        } else {
+            "crtbegin.o"
+        };
+        if let Some(path) = find_file(&runtime, begin).or_else(|| find_file(&runtime, "crtbegin.o"))
+        {
+            args.push(path.display().to_string());
+        }
+    }
+
+    for dir in &opts.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    // Where `libgcc.a` and `libgcc_eh.a` are, which is not where the C library is. Nothing is
+    // added when there is no gcc on the machine, and then the `-l` names below are left off too.
+    // It comes before the system directories, as in GCC, so a library that GCC ships in its own
+    // directory is the one that the link takes.
+    for dir in &runtime {
+        args.push(format!("-L{}", dir.display()));
+    }
+    for dir in &dirs {
+        args.push(format!("-L{}", dir.display()));
+    }
+
+    for item in items {
+        match item {
+            Item::File(path) => args.push(path.clone()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+    // After the objects, because a static archive is searched for what is undefined at the point
+    // it is reached and a library named before the object that needs it contributes nothing.
+    args.extend(runtime_items(opts, &runtime, ours.as_deref()));
+
+    if opts.wants_startfiles() {
+        // The other end of `crtbegin`, and it goes before `crtn.o` for the same reason `crti.o`
+        // goes before `crtbegin`: the four are two nested pairs and not four separate files.
+        // The fast math constructor, ahead of `crtend` where gcc puts it. Skipped when there is
+        // no gcc to take it from, as `crtbegin` is.
+        if opts.wants_fastmath() {
+            if let Some(path) = find_file(&runtime, "crtfastmath.o") {
+                args.push(path.display().to_string());
+            }
+        }
+        let end = if opts.shared || pie { "crtendS.o" } else { "crtend.o" };
+        if let Some(path) = find_file(&runtime, end).or_else(|| find_file(&runtime, "crtend.o")) {
+            args.push(path.display().to_string());
+        }
+        if let Some(path) = find_file(&dirs, "crtn.o") {
+            args.push(path.display().to_string());
+        }
+    }
+
+    Ok(args)
+}
+
+/// The line for `-r`, which is the objects and the machine and nothing else.
+///
+/// No sysroot is read, because a relocatable link takes nothing from the C library, so this is the
+/// same line for this machine and for any other Linux or BSD target. The `-L` directories the command
+/// line gave are kept for a `-l` written on it, which the linker still resolves against archives.
+fn relocatable_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    if target.os == Os::Darwin {
+        // `ld64` joins objects with `-r` too, and needs only to be told the architecture, since
+        // nothing from the SDK goes into an object that is still going to be linked.
+        let mut args = vec![
+            "-r".to_owned(),
+            "-arch".to_owned(),
+            darwin_arch(target)?.to_owned(),
+            "-o".to_owned(),
+            output.to_owned(),
+        ];
+        for dir in &opts.search {
+            args.push(format!("-L{}", dir.display()));
+        }
+        push_items(&mut args, items);
+        return Ok(args);
+    }
+    let mut args = vec!["-o".to_owned(), output.to_owned()];
+    if target.os.is_bsd() {
+        // The `-m` of the BSD's own line, which is none on most of them, as GCC passes it.
+        args.extend(bsd::relocatable(target, opts.narrowed, bsd_ld(target, opts)));
+    } else if target.os == Os::Linux {
+        args.extend(["-m".to_owned(), emulation(target).to_owned()]);
+    } else {
+        return Err(Error::Target { triple: target.to_string() });
+    }
+    args.push("-r".to_owned());
+    if opts.strip {
+        args.push("-s".to_owned());
+    }
+    for dir in &opts.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    for item in items {
+        match item {
+            Item::File(path) => args.push(path.clone()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+    Ok(args)
+}
+
+/// The line `ld64` takes, which is Apple's `ld` or lld's Mach-O flavour.
+///
+/// Shorter than the ELF one, because the SDK carries everything a program starts with. There are no
+/// start files to find: `libSystem` has the C library, the startup code and the runtime in it, and
+/// `dyld` calls `main` itself. What the linker has to be told is the architecture, the platform with
+/// the oldest release the program runs on and the SDK it was built against, and where the SDK is,
+/// which `-syslibroot` puts in front of every library it looks for.
+///
+/// `-pie` and `-no-pie` are not passed on. Every arm64 program on a Mac is position independent and
+/// `ld64` rejects `-no_pie` there, so the flag has nothing to change. `-static` is refused, because
+/// Apple ships no static C library and a static executable is a kernel's business.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when there is no SDK to link against, or for a static link, or an architecture
+/// that has no Mach-O name.
+pub fn darwin_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    let arch = darwin_arch(target)?;
+    if opts.is_static && !opts.shared {
+        return Err(Error::Cross {
+            why: "there is no static C library for Apple platforms, so -static cannot make a \
+                  program for one"
+                .to_owned(),
+        });
+    }
+    let Some(sdk) = crate::library::sdk(opts.sysroot.as_deref()) else {
+        return Err(Error::Cross {
+            why: format!(
+                "no SDK was found to link {} against. Install the command line tools with \
+                 `xcode-select --install`, or name one with -isysroot <dir> or SDKROOT",
+                target_tuple(target, opts).to_canonical_string()
+            ),
+        });
+    };
+    let tuple = target_tuple(target, opts);
+    let (platform, default) = match (tuple.os(), tuple.env()) {
+        (rucc_tuple::Os::IOs, rucc_tuple::Env::Simulator) => ("ios-simulator", "14.0"),
+        (rucc_tuple::Os::IOs, rucc_tuple::Env::MacAbi) => ("mac-catalyst", "14.0"),
+        (rucc_tuple::Os::IOs, _) => ("ios", "14.0"),
+        _ => ("macos", "11.0"),
+    };
+    let minimum = opts
+        .os_version
+        .or_else(|| tuple.os_version())
+        .map_or_else(|| default.to_owned(), |version| version.to_string());
+    // What the SDK says it is, which `ld64` records so the loader can tell which behaviours the
+    // program was built to expect. The deployment target when the SDK does not say, which is the
+    // answer that asks for no behaviour newer than the program claims to run on.
+    let version = sdk_version(&sdk).unwrap_or_else(|| minimum.clone());
+
+    let mut args = vec![
+        "-arch".to_owned(),
+        arch.to_owned(),
+        "-platform_version".to_owned(),
+        platform.to_owned(),
+        minimum,
+        version,
+        "-syslibroot".to_owned(),
+        sdk.display().to_string(),
+        "-o".to_owned(),
+        output.to_owned(),
+    ];
+    args.extend(darwin_kind(opts)?);
+    if opts.export_dynamic {
+        args.push("-export_dynamic".to_owned());
+    }
+    if opts.strip {
+        // The debug map and the local symbols, which between them are what `-s` leaves out of an
+        // ELF program. `ld64` has no one flag for it.
+        args.push("-S".to_owned());
+        args.push("-x".to_owned());
+    }
+    for dir in &opts.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    push_items(&mut args, items);
+    if opts.wants_runtime() && !opts.no_builtins_lib {
+        if let Some(ours) = builtins_archive(target, &opts.prefixes) {
+            args.push(ours.display().to_string());
+        }
+    }
+    if opts.wants_defaultlibs() {
+        args.push("-lSystem".to_owned());
+    }
+    Ok(args)
+}
+
+/// The kind of file, and then the Apple flags the command line gave, as clang's Darwin driver hands
+/// them to `ld64`.
+///
+/// `-shared` is `-dynamiclib` here, as it is to clang on a Mac, and both are `-dylib` to the linker.
+/// `-bundle` is itself, and is refused beside either of them. The three flags that describe a
+/// dynamic library are given the names clang gives them, `-dylib_install_name` and the two
+/// versions, and are refused on anything else with clang's words, because `ld64` would otherwise
+/// take `-install_name` on a program and write nothing.
+fn darwin_kind(opts: &LinkOptions) -> Result<Vec<String>, Error> {
+    if opts.bundle && opts.shared {
+        return Err(Error::Cross {
+            why: "invalid argument '-bundle' not allowed with '-dynamiclib'".to_owned(),
+        });
+    }
+    let mut args = Vec::new();
+    if opts.bundle {
+        args.push("-bundle".to_owned());
+    } else if opts.shared {
+        args.push("-dylib".to_owned());
+    }
+    for (flag, value) in &opts.apple {
+        let word = match flag.as_str() {
+            "-install_name" => "-dylib_install_name",
+            "-compatibility_version" => "-dylib_compatibility_version",
+            "-current_version" => "-dylib_current_version",
+            other => other,
+        };
+        if word != flag.as_str() && !opts.shared {
+            return Err(Error::Cross {
+                why: format!("invalid argument '{flag}' only allowed with '-dynamiclib'"),
+            });
+        }
+        args.push(word.to_owned());
+        args.extend(value.iter().cloned());
+    }
+    Ok(args)
+}
+
+/// What `ld64` calls the architecture, which is not what the triple does.
+fn darwin_arch(target: Triple) -> Result<&'static str, Error> {
+    match target.arch {
+        Arch::Aarch64 => Ok("arm64"),
+        Arch::X86_64 => Ok("x86_64"),
+        _ => Err(Error::Target { triple: target.to_string() }),
+    }
+}
+
+/// The version an SDK says it is, from the `SDKSettings.json` every SDK since Xcode 7 has at its
+/// root, or from its directory name, which is `MacOSX15.2.sdk` when it is not the unversioned link.
+///
+/// Read by hand rather than parsed, because the one field wanted is a quoted string at the top
+/// level and a JSON parser would be a dependency for one line.
+fn sdk_version(sdk: &Path) -> Option<String> {
+    let valid = |text: &str| {
+        !text.is_empty()
+            && text
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if let Ok(text) = fs::read_to_string(sdk.join("SDKSettings.json")) {
+        if let Some(at) = text.find("\"Version\"") {
+            let rest = &text[at + "\"Version\"".len()..];
+            let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+            let version = &rest[..rest.find('"')?];
+            if valid(version) {
+                return Some(version.to_owned());
+            }
+        }
+    }
+    let name = sdk.file_name()?.to_str()?.strip_suffix(".sdk")?;
+    let version = name.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    valid(version).then(|| version.to_owned())
+}
+
+/// The objects, libraries and linker words, in the order they were written.
+fn push_items(args: &mut Vec<String>, items: &[Item]) {
+    for item in items {
+        match item {
+            Item::File(path) => args.push(path.clone()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+}
+
+/// The startup file the C library brings, or `None` for a link that calls nothing.
+///
+/// This is what calls `main` and what passes it the arguments, so a shared object takes none of
+/// them: nothing starts one and it has no `main` to be started at. `Scrt1.o` rather than `crt1.o`
+/// when the result moves, because the two differ in whether the reference to `main` in them is one
+/// a loader may relocate.
+///
+/// A profiled program gets a different one again, which does all of that and starts and stops the
+/// counting around it. There are two of those rather than three: the one that relocates itself is
+/// only needed by a static position independent link, and every other link takes the plain one,
+/// which is what gcc does with the same flag.
+fn startfile(opts: &LinkOptions, pie: bool) -> Option<&'static str> {
+    if opts.shared {
+        None
+    } else if opts.profile {
+        Some(if pie && opts.is_static { "grcrt1.o" } else { "gcrt1.o" })
+    } else if pie && opts.is_static {
+        Some("rcrt1.o")
+    } else if pie {
+        Some("Scrt1.o")
+    } else {
+        Some("crt1.o")
+    }
+}
+
+/// The libraries the compiler's own runtime contributes, in the order the linker wants them.
+///
+/// The C library first, then ours, then the machine's `libgcc`. Order inside this list is not
+/// about whether a symbol resolves, it is about which archive supplies one that more than one of
+/// them defines, and the two places that happens both have a right answer.
+///
+/// `memcpy` and its three neighbours are in the C library on a hosted target and in ours only for
+/// a freestanding one, which is what `spec/12-abi-and-runtime.md` section 12.8 says they are for.
+/// glibc's are written in assembly per microarchitecture and ours is a word at a time loop, so a
+/// link that took ours over glibc's would be slower at the one routine every program reaches.
+///
+/// The wide arithmetic is in ours and in `libgcc` both, and the two are ABI-identical on purpose,
+/// so which one answers is not a correctness question. Ours comes first because it is ours, and
+/// `-fno-builtins-lib` leaves it off for somebody who would rather it were not.
+///
+/// A static link puts the whole list inside `--start-group`. `libc.a` refers to `_Unwind_Resume`,
+/// and the unwinder refers back into `libc.a`, so a linker walking the list once resolves
+/// whichever it reaches first and reports the other as undefined. That is exactly the failure
+/// issue #277 describes and the group is the fix for it.
+///
+/// A dynamic link needs no group, because the shared `libc` resolves its own references inside
+/// itself. `libgcc_s` is asked for `--as-needed` there, the way gcc asks for it, so a program that
+/// never unwinds does not acquire a dependency on it.
+///
+/// A dynamic link also takes the atomic routines from the machine's `libatomic` when its gcc has
+/// one, ahead of ours and `--as-needed`. The two differ on the one point that matters: libatomic
+/// does a 16-byte access with `cmpxchg16b` or a register pair and no lock, and ours takes a lock
+/// from a table of its own. Ours now uses `cmpxchg16b` too on an x86-64 processor that has it,
+/// but elsewhere it still takes the lock. A process with both has two ways to reach one object,
+/// and neither stops the other. A rucc program that opens a GCC library built with `-latomic` lost updates
+/// to an object they both changed. With libatomic first, the process has one copy. A static
+/// link keeps ours, because the program is then the one copy there is.
+fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    if !opts.wants_defaultlibs() && !opts.wants_runtime() {
+        return args;
+    }
+    // Only when there is a gcc to take them from. On a machine without one the names would be an
+    // error about a library that was never going to be there, and a program that needs neither
+    // the unwinder nor a wide divide links and runs without them.
+    let has_gcc = find_file(runtime, "libgcc.a").is_some();
+
+    if opts.is_static {
+        args.push("--start-group".to_owned());
+    }
+    if opts.wants_defaultlibs() {
+        args.push("-lc".to_owned());
+    }
+    if opts.wants_runtime() {
+        if !opts.is_static && find_file(runtime, "libatomic.so").is_some() {
+            args.push("--as-needed".to_owned());
+            args.push("-latomic".to_owned());
+            args.push("--no-as-needed".to_owned());
+        }
+        if let Some(path) = ours {
+            args.push(path.display().to_string());
+        }
+        if has_gcc {
+            if opts.gcov && find_file(runtime, "libgcov.a").is_some() {
+                args.push("-lgcov".to_owned());
+            }
+            args.push("-lgcc".to_owned());
+            if opts.is_static {
+                args.push("-lgcc_eh".to_owned());
+            }
+        }
+    }
+    if opts.is_static {
+        args.push("--end-group".to_owned());
+    } else if opts.wants_runtime() && has_gcc {
+        // The shared half, and only if something still wants it after everything above.
+        args.push("--as-needed".to_owned());
+        args.push("-lgcc_s".to_owned());
+        args.push("--no-as-needed".to_owned());
+    }
+    args
+}
+
+/// Where a gcc on this machine keeps `crtbegin.o`, `crtend.o` and `libgcc.a`.
+///
+/// This is not where the C library's files are. A distribution puts them under a directory named
+/// for the gcc version, and there may be several. The answer is the newest one that holds
+/// `libgcc.a`, because GCC links with its own directory and no other. A library that is only in the
+/// directory of an old GCC is not found by GCC, so it is not found here. A newer directory with no
+/// `libgcc.a` is skipped, because Ubuntu makes one for the C++ headers of a GCC that is not
+/// installed.
+#[must_use]
+pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let bases = ["/usr/lib/gcc", "/usr/lib64/gcc", "/usr/local/lib/gcc"];
+    newest(&gcc_dirs(target, sysroot, &bases))
+}
+
+/// The `libgcov.a` that a link for that target takes, which is in the GCC directory of the link.
+#[must_use]
+pub fn gcov_archive(target: Triple, opts: &LinkOptions) -> Option<PathBuf> {
+    let runtime = match distro_cross(target, opts) {
+        Some(distro) => distro.gcc,
+        None => gcc_runtime(target, opts),
+    };
+    find_file(&runtime, "libgcov.a")
+}
+
+/// The GCC directory of a native link: the one under `--gcc-toolchain=` when the command line
+/// named one, and the newest on the machine when it did not.
+fn gcc_runtime(target: Triple, opts: &LinkOptions) -> Vec<PathBuf> {
+    match &opts.gcc_toolchain {
+        Some(prefix) => {
+            newest(&gcc_dirs(target, Some(prefix.as_path()), &["/lib/gcc", "/lib64/gcc"]))
+        }
+        None => runtime_dirs(target, opts.sysroot.as_deref()),
+    }
+}
+
+/// The first of those directories that holds `libgcc.a`, or the first of all if none does.
+fn newest(all: &[PathBuf]) -> Vec<PathBuf> {
+    let found = all.iter().find(|dir| dir.join("libgcc.a").is_file()).or(all.first());
+    found.cloned().into_iter().collect()
+}
+
+/// Each directory of a gcc under those bases, newest first.
+fn gcc_dirs(target: Triple, sysroot: Option<&Path>, bases: &[&str]) -> Vec<PathBuf> {
+    let libc = match target.env {
+        Env::Musl => "musl",
+        Env::None | Env::Gnu | Env::Msvc => "gnu",
+    };
+    let arch = target.arch.as_str();
+    // The spellings the distributions use for the same triple. Debian and Ubuntu drop the vendor
+    // field, the source builds and Arch keep `pc`, and Red Hat and SUSE write their own name in
+    // it, so all of them are looked for and the ones that are there are taken.
+    let names = [
+        format!("{arch}-linux-{libc}"),
+        format!("{arch}-pc-linux-{libc}"),
+        format!("{arch}-redhat-linux"),
+        format!("{arch}-suse-linux"),
+        format!("{arch}-alpine-linux-{libc}"),
+    ];
+    let mut found = Vec::new();
+    for base in bases {
+        for name in &names {
+            found.extend(newest_first(&under(sysroot, &format!("{base}/{name}"))));
+        }
+    }
+    // A 64-bit GCC with the 32-bit multilib keeps the `-m32` runtime in a `32` directory under its
+    // own, for example `/usr/lib/gcc/x86_64-linux-gnu/13/32`.
+    if target.arch == Arch::X86 {
+        for name in ["x86_64-linux-gnu", "x86_64-pc-linux-gnu", "x86_64-redhat-linux"] {
+            let dirs = newest_first(&under(sysroot, &format!("{}/{name}", bases[0])));
+            found.extend(dirs.into_iter().map(|dir| dir.join("32")).filter(|dir| dir.is_dir()));
+        }
+    }
+    found
+}
+
+/// The version directories under one of gcc's, highest version first.
+fn newest_first(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut versions: Vec<(Vec<u64>, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .map(|p| (version_key(&p), p))
+        .collect();
+    // Descending, so the highest version is the first place `find_file` looks. Ties keep the order
+    // the directory gave, which is arbitrary and does not matter because two directories that sort
+    // the same hold the same version.
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions.into_iter().map(|(_, path)| path).collect()
+}
+
+/// A directory name read as a version, so that `13` sorts above `9` and `10.2` above `10`.
+///
+/// A name that is not a version at all sorts below every name that is, rather than being left
+/// out, because a directory holding a `libgcc.a` is worth looking in whatever it is called.
+fn version_key(dir: &Path) -> Vec<u64> {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    name.split('.').map(|part| part.parse::<u64>().unwrap_or(0)).collect()
+}
+
+/// Our own runtime library for this target, if it was built.
+///
+/// Looked for beside the compiler rather than at a path decided when the compiler was built, for
+/// the same reason everything else here is looked for: one binary runs wherever it is copied. A
+/// `-B` prefix is asked first, because that is what a `-B` prefix is for.
+#[must_use]
+pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf> {
+    // The name from the crate that puts it on a line, rather than a second spelling of it here,
+    // which is what that constant asks of anybody who needs the name.
+    const NAME: &str = rucc_sysroot::link::BUILTINS;
+    // The four field triple first and then the tuple the sysroots are named by, because `cargo
+    // xtask builtins --target=aarch64-linux-musl` names its directory after what it was given, and
+    // that shorter spelling is the one people type.
+    let spellings = [target.to_string(), target.tuple().to_string()];
+    let mut places: Vec<PathBuf> = Vec::new();
+    for prefix in prefixes {
+        for triple in &spellings {
+            places.push(prefix.join(triple).join(NAME));
+        }
+        places.push(prefix.join(NAME));
+    }
+    if let Some(dir) =
+        std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        // A release archive: the compiler at the top of the unpacked directory and the runtime
+        // beside it in `lib/rucc/<triple>`, which is how `.github/package.sh` lays one out.
+        for triple in &spellings {
+            places.push(dir.join("lib").join("rucc").join(triple).join(NAME));
+        }
+        if let Some(up) = dir.parent() {
+            for triple in &spellings {
+                // An install: the compiler in `bin` and its runtime in `lib/rucc/<triple>`.
+                places.push(up.join("lib").join("rucc").join(triple).join(NAME));
+                // A build tree: the compiler in `target/release` and the runtime, which is built
+                // for the target and not the host, in `target/<triple>/release`.
+                for profile in ["release", "debug"] {
+                    places.push(up.join(triple).join(profile).join(NAME));
+                }
+            }
+        }
+        places.push(dir.join(NAME));
+    }
+    places.into_iter().find(|path| path.is_file())
+}
+
+/// What to say after a failed link that went ahead without our runtime, or `None` when the link
+/// had it or did not want it.
+///
+/// A native link goes on without the archive when it is not there, because most programs never
+/// call into it and a compiler built from source has none until `cargo xtask builtins` makes one.
+/// A program that does call into it then fails on `__atomic_store` or `__udivti3`, and the linker
+/// names the caller rather than the cause.
+#[must_use]
+pub fn missing_builtins(target: Triple, opts: &LinkOptions) -> Option<String> {
+    if !opts.wants_runtime() || opts.no_builtins_lib {
+        return None;
+    }
+    if builtins_archive(target, &opts.prefixes).is_some() {
+        return None;
+    }
+    let tuple = target.tuple().to_canonical_string();
+    Some(format!(
+        "this link had no librucc_builtins.a, this compiler's own runtime for {tuple}, because \
+         there is none beside the compiler or under a -B prefix. If the linker says that a name \
+         such as `__atomic_store` or `__udivti3` is undefined, build it with `cargo xtask \
+         builtins --target={tuple}`"
+    ))
+}
+
+/// Which output format this `ld` should write, in the name `ld` knows it by.
+fn emulation(target: Triple) -> &'static str {
+    match target.arch {
+        Arch::X86_64 => "elf_x86_64",
+        Arch::Aarch64 => "aarch64linux",
+        Arch::Riscv64 => "elf64lriscv",
+        Arch::X86 => "elf_i386",
+        Arch::Wasm32 => {
+            unreachable!("only a Linux target asks for an emulation, and wasm32 is never one")
+        }
+    }
+}
+
+/// The program that starts a dynamically linked program, whose path is part of the file.
+///
+/// It is a per-target constant rather than something to look for, because the name is fixed by
+/// the platform's ABI and a program naming a different one does not start.
+fn loader(target: Triple) -> &'static str {
+    match (target.arch, target.env) {
+        (Arch::X86_64, Env::Musl) => "/lib/ld-musl-x86_64.so.1",
+        (Arch::X86_64, _) => "/lib64/ld-linux-x86-64.so.2",
+        (Arch::Aarch64, Env::Musl) => "/lib/ld-musl-aarch64.so.1",
+        (Arch::Aarch64, _) => "/lib/ld-linux-aarch64.so.1",
+        (Arch::Riscv64, Env::Musl) => "/lib/ld-musl-riscv64.so.1",
+        (Arch::Riscv64, _) => "/lib/ld-linux-riscv64-lp64d.so.1",
+        (Arch::X86, Env::Musl) => "/lib/ld-musl-i386.so.1",
+        (Arch::X86, _) => "/lib/ld-linux.so.2",
+        (Arch::Wasm32, _) => {
+            unreachable!("only a Linux target has a loader, and wasm32 is never one")
+        }
+    }
+}
+
+/// Where the library's own files might be, in search order.
+///
+/// The multiarch directory first for the reason it comes first in the header search: it is where
+/// a distribution that can hold two architectures at once puts the one being asked for, and a
+/// distribution that cannot simply does not have it. `lib64` after it, which is what the
+/// distributions that split by word size use instead, and `lib` last, which is every other one.
+#[must_use]
+pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let multiarch = multiarch(target);
+    // The multilib directory: `lib64` for a 64-bit target on Fedora, and `lib32` for `-m32` on
+    // Debian, where the `gcc-multilib` package puts the 32-bit C library.
+    let multilib = if target.arch == Arch::X86 { "32" } else { "64" };
+    [
+        format!("/usr/lib/{multiarch}"),
+        format!("/lib/{multiarch}"),
+        format!("/usr/lib{multilib}"),
+        format!("/lib{multilib}"),
+        "/usr/lib".to_owned(),
+        "/lib".to_owned(),
+    ]
+    .into_iter()
+    .map(|dir| under(sysroot, &dir))
+    .collect()
+}
+
+/// The name a distribution that holds two architectures at once files this target under.
+///
+/// `x86_64-linux-gnu` and its friends, which is what `gcc -print-multiarch` prints and what a
+/// build system pastes into a path when it is looking for a library itself.
+///
+/// Debian files 32-bit x86 under `i386-linux-gnu`, not under the `i686` of the triple, so that
+/// one is different from `gnu_name`.
+#[must_use]
+pub fn multiarch(target: Triple) -> String {
+    match target.arch {
+        Arch::X86 => format!("i386-linux-{}", libc_word(target)),
+        _ => gnu_name(target),
+    }
+}
+
+/// The name a cross binutils and a cross tree of a distribution use, for example
+/// `i686-linux-gnu-ld` and `/usr/i686-linux-gnu`.
+fn gnu_name(target: Triple) -> String {
+    format!("{}-linux-{}", target.arch.as_str(), libc_word(target))
+}
+
+/// The last word of the Linux names of the target.
+fn libc_word(target: Triple) -> &'static str {
+    match target.env {
+        Env::Musl => "musl",
+        Env::None | Env::Gnu | Env::Msvc => "gnu",
+    }
+}
+
+/// What `-print-multi-os-directory` prints: where the libraries of the target are, from the
+/// directory GCC keeps its own files in.
+///
+/// GCC builds the answer in. Debian, Ubuntu, Arch and Alpine give `../lib`, and Fedora and the
+/// other Red Hat systems give `../lib64` for a 64-bit target. For `-m32`, Debian gives `../lib32`
+/// and Fedora gives `../lib`. This compiler reads the machine to get the same answers. A BSD GCC
+/// has no multilib and gives `.`.
+#[must_use]
+pub fn multi_os_directory(target: Triple, sysroot: Option<&Path>) -> &'static str {
+    if target.os.is_bsd() {
+        return ".";
+    }
+    if target.os != Os::Linux {
+        return "../lib";
+    }
+    let real =
+        |dir: &str| fs::symlink_metadata(under(sysroot, dir)).is_ok_and(|meta| meta.is_dir());
+    if target.arch == Arch::X86 {
+        return if real("/usr/lib32") { "../lib32" } else { "../lib" };
+    }
+    let has_libc = |dir: &str| {
+        let dir = under(sysroot, dir);
+        dir.join("libc.so.6").is_file() || dir.join("libc.so").is_file()
+    };
+    let multiarch = multiarch(target);
+    if has_libc(&format!("/usr/lib/{multiarch}")) || has_libc(&format!("/lib/{multiarch}")) {
+        return "../lib";
+    }
+    if real("/usr/lib64") && has_libc("/usr/lib64") { "../lib64" } else { "../lib" }
+}
+
+/// The candidates that GCC on this machine searches.
+///
+/// That is all of them, less the word size directory when it is not the one that
+/// [`multi_os_directory`] names. Arch Linux has `/usr/lib64` as a link to `/usr/lib`, and Debian has
+/// one with only the loader in it. GCC does not search either one, so a build system that reads the
+/// link line finds the same directories with both compilers.
+fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let multi_os = multi_os_directory(target, sysroot);
+    let skipped: &[&str] = match multi_os {
+        "../lib64" | "../lib32" => &[],
+        _ if target.arch == Arch::X86 => &["/usr/lib32", "/lib32"],
+        _ => &["/usr/lib64", "/lib64"],
+    };
+    let skipped: Vec<PathBuf> = skipped.iter().map(|dir| under(sysroot, dir)).collect();
+    candidates(target, sysroot).into_iter().filter(|dir| !skipped.contains(dir)).collect()
+}
+
+/// The system directories that are there.
+fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    system_dirs(target, sysroot).into_iter().filter(|dir| dir.is_dir()).collect()
+}
+
+/// Where a library is looked for, in the order it is looked for in.
+///
+/// The command line first and the target's own after it, which is the order the linker is handed
+/// and therefore the order `-print-search-dirs` has to print.
+#[must_use]
+pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
+    let mut dirs = link.search.clone();
+    // A BSD is linked against the `-B` directories and `/usr/lib` of the tree `--sysroot` named,
+    // or of this machine.
+    if target.os.is_bsd() {
+        dirs.extend(bsd::dirs(target, link.sysroot.as_deref(), &link.prefixes));
+        return dirs;
+    }
+    // A cross link searches the sysroot's directory and, for a libc that is a stub, the one its
+    // stubs are written to, so this is those and not the machine's. What `-print-search-dirs` says is what a build
+    // system pastes into a link line of its own, and an answer that named `/usr/lib` for a target
+    // whose link line never goes near it would be worse than no answer at all.
+    if let Some(sysroot) = cross_sysroot(target, link) {
+        dirs.push(sysroot.lib());
+        if rucc_sysroot::link::libc(sysroot.target()) == rucc_sysroot::link::Libc::Stub {
+            dirs.push(sysroot.stubs().to_path_buf());
+        }
+        return dirs;
+    }
+    if let Some(sysroot) = named_mingw(target, link) {
+        dirs.push(sysroot.lib());
+        dirs.extend(mingw_gcc(target, link, &sysroot));
+        return dirs;
+    }
+    if let Some(sysroot) = named_wasi(target, link) {
+        dirs.push(sysroot.lib());
+        return dirs;
+    }
+    if let Some(distro) = distro_cross(target, link) {
+        dirs.push(distro.lib());
+        return dirs;
+    }
+    // The directory of the newest GCC comes before the system ones, as in GCC. It holds
+    // `libgcc.a` and `crtbegin.o`, which a build system asks for by name.
+    dirs.extend(gcc_runtime(target, link));
+    dirs.extend(system_dirs(target, link.sysroot.as_deref()));
+    dirs
+}
+
+/// The full path of a file with that name, when one of the search directories holds it.
+///
+/// What `-print-file-name=` answers. GCC prints the name back unchanged when it finds nothing,
+/// which is what makes the flag safe to paste into a link line either way.
+#[must_use]
+pub fn find_in_search(link: &LinkOptions, target: Triple, name: &str) -> Option<PathBuf> {
+    find_file(&search_dirs(link, target), name)
+}
+
+/// The first of those directories holding a file of that name.
+fn find_file(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    dirs.iter().map(|dir| dir.join(name)).find(|path| path.is_file())
+}
+
+/// A path under the sysroot, when there is one.
+fn under(sysroot: Option<&Path>, path: &str) -> PathBuf {
+    match sysroot {
+        // `strip_prefix` because joining an absolute path replaces the root rather than extending
+        // it, which would make every entry the unprefixed one.
+        Some(root) => root.join(path.strip_prefix('/').unwrap_or(path)),
+        None => PathBuf::from(path),
+    }
+}
+
+/// A path on the machine that will run the program, rather than on the one compiling it.
+///
+/// Written with the separator of the target and not of the host, which matters for the one path
+/// that is not looked at here but stored in the file and read by something else later: the loader
+/// a dynamic program names. A Windows host joining it would put a backslash in the middle of a
+/// name that a Linux loader has to find, and the program would not start.
+fn target_path(sysroot: Option<&Path>, path: &str) -> String {
+    match sysroot {
+        Some(root) => {
+            let root = root.display().to_string();
+            format!("{}/{}", root.trim_end_matches(['/', '\\']), path.trim_start_matches('/'))
+        }
+        None => path.to_owned(),
+    }
+}
+
+/// The whole invocation as one line, quoted the way `-###` prints it.
+#[must_use]
+pub fn render(linker: &Linker, args: &[String]) -> String {
+    // The linker inside rucc has no path, so its name is printed in the place of one.
+    let mut out = if linker.is_in_process() {
+        linker.name.clone()
+    } else {
+        linker.path.display().to_string()
+    };
+    for arg in &linker.words(args) {
+        out.push(' ');
+        if arg.is_empty() || arg.contains(char::is_whitespace) {
+            out.push('"');
+            out.push_str(arg);
+            out.push('"');
+        } else {
+            out.push_str(arg);
+        }
+    }
+    out
+}
+
+/// How long a command line may be on Windows before the arguments go in a file instead.
+///
+/// `CreateProcess` takes 32767 characters, the program's own path and the quoting included, and
+/// what is left for the arguments is not worth computing to the character.
+const WINDOWS_LINE: usize = 30_000;
+
+/// The same for every other host, where the limit is a megabyte or more shared with the
+/// environment, and a link this long is Kbuild's `-r` of a whole subsystem.
+const UNIX_LINE: usize = 256 * 1024;
+
+/// Whether these arguments, joined with a space and a pair of quotes each, are over `limit`.
+fn too_long(args: &[String], limit: usize) -> bool {
+    args.iter().map(|arg| arg.len() + 3).sum::<usize>() > limit
+}
+
+/// The arguments that stay on the command line and the ones that go in the file.
+///
+/// `-m` and its value stay, because they are what makes `ld.lld` pick its MinGW driver over its
+/// ELF one, and it is better not to depend on that choice looking inside the file.
+fn split_for_file(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut front = Vec::new();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut words = args.iter();
+    while let Some(arg) = words.next() {
+        if arg == "-m" {
+            front.push(arg.clone());
+            front.extend(words.next().cloned());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    (front, rest)
+}
+
+/// Whether this linker reads a response file with Windows quoting, where a backslash is an
+/// ordinary character unless it comes before a quote.
+///
+/// lld does on a Windows host, both its ELF driver and its MinGW one, and the MinGW one has no
+/// option to say otherwise. `lld-link` is the same program and reads the same way, and Microsoft's
+/// `link.exe` only runs on Windows and has never read any other. GNU ld reads the GNU way on every
+/// host, MSYS2's included.
+fn windows_quoting(linker: &Linker) -> bool {
+    let file = linker.path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let microsoft = linker.name == "link.exe" || file.eq_ignore_ascii_case("link");
+    cfg!(windows)
+        && (is_lld(&linker.name)
+            || file.starts_with("ld.lld")
+            || file.starts_with("lld")
+            || microsoft)
+}
+
+/// The words of a response file, one to a line, quoted so that the linker reads them back as
+/// they were.
+///
+/// The GNU way is a backslash before every quote and every backslash. The Windows way leaves a
+/// backslash alone unless a run of them ends at a quote, and then doubles the run and escapes the
+/// quote, which is the rule `CommandLineToArgvW` reads with and so the rule LLVM reads with too.
+fn response_text(args: &[String], windows: bool) -> String {
+    let mut text = String::new();
+    for arg in args {
+        text.push('"');
+        let mut slashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' if windows => slashes += 1,
+                '"' if windows => {
+                    text.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                    text.push('"');
+                    slashes = 0;
+                }
+                _ if windows => {
+                    text.extend(std::iter::repeat_n('\\', slashes));
+                    text.push(c);
+                    slashes = 0;
+                }
+                '"' | '\\' => {
+                    text.push('\\');
+                    text.push(c);
+                }
+                _ => text.push(c),
+            }
+        }
+        text.extend(std::iter::repeat_n('\\', slashes * 2));
+        text.push_str("\"\n");
+    }
+    text
+}
+
+/// Runs the linker and waits for it.
+///
+/// A line too long for the host goes to the linker as a response file, which is what a Windows
+/// build of a large program needs: a few hundred objects in a deep directory are past what
+/// `CreateProcess` takes.
+///
+/// # Errors
+///
+/// [`Error::NoProcesses`] on a wasm host, [`Error::Spawn`] when it could not be started, which is
+/// a machine problem, and [`Error::Refused`] when it ran and said no, which is a program problem and one the linker has
+/// already explained on its own error output. [`Error::InProcess`] when the linker inside rucc
+/// said no, which has printed nothing, so the message is the whole of the explanation.
+pub fn run(linker: &Linker, args: &[String]) -> Result<(), Error> {
+    if linker.is_in_process() {
+        return rucc_wasm_link::command::run(args)
+            .map_err(|why| Error::InProcess { why: why.to_string() });
+    }
+    let spawn = |why: std::io::Error| Error::Spawn {
+        path: linker.path.display().to_string(),
+        why: why.to_string(),
+    };
+    if crate::host::WASM {
+        return Err(Error::NoProcesses);
+    }
+    let words = linker.words(args);
+    let args = &words;
+    let mut command = Command::new(&linker.path);
+    let mut written = None;
+    if too_long(args, if cfg!(windows) { WINDOWS_LINE } else { UNIX_LINE }) {
+        let (front, rest) = split_for_file(args);
+        let path = crate::host::temp_dir().join(format!("rucc-link-{}.rsp", crate::host::id()));
+        fs::write(&path, response_text(&rest, windows_quoting(linker))).map_err(spawn)?;
+        let mut at = OsString::from("@");
+        at.push(&path);
+        command.args(front).arg(at);
+        written = Some(path);
+    } else {
+        command.args(args.iter().map(OsString::from));
+    }
+    let status = command.status();
+    if let Some(path) = written {
+        let _ = fs::remove_file(path);
+    }
+    let status = status.map_err(spawn)?;
+    if status.success() {
+        return Ok(());
+    }
+    // Nothing is added to what the linker printed. It has already named the symbol or the file,
+    // and a second message from here saying that linking failed would only push the first one
+    // further up the screen.
+    Err(Error::Refused {
+        status: match status.code() {
+            Some(code) => format!("exited with status {code}"),
+            None => "was killed before it finished".to_owned(),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linux() -> Triple {
+        Triple::new(Arch::X86_64, Os::Linux, Env::Gnu)
+    }
+
+    fn one(name: &str) -> Vec<Item> {
+        vec![Item::File(name.to_owned())]
+    }
+
+    #[test]
+    fn gnu_ld_links_for_its_own_machine_and_the_fast_one_is_first_for_another() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        let arm = Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu);
+        let first = |target: Triple, host: Triple| elf_order(target, Some(host)).remove(0);
+        assert_eq!(first(linux(), linux()), "ld");
+        assert_eq!(first(x86, linux()), "ld", "the x86-64 ld links -m32");
+        assert_eq!(first(arm, arm), "ld");
+        assert_eq!(first(arm, linux()), "ld.mold");
+        assert_eq!(first(linux(), arm), "ld.mold");
+        let mac = Triple::new(Arch::Aarch64, Os::Darwin, Env::None);
+        let names = elf_order(arm, Some(mac));
+        assert_eq!(names.first().map(String::as_str), Some("ld.mold"));
+        assert_eq!(names.last().map(String::as_str), Some("ld"));
+    }
+
+    #[test]
+    fn naming_one_is_the_whole_of_the_order() {
+        let opts = LinkOptions { use_ld: Some("gold".to_owned()), ..LinkOptions::default() };
+        assert_eq!(order(linux(), &opts), ["ld.gold", "gold"]);
+    }
+
+    #[test]
+    fn a_dynamic_program_names_the_loader_that_will_start_it() {
+        let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
+        let at = args.iter().position(|a| a == "-dynamic-linker").expect("the flag");
+        assert!(args[at + 1].ends_with("/lib64/ld-linux-x86-64.so.2"), "{args:?}");
+    }
+
+    /// `-fhardened` asks the linker for `-z now` and `-z relro`, as gcc does.
+    #[test]
+    fn a_hardened_link_binds_now_and_has_relro() {
+        let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|a| a == "now"), "{args:?}");
+        let opts = LinkOptions { hardened: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.windows(2).any(|pair| pair == ["-z", "now"]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["-z", "relro"]), "{args:?}");
+    }
+
+    /// A program has a build ID, as with each distribution GCC, and binds lazily unless asked.
+    #[test]
+    fn a_program_has_a_build_id_and_binds_lazily() {
+        let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|a| a == "--build-id"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "now"), "{args:?}");
+    }
+
+    /// Kbuild's `built-in.o`, which is objects joined into an object and is linked again later.
+    #[test]
+    fn a_relocatable_link_is_the_objects_and_nothing_a_program_needs() {
+        let opts = LinkOptions { relocatable: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args, ["-o", "built-in.o", "-m", "elf_x86_64", "-r", "a.o"]);
+    }
+
+    /// `-gz` reaches the linker as gcc passes it, so the linked file keeps its debug sections
+    /// compressed, and a Mac link is not handed an option ld64 does not have.
+    #[test]
+    fn compressed_debug_sections_are_asked_of_an_elf_linker_only() {
+        let zlib =
+            LinkOptions { relocatable: true, compress: Compress::Zlib, ..LinkOptions::default() };
+        let args = line(linux(), &zlib, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zlib"));
+        let gnu = LinkOptions { compress: Compress::ZlibGnu, ..zlib.clone() };
+        let args = line(linux(), &gnu, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zlib-gnu"));
+        let zstd = LinkOptions { compress: Compress::Zstd, ..zlib.clone() };
+        let args = line(linux(), &zstd, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zstd"));
+        let args = line(mac(), &zlib, &one("a.o"), "b.o").expect("ld64 takes -r");
+        assert!(args.iter().all(|arg| !arg.contains("compress")), "{args:?}");
+    }
+
+    #[test]
+    fn a_static_program_names_no_loader_because_nothing_will_start_it() {
+        let opts = LinkOptions { is_static: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.contains(&"-static".to_owned()), "{args:?}");
+        assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+    }
+
+    /// `-static-pie` is gcc's line for it: static, position independent, no loader, and the start
+    /// file that applies the program's relocations to itself.
+    #[test]
+    fn a_static_program_that_moves_relocates_itself() {
+        let opts = LinkOptions { is_static: true, pie: Some(true), ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        let at = args.iter().position(|arg| arg == "-static").expect("-static");
+        assert_eq!(args[at..at + 5], ["-static", "-pie", "--no-dynamic-linker", "-z", "text"]);
+        assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+        assert_eq!(startfile(&opts, true), Some("rcrt1.o"));
+    }
+
+    #[test]
+    fn the_startup_file_of_a_program_that_moves_is_not_the_one_of_a_program_that_does_not() {
+        let moving = LinkOptions { pie: Some(true), ..LinkOptions::default() };
+        let fixed = LinkOptions { pie: Some(false), ..LinkOptions::default() };
+        let named = |opts: &LinkOptions| {
+            line(linux(), opts, &one("a.o"), "a.out")
+                .expect("a line")
+                .iter()
+                .filter_map(|a| Path::new(a).file_name().map(|n| n.to_string_lossy().into_owned()))
+                .find(|n| n.ends_with("crt1.o"))
+        };
+        // Only when the machine running this has them, which is what makes this two assertions
+        // rather than one: a machine with no glibc development files has neither to find.
+        if let Some(name) = named(&moving) {
+            assert_eq!(name, "Scrt1.o");
+            assert_eq!(named(&fixed).as_deref(), Some("crt1.o"));
+        }
+    }
+
+    /// A profiled program is started by a startup file of its own.
+    ///
+    /// The counts it keeps have to be started before `main` runs and written out after it returns,
+    /// and what does both is this file rather than anything the compiler wrote. So a build that
+    /// compiles with the flag and links without it produces a program that calls the hook on every
+    /// function and never writes a profile, which is the failure this is here to keep out.
+    ///
+    /// A shared object takes none of them either way, since nothing starts one.
+    #[test]
+    fn a_profiled_program_is_started_by_the_startup_file_that_counts() {
+        let profile = LinkOptions { profile: true, ..LinkOptions::default() };
+        assert_eq!(startfile(&profile, false), Some("gcrt1.o"));
+        assert_eq!(startfile(&profile, true), Some("gcrt1.o"));
+        let still = LinkOptions { is_static: true, ..profile.clone() };
+        assert_eq!(startfile(&still, true), Some("grcrt1.o"));
+        assert_eq!(startfile(&still, false), Some("gcrt1.o"));
+        let shared = LinkOptions { shared: true, ..profile };
+        assert_eq!(startfile(&shared, false), None);
+    }
+
+    /// And a program that is not profiled is started by the one it always was.
+    #[test]
+    fn a_program_that_is_not_profiled_is_started_by_the_usual_one() {
+        let plain = LinkOptions::default();
+        assert_eq!(startfile(&plain, false), Some("crt1.o"));
+        assert_eq!(startfile(&plain, true), Some("Scrt1.o"));
+    }
+
+    #[test]
+    fn asking_for_no_startup_files_leaves_out_both_ends_of_them() {
+        let opts = LinkOptions { no_startfiles: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+        assert!(!args.iter().any(|a| a.ends_with("crtn.o")), "{args:?}");
+        // And still links against the library, because that is the other flag.
+        assert!(args.contains(&"-lc".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn asking_for_no_library_at_all_leaves_out_the_startup_files_too() {
+        let opts = LinkOptions { no_stdlib: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(!args.contains(&"-lc".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+    }
+
+    #[test]
+    fn the_library_comes_after_the_objects_that_need_it() {
+        let items = vec![Item::File("a.o".to_owned()), Item::Library("m".to_owned())];
+        let args = line(linux(), &LinkOptions::default(), &items, "a.out").expect("a line");
+        let obj = args.iter().position(|a| a == "a.o").expect("the object");
+        let m = args.iter().position(|a| a == "-lm").expect("the library");
+        let c = args.iter().position(|a| a == "-lc").expect("the library");
+        assert!(obj < m && m < c, "{args:?}");
+    }
+
+    #[test]
+    fn what_the_user_told_the_linker_stays_where_the_user_wrote_it() {
+        // The pair libtool writes around a set of convenience archives, which is what found this.
+        // Both words are about the files between them, so a line that collects them and puts them
+        // at the end has two options that do nothing and an archive whose members were all dropped.
+        let items = vec![
+            Item::File("a.o".to_owned()),
+            Item::Linker("--whole-archive".to_owned()),
+            Item::File("libaesni.a".to_owned()),
+            Item::Linker("--no-whole-archive".to_owned()),
+            Item::Library("m".to_owned()),
+        ];
+        let args = line(linux(), &LinkOptions::default(), &items, "a.out").expect("a line");
+        let at = |what: &str| args.iter().position(|a| a == what).expect(what);
+        assert!(at("a.o") < at("--whole-archive"), "{args:?}");
+        assert!(at("--whole-archive") < at("libaesni.a"), "{args:?}");
+        assert!(at("libaesni.a") < at("--no-whole-archive"), "{args:?}");
+        assert!(at("--no-whole-archive") < at("-lm"), "{args:?}");
+        assert!(at("-lm") < at("-lc"), "{args:?}");
+    }
+
+    #[test]
+    fn a_sysroot_moves_every_path_this_decided_and_none_the_user_wrote() {
+        let opts = LinkOptions {
+            sysroot: Some(PathBuf::from("/nowhere-at-all")),
+            search: vec![PathBuf::from("/opt/mine")],
+            ..LinkOptions::default()
+        };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        let at = args.iter().position(|a| a == "-dynamic-linker").expect("the flag");
+        assert_eq!(args[at + 1], "/nowhere-at-all/lib64/ld-linux-x86-64.so.2");
+        assert!(args.contains(&"-L/opt/mine".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_platform_with_no_link_line_is_said_so_rather_than_linked_wrongly() {
+        let triple = Triple::new(Arch::X86_64, Os::None, Env::None);
+        let error = line(triple, &LinkOptions::default(), &one("a.o"), "a.out")
+            .expect_err("no line for it");
+        assert!(matches!(error, Error::Target { .. }), "{error:?}");
+    }
+
+    /// A made up SDK with the one file the line reads out of it, so that nothing about this machine
+    /// decides what the line says.
+    fn an_sdk(name: &str, settings: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("rucc-sdk-{}-{}", std::process::id(), name.replace('.', "-")))
+            .join(name);
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        if let Some(settings) = settings {
+            fs::write(dir.join("SDKSettings.json"), settings).expect("a settings file");
+        }
+        dir
+    }
+
+    fn mac() -> Triple {
+        Triple::new(Arch::Aarch64, Os::Darwin, Env::None)
+    }
+
+    #[test]
+    fn a_mac_link_names_the_platform_the_sdk_and_libsystem() {
+        let sdk = an_sdk(
+            "MacOSX.sdk",
+            Some(
+                "{\"CanonicalName\": \"macosx15.2\", \"Version\" : \"15.2\", \"MaximumDeploymentTarget\": \"15.2.99\"}",
+            ),
+        );
+        let opts = LinkOptions {
+            sysroot: Some(sdk.clone()),
+            search: vec![PathBuf::from("/opt/mine")],
+            no_builtins_lib: true,
+            ..LinkOptions::default()
+        };
+        let items = vec![Item::File("a.o".to_owned()), Item::Library("m".to_owned())];
+        let args = line(mac(), &opts, &items, "a.out").expect("a line");
+        let sdk = sdk.display().to_string();
+        let want: Vec<&str> = vec![
+            "-arch",
+            "arm64",
+            "-platform_version",
+            "macos",
+            "11.0",
+            "15.2",
+            "-syslibroot",
+            &sdk,
+            "-o",
+            "a.out",
+            "-L/opt/mine",
+            "a.o",
+            "-lm",
+            "-lSystem",
+        ];
+        assert_eq!(args, want);
+
+        // The deployment target from the command line, and a shared library.
+        let opts =
+            LinkOptions { os_version: Some(rucc_tuple::Version::new(13, 4)), shared: true, ..opts };
+        let args = line(mac(), &opts, &one("a.o"), "liba.dylib").expect("a line");
+        assert_eq!(args[3..6], ["macos", "13.4", "15.2"]);
+        assert!(args.contains(&"-dylib".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.contains("pie")), "{args:?}");
+    }
+
+    #[test]
+    fn the_sdk_version_comes_from_its_name_when_it_has_no_settings() {
+        let sdk = an_sdk("MacOSX14.5.sdk", None);
+        let opts =
+            LinkOptions { sysroot: Some(sdk), no_builtins_lib: true, ..LinkOptions::default() };
+        let args = line(mac(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert_eq!(args[3..6], ["macos", "11.0", "14.5"]);
+        // And the deployment target when neither says anything.
+        let sdk = an_sdk("Somewhere", None);
+        let opts = LinkOptions {
+            sysroot: Some(sdk),
+            os_version: Some(rucc_tuple::Version::major(12)),
+            ..opts
+        };
+        let args = line(mac(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert_eq!(args[3..6], ["macos", "12", "12"]);
+    }
+
+    /// The words after `-o <file>` on a Mac link, which is where the kind of file and the Apple
+    /// flags go, up to the first object.
+    fn mac_kind(opts: LinkOptions) -> Result<Vec<String>, Error> {
+        let opts = LinkOptions {
+            sysroot: Some(an_sdk("Kinds.sdk", Some("{\"Version\": \"15.2\"}"))),
+            no_builtins_lib: true,
+            ..opts
+        };
+        let args = line(mac(), &opts, &one("a.o"), "out")?;
+        let from = args.iter().position(|arg| arg == "out").expect("the output") + 1;
+        let to = args.iter().position(|arg| arg == "a.o").expect("the object");
+        Ok(args[from..to].to_vec())
+    }
+
+    fn apple(flags: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        flags.iter().map(|(flag, value)| ((*flag).to_owned(), value.map(str::to_owned))).collect()
+    }
+
+    /// What Postgres's `Makefile.shlib` writes for libpq on a Mac, which is `-dynamiclib` with the
+    /// name the library is found by, its two versions and the list of what it exports, and the
+    /// words clang's Darwin driver hands `ld64` for each.
+    #[test]
+    fn a_mac_dynamic_library_gets_its_name_versions_and_exports() {
+        let opts = LinkOptions {
+            shared: true,
+            apple: apple(&[
+                ("-install_name", Some("@rpath/libpq.5.dylib")),
+                ("-compatibility_version", Some("5")),
+                ("-current_version", Some("5.18")),
+                ("-exported_symbols_list", Some("exports.list")),
+                ("-headerpad_max_install_names", None),
+            ]),
+            ..LinkOptions::default()
+        };
+        let args = mac_kind(opts).expect("a line");
+        let want = [
+            "-dylib",
+            "-dylib_install_name",
+            "@rpath/libpq.5.dylib",
+            "-dylib_compatibility_version",
+            "5",
+            "-dylib_current_version",
+            "5.18",
+            "-exported_symbols_list",
+            "exports.list",
+            "-headerpad_max_install_names",
+        ];
+        assert_eq!(args, want);
+    }
+
+    /// What `Makefile.darwin` and `meson.build` write for every module, which is a bundle whose
+    /// undefined symbols are looked for in the server it will be loaded into.
+    #[test]
+    fn a_mac_bundle_is_checked_against_the_program_that_loads_it() {
+        let opts = LinkOptions {
+            bundle: true,
+            apple: apple(&[
+                ("-bundle_loader", Some("../../src/backend/postgres")),
+                ("-undefined", Some("error")),
+                ("-dead_strip", None),
+            ]),
+            ..LinkOptions::default()
+        };
+        let args = mac_kind(opts).expect("a line");
+        let want = [
+            "-bundle",
+            "-bundle_loader",
+            "../../src/backend/postgres",
+            "-undefined",
+            "error",
+            "-dead_strip",
+        ];
+        assert_eq!(args, want);
+    }
+
+    /// Both kinds at once, and a library's name on something that is not a library, are refused
+    /// with clang's words rather than handed to a linker that would either complain less clearly
+    /// or write the file without them.
+    #[test]
+    fn a_mac_link_refuses_what_clang_refuses() {
+        let both = LinkOptions { bundle: true, shared: true, ..LinkOptions::default() };
+        let Err(Error::Cross { why }) = mac_kind(both) else {
+            panic!("-bundle with -dynamiclib was taken");
+        };
+        assert!(why.contains("'-bundle' not allowed with '-dynamiclib'"), "{why}");
+        for flag in ["-install_name", "-compatibility_version", "-current_version"] {
+            let opts = LinkOptions {
+                bundle: true,
+                apple: apple(&[(flag, Some("1"))]),
+                ..LinkOptions::default()
+            };
+            let Err(Error::Cross { why }) = mac_kind(opts) else {
+                panic!("{flag} on a bundle was taken");
+            };
+            assert!(why.contains(&format!("'{flag}' only allowed with '-dynamiclib'")), "{why}");
+        }
+        // And a program takes the flags that are not about a library, such as an export list.
+        let opts = LinkOptions {
+            apple: apple(&[("-exported_symbols_list", Some("keep"))]),
+            ..LinkOptions::default()
+        };
+        assert_eq!(mac_kind(opts).expect("a line"), ["-exported_symbols_list", "keep"]);
+    }
+
+    #[test]
+    fn a_mac_link_looks_for_a_mach_o_linker_and_nothing_else() {
+        assert_eq!(order(mac(), &LinkOptions::default()), ["ld", "ld64.lld"]);
+    }
+
+    #[test]
+    fn a_static_mac_program_is_refused_and_a_relocatable_one_is_not() {
+        let sdk = an_sdk("MacOSX.sdk", None);
+        let opts = LinkOptions { sysroot: Some(sdk), is_static: true, ..LinkOptions::default() };
+        let error = line(mac(), &opts, &one("a.o"), "a.out").expect_err("no static line");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("-static"), "{why}");
+        let args = relocatable_line(mac(), &LinkOptions::default(), &one("a.o"), "b.o")
+            .expect("ld64 takes -r");
+        assert_eq!(args, ["-r", "-arch", "arm64", "-o", "b.o", "a.o"]);
+    }
+
+    #[test]
+    fn the_line_is_printed_the_way_it_would_be_typed() {
+        let linker =
+            Linker { name: "ld".to_owned(), path: PathBuf::from("/usr/bin/ld"), wasm_ld: None };
+        let args = ["-o".to_owned(), "a b".to_owned()];
+        assert_eq!(render(&linker, &args), "/usr/bin/ld -o \"a b\"");
+    }
+
+    #[test]
+    fn a_linker_that_is_not_there_is_said_by_name() {
+        let opts = LinkOptions {
+            use_ld: Some("a-linker-nobody-has".to_owned()),
+            ..LinkOptions::default()
+        };
+        let error = find(linux(), &opts).expect_err("not on this machine");
+        assert_eq!(error, Error::Named { name: "a-linker-nobody-has".to_owned() });
+    }
+    /// A directory with a `libgcc.a` in it, so a test can say what a machine with a gcc on it
+    /// looks like without needing one.
+    fn a_gcc_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rucc-link-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(dir.join("libgcc.a"), b"not really an archive").expect("a file in it");
+        dir
+    }
+
+    /// A tree with files at those paths, to stand for a machine.
+    fn a_machine(name: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rucc-machine-{name}-{}", std::process::id()));
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(&path, b"").expect("a file");
+        }
+        root
+    }
+
+    #[test]
+    fn the_print_questions_find_the_files_of_the_newest_gcc() {
+        let root = a_machine(
+            "gcc",
+            &[
+                "usr/lib/gcc/x86_64-linux-gnu/9/libgcc.a",
+                "usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a",
+                "usr/lib/gcc/x86_64-linux-gnu/13/crtbegin.o",
+                "usr/lib/gcc/x86_64-linux-gnu/13/32/libgcc.a",
+                "usr/lib/x86_64-linux-gnu/crt1.o",
+            ],
+        );
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..LinkOptions::default() };
+        let gcc = root.join("usr/lib/gcc/x86_64-linux-gnu/13");
+        assert_eq!(find_in_search(&opts, linux(), "libgcc.a"), Some(gcc.join("libgcc.a")));
+        assert_eq!(find_in_search(&opts, linux(), "crtbegin.o"), Some(gcc.join("crtbegin.o")));
+        assert_eq!(
+            find_in_search(&opts, linux(), "crt1.o"),
+            Some(root.join("usr/lib/x86_64-linux-gnu/crt1.o"))
+        );
+        // Only the newest GCC is searched, so an old one cannot give a file.
+        let dirs = search_dirs(&opts, linux());
+        assert!(!dirs.contains(&root.join("usr/lib/gcc/x86_64-linux-gnu/9")), "{dirs:?}");
+        // `-m32` takes the `32` directory of the 64-bit GCC.
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        assert_eq!(find_in_search(&opts, x86, "libgcc.a"), Some(gcc.join("32/libgcc.a")));
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_gcc_named_with_gcc_toolchain_is_the_one_the_link_uses() {
+        let root = a_machine(
+            "toolchain",
+            &[
+                "lib/gcc/x86_64-pc-linux-gnu/16.1.0/libgcc.a",
+                "lib/gcc/x86_64-pc-linux-gnu/16.1.0/crtbegin.o",
+            ],
+        );
+        let opts = LinkOptions { gcc_toolchain: Some(root.clone()), ..LinkOptions::default() };
+        let gcc = root.join("lib/gcc/x86_64-pc-linux-gnu/16.1.0");
+        assert_eq!(find_in_search(&opts, linux(), "libgcc.a"), Some(gcc.join("libgcc.a")));
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        // As a path, since on Windows the version is joined to the rest with a `\`.
+        let named = |arg: &String| arg.strip_prefix("-L").is_some_and(|dir| Path::new(dir) == gcc);
+        assert!(args.iter().any(named), "{args:?}");
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn the_32_bit_libraries_are_where_debian_puts_them() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        assert_eq!(multiarch(x86), "i386-linux-gnu");
+        // The cross tools and the cross tree keep the name of the triple.
+        assert_eq!(gnu_name(x86), "i686-linux-gnu");
+        assert!(cross_order(x86).contains(&"i686-linux-gnu-ld".to_owned()));
+        let dirs = candidates(x86, None);
+        assert!(dirs.contains(&PathBuf::from("/usr/lib/i386-linux-gnu")), "{dirs:?}");
+        assert!(dirs.contains(&PathBuf::from("/usr/lib32")), "{dirs:?}");
+        assert!(!dirs.contains(&PathBuf::from("/usr/lib64")), "{dirs:?}");
+    }
+
+    #[test]
+    fn the_word_size_directory_is_searched_only_where_gcc_searches_it() {
+        let arch = a_machine("arch", &["usr/lib/libc.so.6", "usr/lib64/ld-linux-x86-64.so.2"]);
+        let dirs = library_dirs(linux(), Some(&arch));
+        assert_eq!(dirs, [arch.join("usr/lib")]);
+        let fedora = a_machine("fedora64", &["usr/lib64/libc.so.6", "usr/lib/libc.so.6"]);
+        let dirs = library_dirs(linux(), Some(&fedora));
+        assert_eq!(dirs, [fedora.join("usr/lib64"), fedora.join("usr/lib")]);
+        let gcc = fedora.join("usr/lib/gcc/x86_64-redhat-linux/16");
+        fs::create_dir_all(&gcc).expect("a directory");
+        fs::write(gcc.join("libgcc.a"), b"").expect("a file");
+        let opts = LinkOptions { sysroot: Some(fedora.clone()), ..LinkOptions::default() };
+        let dirs = search_dirs(&opts, linux());
+        assert_eq!(dirs.first(), Some(&gcc), "{dirs:?}");
+        for root in [arch, fedora] {
+            fs::remove_dir_all(&root).expect("clean up");
+        }
+    }
+
+    #[test]
+    fn the_multi_os_directory_is_the_one_the_distribution_uses() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        let debian =
+            a_machine("debian", &["usr/lib/x86_64-linux-gnu/libc.so.6", "usr/lib32/libc.so.6"]);
+        assert_eq!(multi_os_directory(linux(), Some(&debian)), "../lib");
+        assert_eq!(multi_os_directory(x86, Some(&debian)), "../lib32");
+        let fedora = a_machine("fedora", &["usr/lib64/libc.so.6", "usr/lib/libc.so.6"]);
+        assert_eq!(multi_os_directory(linux(), Some(&fedora)), "../lib64");
+        assert_eq!(multi_os_directory(x86, Some(&fedora)), "../lib");
+        let alpine = a_machine("alpine", &["usr/lib/libc.so"]);
+        assert_eq!(multi_os_directory(linux(), Some(&alpine)), "../lib");
+        let freebsd = Triple::new(Arch::X86_64, Os::FreeBsd(Os::FREEBSD_RELEASE), Env::None);
+        assert_eq!(multi_os_directory(freebsd, Some(&alpine)), ".");
+        assert_eq!(multi_os_directory(freebsd, None), ".");
+        for root in [debian, fedora, alpine] {
+            fs::remove_dir_all(&root).expect("clean up");
+        }
+    }
+
+    #[test]
+    fn the_c_library_supplies_the_block_routines_and_our_runtime_does_not_displace_them() {
+        let gcc = a_gcc_dir("order");
+        let ours = PathBuf::from("/somewhere/librucc_builtins.a");
+        let args = runtime_items(&LinkOptions::default(), &[gcc], Some(&ours));
+        let at_libc = args.iter().position(|a| a == "-lc").expect("libc");
+        let at_ours = args.iter().position(|a| a.ends_with("librucc_builtins.a")).expect("ours");
+        // glibc's `memcpy` is assembly per microarchitecture and ours is a word at a time loop,
+        // so on a target that has one, its is the one that should answer.
+        assert!(at_libc < at_ours, "{args:?}");
+    }
+
+    #[test]
+    fn a_static_link_puts_them_in_a_group_because_two_of_them_refer_to_each_other() {
+        let gcc = a_gcc_dir("group");
+        let opts = LinkOptions { is_static: true, ..LinkOptions::default() };
+        let args = runtime_items(&opts, &[gcc], None);
+        assert_eq!(args.first().map(String::as_str), Some("--start-group"), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("--end-group"), "{args:?}");
+        // The unwinder, which is what `libc.a` refers to and what a static link fails on without
+        // it. Issue #277.
+        assert!(args.contains(&"-lgcc_eh".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_dynamic_link_needs_no_group_and_asks_for_the_shared_half_only_if_something_wants_it() {
+        let gcc = a_gcc_dir("dynamic");
+        let args = runtime_items(&LinkOptions::default(), &[gcc], None);
+        assert!(!args.contains(&"--start-group".to_owned()), "{args:?}");
+        assert!(!args.contains(&"-lgcc_eh".to_owned()), "{args:?}");
+        let at = args.iter().position(|a| a == "-lgcc_s").expect("the shared half");
+        assert_eq!(args[at - 1], "--as-needed", "{args:?}");
+        assert_eq!(args[at + 1], "--no-as-needed", "{args:?}");
+    }
+
+    #[test]
+    fn a_dynamic_link_takes_the_atomic_routines_from_the_machines_libatomic_first() {
+        let gcc = a_gcc_dir("atomic");
+        fs::write(gcc.join("libatomic.so"), b"not really a library").expect("a file in it");
+        let ours = PathBuf::from("/somewhere/librucc_builtins.a");
+        let args = runtime_items(&LinkOptions::default(), std::slice::from_ref(&gcc), Some(&ours));
+        let at = args.iter().position(|a| a == "-latomic").expect("libatomic");
+        assert_eq!(args[at - 1], "--as-needed", "{args:?}");
+        assert_eq!(args[at + 1], "--no-as-needed", "{args:?}");
+        let at_ours = args.iter().position(|a| a.ends_with("librucc_builtins.a")).expect("ours");
+        assert!(at < at_ours, "{args:?}");
+        // A static program is the one copy of the routines, so it keeps ours.
+        let opts = LinkOptions { is_static: true, ..LinkOptions::default() };
+        let args = runtime_items(&opts, std::slice::from_ref(&gcc), Some(&ours));
+        assert!(!args.contains(&"-latomic".to_owned()), "{args:?}");
+        fs::remove_dir_all(&gcc).expect("clean up");
+    }
+
+    #[test]
+    fn a_gcc_with_no_libatomic_leaves_the_atomic_routines_to_ours() {
+        let gcc = a_gcc_dir("no-atomic");
+        let args = runtime_items(&LinkOptions::default(), &[gcc], None);
+        assert!(!args.contains(&"-latomic".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn our_own_runtime_comes_before_the_machines_because_the_two_are_interchangeable() {
+        let gcc = a_gcc_dir("ours");
+        let ours = PathBuf::from("/somewhere/librucc_builtins.a");
+        let args = runtime_items(&LinkOptions::default(), &[gcc], Some(&ours));
+        let at_ours = args.iter().position(|a| a.ends_with("librucc_builtins.a")).expect("ours");
+        let at_gcc = args.iter().position(|a| a == "-lgcc").expect("libgcc");
+        assert!(at_ours < at_gcc, "{args:?}");
+    }
+
+    #[test]
+    fn no_builtins_lib_leaves_ours_off_and_keeps_the_machines() {
+        let gcc = a_gcc_dir("theirs");
+        let opts = LinkOptions { no_builtins_lib: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|a| a.ends_with("librucc_builtins.a")), "{args:?}");
+        // And the machine's half is still decided the same way it was, from the directories
+        // that are there, which on the machine running this test may be none.
+        assert!(runtime_items(&opts, &[gcc], None).contains(&"-lgcc".to_owned()));
+    }
+
+    #[test]
+    fn nodefaultlibs_leaves_the_whole_runtime_off_and_not_only_the_c_library() {
+        let gcc = a_gcc_dir("none");
+        let opts = LinkOptions { no_defaultlibs: true, ..LinkOptions::default() };
+        assert!(runtime_items(&opts, &[gcc], None).is_empty());
+    }
+
+    #[test]
+    fn a_machine_with_no_gcc_on_it_gets_no_names_for_libraries_that_are_not_there() {
+        let empty = std::env::temp_dir().join("rucc-link-empty-not-a-gcc");
+        let args = runtime_items(&LinkOptions::default(), &[empty], None);
+        assert_eq!(args, ["-lc"], "{args:?}");
+    }
+
+    #[test]
+    fn a_gcc_version_directory_is_read_as_a_version_and_not_as_a_word() {
+        assert!(version_key(Path::new("/usr/lib/gcc/x/13")) > version_key(Path::new("/x/9")));
+        assert!(version_key(Path::new("/x/10.2")) > version_key(Path::new("/x/10")));
+        // Something that is not a version at all still sorts, and sorts below one that is.
+        assert!(version_key(Path::new("/x/snapshot")) < version_key(Path::new("/x/1")));
+    }
+
+    /// A command line that has a cache to find generated sysroots in, which a real one always has.
+    ///
+    /// And a `-B` prefix with our runtime in it, because a cross link refuses without one and
+    /// every machine that does this for real has the archive `cargo xtask builtins` wrote. What
+    /// happens when it is missing is its own test below.
+    /// The fast math startup file follows gcc's end file spec: the family puts it in anything
+    /// that is not a shared object, and `-mdaz-ftz` decides it outright either way.
+    #[test]
+    fn the_fast_math_startup_file_is_wanted_where_gccs_spec_wants_it() {
+        let fast = LinkOptions { fast_math: true, ..LinkOptions::default() };
+        assert!(!LinkOptions::default().wants_fastmath());
+        assert!(fast.wants_fastmath());
+        assert!(!LinkOptions { shared: true, ..fast.clone() }.wants_fastmath());
+        assert!(!LinkOptions { daz_ftz: Some(false), ..fast.clone() }.wants_fastmath());
+        let forced = LinkOptions { shared: true, daz_ftz: Some(true), ..LinkOptions::default() };
+        assert!(forced.wants_fastmath());
+    }
+
+    fn cached() -> LinkOptions {
+        LinkOptions {
+            cache: Some(PathBuf::from("/cache")),
+            prefixes: vec![a_builtins_dir()],
+            ..LinkOptions::default()
+        }
+    }
+
+    /// A directory with our runtime archive in it, so that a test can say what a machine where the
+    /// runtime was built looks like without building one.
+    ///
+    /// One directory for every test rather than one each, since none of them writes to it and the
+    /// name of the file is the whole of what they read.
+    fn a_builtins_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rucc-link-ours-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
+        dir
+    }
+
+    /// The note after a failed link names the task that builds the runtime, and only when the
+    /// runtime is missing and the link wanted it.
+    #[test]
+    fn a_link_without_our_runtime_names_the_task_that_builds_it() {
+        let opts = LinkOptions::default();
+        if builtins_archive(linux(), &opts.prefixes).is_none() {
+            let note = missing_builtins(linux(), &opts).expect("a note");
+            assert!(note.contains("cargo xtask builtins --target="), "{note}");
+        }
+        let off = LinkOptions { no_builtins_lib: true, ..LinkOptions::default() };
+        assert_eq!(missing_builtins(linux(), &off), None);
+        let found = LinkOptions { prefixes: vec![a_builtins_dir()], ..LinkOptions::default() };
+        assert_eq!(missing_builtins(linux(), &found), None);
+    }
+
+    /// An archive in a directory named by the short tuple is found, which is where `cargo xtask
+    /// builtins --target=aarch64-linux-musl` puts it.
+    #[test]
+    fn the_runtime_is_found_under_the_tuple_as_well_as_the_triple() {
+        let dir = std::env::temp_dir().join(format!("rucc-link-tuple-{}", std::process::id()));
+        let target: Triple = "aarch64-linux-musl".parse().expect("a triple");
+        let under = dir.join(target.tuple().to_string());
+        fs::create_dir_all(&under).expect("a temporary directory");
+        fs::write(under.join("librucc_builtins.a"), b"not really an archive")
+            .expect("a file in it");
+        let found = builtins_archive(target, std::slice::from_ref(&dir));
+        assert_eq!(found, Some(under.join("librucc_builtins.a")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Where that cache would keep this target's sysroot.
+    fn a_sysroot(target: Triple) -> Sysroot {
+        Sysroot::in_cache(Path::new("/cache"), target.tuple())
+    }
+
+    /// A target that is not the machine running this test, whatever machine that is.
+    ///
+    /// A freestanding one, because [`Triple::host`] answers Linux, Darwin or Windows and never
+    /// `Os::None`. Every other triple is somebody's host, so a test that wants the cross path out of
+    /// [`line`] itself has to use this one and the rest go through [`cross_line`].
+    fn foreign() -> Triple {
+        Triple::new(Arch::X86_64, Os::None, Env::None)
+    }
+
+    #[test]
+    fn a_cross_link_reads_the_targets_own_sysroot_and_nothing_of_this_machine() {
+        let target = Triple::new(Arch::Aarch64, Os::Linux, Env::Musl);
+        let sysroot = a_sysroot(target);
+        // The paths as this host spells them, because what is being checked is which directory the
+        // files are in and a Windows separator is a backslash.
+        let root = sysroot.root().display().to_string();
+        let lib = sysroot.lib();
+        let args = cross_line(target, &cached(), &one("a.o"), "a.out", &sysroot).expect("a line");
+        assert!(args.contains(&format!("--sysroot={root}")), "{args:?}");
+        assert!(args.contains(&format!("-L{}", lib.display())), "{args:?}");
+        assert!(args.contains(&lib.join("libc.a").display().to_string()), "{args:?}");
+        let at = args.iter().position(|a| a == "-dynamic-linker").expect("the loader");
+        assert_eq!(args[at + 1], "/lib/ld-musl-aarch64.so.1", "{args:?}");
+        // The whole point of the other path not being taken: not one directory of this machine is
+        // on the line, so the line is the same on every host and the recorded ones describe it.
+        for arg in &args {
+            assert!(!arg.contains("/usr/lib"), "{arg} in {args:?}");
+            assert!(!arg.contains("/lib64"), "{arg} in {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_freestanding_target_links_against_our_runtime_instead_of_being_refused() {
+        let args = line(foreign(), &cached(), &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|a| a.ends_with("librucc_builtins.a")), "{args:?}");
+        // No libc, because there is not one, and no start file either: what runs before `main` on a
+        // freestanding target comes from whatever is being built.
+        assert!(!args.iter().any(|a| a.ends_with("libc.a")), "{args:?}");
+        assert!(!args.contains(&"-lc".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|a| a.ends_with("crt1.o")), "{args:?}");
+    }
+
+    /// And with nothing to find sysroots in it is refused, which is what it was before this.
+    #[test]
+    fn a_driver_with_no_cache_to_look_in_says_so_rather_than_guessing() {
+        let error = line(foreign(), &LinkOptions::default(), &one("a.o"), "a.out")
+            .expect_err("no line for it");
+        assert!(matches!(error, Error::Target { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_static_link_against_a_libc_that_is_a_stub_is_refused_rather_than_attempted() {
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let opts = LinkOptions { is_static: true, ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("there is no libc.a in a stub sysroot");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        // Because a stub carries the names a library exports and none of the bodies, which is
+        // everything a dynamic link reads and nothing a static one does.
+        assert!(why.contains("stub"), "{why}");
+    }
+
+    #[test]
+    fn a_target_whose_linker_wants_a_different_line_is_refused_by_name() {
+        let target = Triple::new(Arch::Aarch64, Os::Darwin, Env::None);
+        let error = cross_line(target, &cached(), &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("no line for that format");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
+    }
+
+    /// A WASI command is linked by wasm-ld against the fetched wasi-libc, and our runtime comes
+    /// after `libc.a`, where clang puts compiler-rt. Without our runtime the link is refused with
+    /// the command that builds it.
+    #[test]
+    fn a_wasi_program_is_linked_by_wasm_ld_against_the_fetched_wasi_libc() {
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        let bare = LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() };
+        let error = line(target, &bare, &one("a.o"), "a.wasm").expect_err("no runtime");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("cargo xtask builtins --target=wasm32-wasip1"), "{why}");
+        let opts = cached();
+        assert_eq!(order(target, &opts), ["wasm-ld"]);
+        let lib = a_sysroot(target).lib();
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line");
+        assert_eq!(args[..4], ["-o", "a.wasm", "-m", "wasm32"]);
+        let at = |file: &str| {
+            let path = lib.join(file).display().to_string();
+            args.iter().position(|arg| *arg == path).unwrap_or_else(|| panic!("{file} {args:?}"))
+        };
+        let object = args.iter().position(|arg| arg == "a.o").expect("the object");
+        let ours = args.iter().position(|arg| arg.ends_with("librucc_builtins.a")).expect("ours");
+        assert!(at("crt1-command.o") < object && object < at("libc.a"), "{args:?}");
+        assert!(at("libc.a") < ours, "{args:?}");
+        // No flag of an ELF linker, which wasm-ld would refuse, and `-gz` is not asked of it.
+        let gz = LinkOptions { compress: Compress::Zlib, ..opts.clone() };
+        let args = line(target, &gz, &one("a.o"), "a.wasm").expect("a line");
+        assert!(!args.iter().any(|arg| arg.starts_with("--compress") || arg == "-z"), "{args:?}");
+
+        let reactor = LinkOptions { reactor: true, ..opts.clone() };
+        let args = line(target, &reactor, &one("a.o"), "a.wasm").expect("a line");
+        assert!(args.windows(2).any(|pair| pair == ["--entry", "_initialize"]), "{args:?}");
+    }
+
+    /// A wasi-sysroot named with `--sysroot` is linked the way the fetched one is. In the layout of
+    /// wasi-sdk the start file and the archives are read out of `lib/wasm32-wasip1`, and in our own
+    /// layout out of `lib`. Before this, a named tree gave "no link line" for every WASI target.
+    #[test]
+    fn a_wasi_sysroot_named_with_sysroot_is_linked_out_of_its_directory_for_the_target() {
+        let tree = std::env::temp_dir().join(format!("rucc-link-wasi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tree);
+        let own = tree.join("lib").join("wasm32-wasip1");
+        fs::create_dir_all(tree.join("include").join("wasm32-wasip1")).expect("a scratch tree");
+        fs::create_dir_all(&own).expect("a scratch tree");
+        for file in ["crt1-command.o", "libc.a", "libsetjmp.a"] {
+            fs::write(own.join(file), b"").expect("a file in lib");
+        }
+        let shown = |path: PathBuf| path.display().to_string();
+
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        let opts = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        preflight(target, &opts).expect("the tree is one to link against");
+        assert_eq!(order(target, &opts), ["wasm-ld"]);
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line for the named tree");
+        let at = |path: PathBuf| {
+            let path = shown(path);
+            args.iter().position(|arg| *arg == path).unwrap_or_else(|| panic!("{path} {args:?}"))
+        };
+        let object = args.iter().position(|arg| arg == "a.o").expect("the object");
+        assert!(at(own.join("crt1-command.o")) < object, "{args:?}");
+        assert!(object < at(own.join("libsetjmp.a")), "{args:?}");
+        assert!(at(own.join("libsetjmp.a")) < at(own.join("libc.a")), "{args:?}");
+        assert!(args.last().is_some_and(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        assert_eq!(search_dirs(&opts, target), std::slice::from_ref(&own));
+
+        // A tree with no directory for the target is read out of `lib`.
+        fs::remove_dir_all(&own).expect("the directory for the target goes");
+        let flat = tree.join("lib");
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line for a flat tree");
+        assert!(args.contains(&shown(flat.join("libc.a"))), "{args:?}");
+        assert_eq!(search_dirs(&opts, target), [flat]);
+        let _ = fs::remove_dir_all(&tree);
+    }
+
+    /// `-fuse-ld=rucc` is the linker inside rucc on a wasm target and an error on any other, and a
+    /// wasm link with no `-fuse-ld=` always has a linker, because that one is the last resort.
+    #[test]
+    fn the_linker_inside_rucc_links_wasm_when_asked_and_when_there_is_no_wasm_ld() {
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        let ours = LinkOptions { use_ld: Some(IN_PROCESS.to_owned()), ..cached() };
+        let linker = find(target, &ours).expect("the linker inside rucc");
+        assert!(linker.is_in_process(), "{linker:?}");
+        let args = line(target, &ours, &one("a.o"), "a.wasm").expect("a line");
+        assert!(render(&linker, &args).starts_with("rucc-wasm-link -o a.wasm -m wasm32 "));
+        let error = find(linux(), &ours).expect_err("not for ELF");
+        assert!(error.to_string().starts_with("-fuse-ld=rucc links only wasm"), "{error}");
+        assert!(find(target, &cached()).is_ok());
+    }
+
+    /// wasm32-wasip2 and wasm32-wasip3 are linked by `wasm-component-ld`, which is given the path
+    /// of the `wasm-ld` that was found before the line, as clang does. A `-B` prefix is asked
+    /// first, so the two scripts here are the answer whatever is on PATH.
+    #[test]
+    #[cfg(unix)]
+    fn a_wasi_component_is_linked_by_wasm_component_ld_around_the_wasm_ld_that_was_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let p2 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P2), Env::None);
+        let p3 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P3), Env::None);
+        let p1 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        assert!(is_component(p2) && is_component(p3) && !is_component(p1));
+        assert!(!is_component(linux()));
+
+        let dir = std::env::temp_dir().join(format!("rucc-link-component-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        for name in ["wasm-ld", COMPONENT_LD] {
+            let path = dir.join(name);
+            fs::write(&path, "#!/bin/sh\necho 'LLD 22.1.0'\n").expect("a script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+        }
+        let opts = LinkOptions { prefixes: vec![dir.clone()], ..cached() };
+        for target in [p2, p3] {
+            let linker = find(target, &opts).expect("the two scripts");
+            assert_eq!(linker.name, COMPONENT_LD);
+            assert_eq!(linker.path, dir.join(COMPONENT_LD));
+            assert_eq!(linker.wasm_ld.as_deref(), Some(dir.join("wasm-ld").as_path()));
+            let args = ["-o", "a.wasm", "a.o"].map(str::to_owned);
+            let wasm_ld = dir.join("wasm-ld").display().to_string();
+            assert_eq!(linker.words(&args), ["--wasm-ld-path", &wasm_ld, "-o", "a.wasm", "a.o"]);
+            let shown = render(&linker, &args);
+            let expected =
+                format!("{} --wasm-ld-path {wasm_ld} -o a.wasm a.o", linker.path.display());
+            assert_eq!(shown, expected);
+        }
+        // wasip1 is a core module, and so is a component target when `-fuse-ld=` names a linker.
+        let linker = find(p1, &opts).expect("the wasm-ld script");
+        assert_eq!((linker.name.as_str(), linker.wasm_ld.as_ref()), ("wasm-ld", None));
+        let path = dir.join("wasm-ld");
+        let named = LinkOptions { use_ld: Some(path.display().to_string()), ..opts.clone() };
+        let linker = find(p2, &named).expect("the wasm-ld script");
+        assert_eq!((&linker.path, linker.wasm_ld.as_ref()), (&path, None));
+        let _ = fs::remove_dir_all(&dir);
+
+        // The linker inside rucc writes a core module, so it is refused for a component by name.
+        let ours = LinkOptions { use_ld: Some(IN_PROCESS.to_owned()), ..cached() };
+        let error = find(p2, &ours).expect_err("not a component");
+        assert!(error.to_string().contains("wasm32-wasip2 is linked into a component"), "{error}");
+
+        // Each message names only the program that is missing.
+        let row = "wasm32-wasip3".to_owned();
+        let neither = Error::NoComponentLinker { target: row.clone(), wasm_ld: false }.to_string();
+        assert!(neither.contains("no wasm-ld of lld") && neither.contains("WASI_SDK_PATH"));
+        let one = Error::NoComponentLinker { target: row, wasm_ld: true }.to_string();
+        assert!(one.contains("wasm-component-ld, which was not found"), "{one}");
+        assert!(one.contains("cargo install wasm-component-ld"), "{one}");
+    }
+
+    /// An error of the linker inside rucc is the whole message, because nothing else printed it.
+    #[test]
+    fn the_linker_inside_rucc_says_why_it_refused_a_line() {
+        let args = ["-o", "a.wasm", "--shared-memory", "a.o"].map(str::to_owned);
+        let error = run(&Linker::in_process(), &args).expect_err("an option it does not take");
+        let Error::InProcess { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("--shared-memory"), "{why}");
+    }
+
+    #[test]
+    fn an_msvc_link_is_against_the_tree_sysroot_names_and_says_what_to_run_without_one() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        // Not the cache, even with one to look in, because nothing of ours is ever there for it.
+        let error = line(target, &cached(), &one("a.obj"), "a.exe").expect_err("no tree named");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("rucc --fetch x86_64-windows-msvc"), "{why}");
+
+        let tree = PathBuf::from("/trees/msvc");
+        let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        let args = line(target, &named, &one("a.obj"), "a.exe").expect("a line");
+        let crt = format!("-libpath:{}", tree.join("crt/lib").join("x86_64").display());
+        assert!(args.contains(&crt), "{args:?}");
+        assert!(args.contains(&"-out:a.exe".to_owned()), "{args:?}");
+        assert!(args.contains(&"libcmt.lib".to_owned()), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        let dll = LinkOptions { crt: Crt::Dll, ..named };
+        let args = line(target, &dll, &one("a.obj"), "a.exe").expect("a line");
+        assert!(args.contains(&"msvcrt.lib".to_owned()), "{args:?}");
+        assert!(!args.contains(&"libcmt.lib".to_owned()), "{args:?}");
+
+        // And the linker that reads that line, whether or not there is a cache.
+        assert_eq!(order(target, &cached()).first().map(String::as_str), Some("lld-link"));
+        assert_eq!(order(target, &LinkOptions::default())[0], "lld-link");
+    }
+
+    #[test]
+    fn an_msvc_tree_without_the_crt_for_this_architecture_is_said_before_anything_is_compiled() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        let tree = std::env::temp_dir().join(format!("rucc-msvc-tree-{}", std::process::id()));
+        fs::create_dir_all(tree.join("crt/lib/aarch64")).expect("a temporary directory");
+        let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        let error = preflight(target, &named).expect_err("a tree for the other architecture");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("rucc --fetch x86_64-windows-msvc"), "{why}");
+        fs::create_dir_all(tree.join("crt/lib/x86_64")).expect("the right one");
+        preflight(target, &named).expect("a tree for this one");
+        let _ = fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn a_mingw_target_links_and_looks_for_a_linker_that_can_write_a_pe_image() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let args = cross_line(target, &cached(), &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line for mingw-w64");
+        let at = |flag: &str| args.iter().position(|arg| arg == flag).expect(flag);
+        assert_eq!(args[at("-m") + 1], "i386pep");
+        assert_eq!(args[at("--subsystem") + 1], "console");
+        assert!(args.iter().any(|arg| arg.ends_with("libmsvcrt.a")), "{args:?}");
+        // And the prefixed name a distribution files its mingw binutils under, which is not the
+        // multiarch one.
+        let names = cross_order(target);
+        assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
+        assert!(names.contains(&"x86_64-w64-mingw32-ld".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    fn our_runtime_comes_from_beside_the_compiler_rather_than_from_inside_the_sysroot() {
+        // The two halves of tamnd/rucc#1514. The line used to name it under the sysroot's `lib`,
+        // where nothing ever put it: it is this compiler's output for the target and a sysroot
+        // fetched from a release holds the platform's files and not ours. So the path on the line
+        // is the one the driver found, and the only `librucc_builtins.a` on the line is that one.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let sysroot = a_sysroot(target);
+        let opts = cached();
+        let args = cross_line(target, &opts, &one("a.o"), "a.exe", &sysroot).expect("a line");
+        let ours: Vec<&String> =
+            args.iter().filter(|arg| arg.ends_with("librucc_builtins.a")).collect();
+        assert_eq!(ours.len(), 1, "{args:?}");
+        assert_eq!(ours[0], &opts.prefixes[0].join("librucc_builtins.a").display().to_string());
+        assert!(!ours[0].starts_with(&sysroot.lib().display().to_string()), "{args:?}");
+        // And it is still last, after everything that calls into it.
+        assert_eq!(args.last(), Some(ours[0]), "{args:?}");
+    }
+
+    #[test]
+    fn a_cross_link_with_no_runtime_to_find_says_which_command_writes_one() {
+        // What the linker would say instead is that `___chkstk_ms` is undefined, referenced from
+        // mingw-w64's own objects, which is tamnd/rucc#1513 and is nobody's first guess at a
+        // missing archive.
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { prefixes: Vec::new(), ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect_err("there is no runtime for it to find");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("cargo xtask builtins"), "{why}");
+        assert!(why.contains("-fno-builtins-lib"), "{why}");
+
+        // And that flag is the way through it, for somebody who meant to link without ours.
+        let without = LinkOptions { no_builtins_lib: true, ..opts };
+        let args = cross_line(target, &without, &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line without ours on it");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+    }
+
+    #[test]
+    fn the_version_an_lld_prints_is_read_and_nothing_elses_is() {
+        // What each of these programs actually prints, because the word being in the line is the
+        // whole of how one is told from another.
+        assert_eq!(lld_major("LLD 18.1.8 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("Ubuntu LLD 18.1.3 (compatible with GNU linkers)\n"), Some(18));
+        assert_eq!(lld_major("LLD 20.1.2 (compatible with GNU linkers)\n"), Some(20));
+
+        // Binutils and mold do not have it, and neither of them has this problem, so the answer
+        // for both is that this check has nothing to say about them.
+        assert_eq!(lld_major("GNU ld (GNU Binutils for Ubuntu) 2.42\n"), None);
+        assert_eq!(lld_major("mold 2.4.1 (compatible with GNU ld)\n"), None);
+        assert_eq!(lld_major(""), None);
+    }
+
+    /// A program that prints `text` and exits, which is as much of a linker as this check reads.
+    ///
+    /// Named after what it says, so that two of them in one test are two files.
+    #[cfg(unix)]
+    fn a_linker_that_says(tag: &str, text: &str) -> Linker {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("rucc-link-ld-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join(format!("ld.lld-{tag}"));
+        fs::write(&path, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("an executable one");
+        Linker { name: "ld.lld".to_owned(), path, wasm_ld: None }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_too_old_to_read_exportas_is_refused_for_windows_gnu_and_nowhere_else() {
+        // The failure this replaces has no diagnostic at all: 18 writes an import by ordinal zero,
+        // exits successfully, and the program dies at startup under wine. tamnd/rucc#1515.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let old = a_linker_that_says("18", "LLD 18.1.8 (compatible with GNU linkers)");
+        let error = suitable(windows, &old).expect_err("18 cannot link this");
+        let Error::TooOld { name, found, target } = &error else { panic!("{error:?}") };
+        assert_eq!((name.as_str(), *found, target.as_str()), ("ld.lld", 18, "x86_64-windows-gnu"));
+        assert!(error.to_string().contains("IMPORT_NAME_EXPORTAS"), "{error}");
+
+        // The same linker for a target whose import libraries have no such records in them, which
+        // is every other target, since this is one encoding in one format.
+        let linux = Triple::new(Arch::X86_64, Os::Linux, Env::Musl);
+        assert_eq!(suitable(linux, &old), Ok(()));
+
+        // And the first one that reads them.
+        let new = a_linker_that_says("19", "LLD 19.1.0 (compatible with GNU linkers)");
+        assert_eq!(suitable(windows, &new), Ok(()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_older_than_21_is_refused_for_wasi_and_the_message_says_why() {
+        // The wasi-libc of wasi-sdk 34 refers to `__wasm_first_page_end`, and 20 does not define
+        // it, so the link of the first program that calls malloc stops on an undefined symbol.
+        let wasi = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        let old = a_linker_that_says("20", "Ubuntu LLD 20.1.2 (compatible with GNU linkers)");
+        let error = suitable(wasi, &old).expect_err("20 cannot link this");
+        let Error::TooOld { found, target, .. } = &error else { panic!("{error:?}") };
+        assert_eq!((*found, target.as_str()), (20, "wasm32-wasip1"));
+        let text = error.to_string();
+        assert!(text.contains("__wasm_first_page_end") && text.contains("WASI_SDK_PATH"), "{text}");
+        assert!(!text.contains("IMPORT_NAME_EXPORTAS"), "{text}");
+
+        // wasm32-none has no wasi-libc, and 21 defines the symbol.
+        let none = Triple::new(Arch::Wasm32, Os::None, Env::None);
+        assert_eq!(suitable(none, &old), Ok(()));
+        let new = a_linker_that_says("21", "LLD 21.1.0 (compatible with GNU linkers)");
+        assert_eq!(suitable(wasi, &new), Ok(()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_old_lld_first_in_line_is_passed_over_for_a_newer_one_behind_it() {
+        // Ubuntu 24.04 after `apt install lld-19`: 18 is the one on PATH and 19 is somewhere else.
+        // Two -B prefixes stand in for the two places, since the search asks them in order too. The
+        // name is one nothing on this machine is called, so a real lld on PATH does not answer.
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("rucc-link-two-lld-{}", std::process::id()));
+        let mut prefixes = Vec::new();
+        for (dir, version) in [("old", "18.1.3"), ("new", "19.1.7")] {
+            let dir = root.join(dir);
+            fs::create_dir_all(&dir).expect("a temporary directory");
+            let path = dir.join("ld.rucc-test-lld");
+            fs::write(&path, format!("#!/bin/sh\necho 'Ubuntu LLD {version}'\n"))
+                .expect("a script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+            prefixes.push(dir);
+        }
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions {
+            use_ld: Some("rucc-test-lld".to_owned()),
+            prefixes,
+            ..LinkOptions::default()
+        };
+        let found = find(windows, &opts).expect("the newer one");
+        assert_eq!(found.path, root.join("new").join("ld.rucc-test-lld"));
+
+        // With only the old one there, the answer is the refusal that names it.
+        let opts = LinkOptions { prefixes: vec![root.join("old")], ..opts };
+        let error = find(windows, &opts).expect_err("only 18 is here");
+        assert!(matches!(error, Error::TooOld { found: 18, .. }), "{error:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_line_goes_in_a_response_file_that_reads_back_as_it_was() {
+        let args: Vec<String> =
+            ["-o", r"C:\Users\a b\out.exe", "-m", "i386pep", r#"say "hi""#, "", "plain.o"]
+                .map(str::to_owned)
+                .to_vec();
+        let (front, rest) = split_for_file(&args);
+        assert_eq!(front, ["-m", "i386pep"]);
+        assert_eq!(
+            crate::response_words(&response_text(&rest, false)),
+            [&args[..2], &args[4..]].concat()
+        );
+        // And the Windows way, which leaves the backslashes in a path alone.
+        assert_eq!(
+            response_text(&rest, true),
+            "\"-o\"\n\"C:\\Users\\a b\\out.exe\"\n\"say \\\"hi\\\"\"\n\"\"\n\"plain.o\"\n"
+        );
+        assert_eq!(response_text(&[r"C:\dir\".to_owned()], true), "\"C:\\dir\\\\\"\n");
+        assert!(!too_long(&args, 1000));
+        assert!(too_long(&vec!["x".repeat(100); 400], WINDOWS_LINE));
+    }
+
+    #[test]
+    fn a_program_name_is_tried_with_each_pathext_extension_it_does_not_already_have() {
+        let exts = vec![".com".to_owned(), ".exe".to_owned()];
+        let dir = Path::new("bin");
+        assert_eq!(
+            spellings(&dir.join("ld.lld"), &exts),
+            [dir.join("ld.lld.com"), dir.join("ld.lld.exe")]
+        );
+        assert_eq!(spellings(&dir.join("lld-link.EXE"), &exts), [dir.join("lld-link.EXE")]);
+        assert_eq!(spellings(&dir.join("ld.lld"), &[]), [dir.join("ld.lld")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_off_path_is_found_under_its_own_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("rucc-link-off-path-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        let lld = dir.join("ld.lld");
+        fs::write(&lld, "#!/bin/sh\n").expect("a file");
+        fs::set_permissions(&lld, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let found =
+            linker_candidates("ld.lld", &LinkOptions::default(), std::slice::from_ref(&dir));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(found.contains(&lld), "{found:?}");
+    }
+
+    #[test]
+    fn lld_is_looked_for_where_package_managers_put_it_newest_version_first() {
+        let root = std::env::temp_dir().join(format!("rucc-link-lld-dirs-{}", std::process::id()));
+        for dir in ["usr/lib/llvm-18/bin", "usr/lib/llvm-19/bin", "usr/lib/llvm-9/bin", "usr/lib/x"]
+        {
+            fs::create_dir_all(root.join(dir)).expect("a temporary directory");
+        }
+        let dirs = lld_dirs(&root, Some(PathBuf::from("C:/Program Files")));
+        let under_lib: Vec<_> =
+            dirs.iter().filter(|dir| dir.starts_with(root.join("usr/lib"))).collect();
+        assert_eq!(
+            under_lib,
+            [
+                &root.join("usr/lib/llvm-19/bin"),
+                &root.join("usr/lib/llvm-18/bin"),
+                &root.join("usr/lib/llvm-9/bin")
+            ]
+        );
+        assert!(dirs.contains(&root.join("opt/homebrew/opt/lld/bin")), "{dirs:?}");
+        assert_eq!(dirs.last(), Some(&PathBuf::from("C:/Program Files").join("LLVM").join("bin")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_linker_says_where_to_get_lld_only_when_lld_was_looked_for() {
+        let cross = Error::NoLinker { tried: vec!["ld.lld".to_owned(), "lld".to_owned()] };
+        assert!(cross.to_string().contains("lld 19 or newer"), "{cross}");
+        let mac = Error::NoLinker { tried: vec!["ld".to_owned(), "ld64.lld".to_owned()] };
+        assert!(!mac.to_string().contains("binutils"), "{mac}");
+    }
+
+    #[test]
+    fn no_linker_on_the_native_elf_line_names_binutils() {
+        let names = ["ld.mold", "mold", "ld.lld", "lld", "ld"];
+        let native = Error::NoLinker { tried: names.map(str::to_owned).to_vec() };
+        let said = native.to_string();
+        assert!(said.contains("Install the binutils package"), "{said}");
+        assert!(!said.contains("lld 19"), "{said}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_linker_that_will_not_say_what_it_is_is_left_alone() {
+        // Every linker that is not an lld reaches this check too, and what it can establish is
+        // that a specific old lld is here rather than that anything else is fit. Turning "I did
+        // not recognise this" into a refusal would break machines this problem never touched.
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let quiet = a_linker_that_says("gnu", "GNU ld (GNU Binutils for Ubuntu) 2.42");
+        assert_eq!(suitable(windows, &quiet), Ok(()));
+
+        let missing = Linker {
+            name: "ld.lld".to_owned(),
+            path: PathBuf::from("/no/such/linker"),
+            wasm_ld: None,
+        };
+        assert_eq!(suitable(windows, &missing), Ok(()));
+    }
+
+    #[test]
+    fn profiling_a_cross_link_is_refused_because_the_startup_file_is_compiled_code() {
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Musl);
+        let opts = LinkOptions { profile: true, ..cached() };
+        let error = cross_line(target, &opts, &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("there is no gcrt1.o in a generated sysroot");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("gcrt1.o"), "{why}");
+    }
+
+    #[test]
+    fn a_distributions_cross_tree_is_used_when_there_is_no_sysroot_of_ours() {
+        let usr = std::env::temp_dir().join(format!("rucc-link-usr-{}", std::process::id()));
+        let root = usr.join("aarch64-linux-gnu");
+        for dir in ["include", "lib"] {
+            fs::create_dir_all(root.join(dir)).expect("a scratch tree");
+        }
+        for version in ["9", "13"] {
+            fs::create_dir_all(usr.join("lib/gcc-cross/aarch64-linux-gnu").join(version))
+                .expect("a scratch gcc");
+        }
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let arm = Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu);
+        let opts = LinkOptions { usr: Some(usr.clone()), ..cached() };
+        let distro = distro_for(arm, &opts, Some(host)).expect("the packages are there");
+        assert_eq!(distro.include(), root.join("include"));
+        assert_eq!(distro.lib(), root.join("lib"));
+        assert_eq!(
+            distro.gcc,
+            [13, 9].map(|v| usr.join("lib/gcc-cross/aarch64-linux-gnu").join(v.to_string()))
+        );
+        // And then it is not a link against a sysroot of ours, which is what decides the line.
+        assert!(cross_for(arm, &opts, Some(host)).is_none());
+        // The host itself, a target with no tree, a named tree and a pinned release all leave it.
+        assert!(distro_for(host, &opts, Some(host)).is_none());
+        let riscv = Triple::new(Arch::Riscv64, Os::Linux, Env::Gnu);
+        assert!(distro_for(riscv, &opts, Some(host)).is_none());
+        let named = LinkOptions { sysroot: Some(PathBuf::from("/opt/root")), ..opts.clone() };
+        assert!(distro_for(arm, &named, Some(host)).is_none());
+        let pinned = LinkOptions {
+            pinned: Some("aarch64-linux-gnu.2.28".parse::<TargetTuple>().expect("a release")),
+            ..opts.clone()
+        };
+        assert!(distro_for(arm, &pinned, Some(host)).is_none());
+        // A sysroot of ours in the cache wins over the packages, because it is the one pinned.
+        let cache = usr.join("cache");
+        fs::create_dir_all(Sysroot::in_cache(&cache, arm.tuple()).lib()).expect("a sysroot");
+        let fetched = LinkOptions { cache: Some(cache), ..opts };
+        assert!(distro_for(arm, &fetched, Some(host)).is_none());
+        let _ = fs::remove_dir_all(&usr);
+    }
+
+    #[test]
+    fn the_host_takes_the_host_line_and_a_tree_the_user_named_takes_it_too() {
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let other = Triple::new(Arch::Riscv64, Os::Linux, Env::Musl);
+        assert!(cross_for(host, &cached(), Some(host)).is_none());
+        assert!(cross_for(other, &cached(), Some(host)).is_some());
+        // A tree somebody assembled and named is what `--sysroot` has always meant here, and the
+        // native line prefixes every path it decides with it.
+        let named = LinkOptions { sysroot: Some(PathBuf::from("/opt/root")), ..cached() };
+        assert!(cross_for(other, &named, Some(host)).is_none());
+        // A host this compiler cannot name is a host whose directories it should not be guessing at.
+        assert!(cross_for(other, &cached(), None).is_some());
+    }
+
+    #[test]
+    fn a_bsd_is_never_compiled_against_a_tree_in_the_cache() {
+        let linux = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        for os in [Os::FreeBsd(14), Os::NetBsd, Os::OpenBsd, Os::DragonFly] {
+            let target = Triple::new(Arch::X86_64, os, Env::None);
+            assert!(cross_for(target, &cached(), Some(linux)).is_none(), "{os:?}");
+            assert!(cross_for(target, &cached(), None).is_none(), "{os:?}");
+            let why = bsd_no_headers(target).expect("a BSD has a reason");
+            assert!(why.contains("--sysroot=<dir>"), "{why}");
+        }
+        assert_eq!(bsd_no_headers(linux), None);
+    }
+
+    #[test]
+    fn a_windows_host_compiles_for_itself_against_the_fetched_tree() {
+        // There is no `/usr/include` on Windows, so the host line would find no `stdio.h` at all.
+        let host = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let at =
+            cross_for(host, &cached(), Some(host)).expect("the cache is the only tree there is");
+        assert!(at.root().ends_with("x86_64-windows-gnu"), "{:?}", at.root());
+    }
+
+    #[test]
+    fn a_pinned_release_on_this_machines_own_target_is_a_cross_compile() {
+        // The case that used to be dropped on the floor. `--target=x86_64-linux-gnu.2.28` on an
+        // x86-64 glibc machine read that machine's headers and linked that machine's libc, and the
+        // release reached nothing, so what came out was a binary for whatever release the build
+        // machine happened to have. A pin is the one thing a person writes to say otherwise.
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let pinned = LinkOptions {
+            pinned: Some(
+                "x86_64-linux-gnu.2.28".parse::<TargetTuple>().expect("a spelling with a release"),
+            ),
+            ..cached()
+        };
+        let at = cross_for(host, &pinned, Some(host)).expect("a pin is a cross compile");
+        // And against the release's own directory, because the release is in the cache key: a tree
+        // produced for 2.28 and a tree produced for 2.44 are two trees and the path has to say which.
+        assert!(at.root().ends_with("x86_64-linux-gnu.2.28"), "{:?}", at.root());
+        // The release is the whole of the difference. The same command line without it is this
+        // machine, which is what every native compile has always been.
+        let bare = LinkOptions { pinned: None, ..cached() };
+        assert!(cross_for(host, &bare, Some(host)).is_none());
+    }
+
+    /// The loader stub names the file that the program names as its interpreter. Two tables give
+    /// the two names, and a difference would give a program that the kernel starts and that the
+    /// loader then cannot find its own library for.
+    #[test]
+    fn the_loader_stub_is_the_interpreter_the_line_names() {
+        for spelling in [
+            "x86_64-linux-gnu",
+            "i686-linux-gnu",
+            "aarch64-linux-gnu",
+            "armv7-linux-gnueabihf",
+            "riscv64-linux-gnu",
+            "powerpc64le-linux-gnu",
+            "s390x-linux-gnu",
+            "loongarch64-linux-gnu",
+        ] {
+            let tuple: TargetTuple = spelling.parse().expect("a tuple the table knows");
+            let path = rucc_sysroot::link::glibc_loader(tuple);
+            let name = rucc_stub::glibc::loader(tuple).expect("a port with a description");
+            assert_eq!(Path::new(path).file_name(), Some(std::ffi::OsStr::new(name)), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_glibc_cross_link_writes_its_stubs_beside_the_sysroot_once() {
+        let cache = std::env::temp_dir().join(format!("rucc-link-stubs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let pinned = LinkOptions {
+            cache: Some(cache.clone()),
+            pinned: Some("x86_64-linux-gnu.2.28".parse().expect("a spelling with a release")),
+            ..LinkOptions::default()
+        };
+        write_stubs(target, &pinned).expect("x86_64 glibc has a description");
+        let dir = cache.join("stubs").join("x86_64-linux-gnu.2.28");
+        let libc = dir.join("libc.so");
+        let bytes = fs::read(&libc).expect("libc.so was written");
+        assert!(bytes.starts_with(b"\x7fELF"));
+        assert!(dir.join("libm.so").is_file());
+        // The loader under its own name, and the script that the link line names.
+        assert!(dir.join("ld-linux-x86-64.so.2").is_file());
+        let script = fs::read_to_string(dir.join("ld.so")).expect("ld.so was written");
+        assert_eq!(script, "INPUT ( AS_NEEDED ( ld-linux-x86-64.so.2 ) )\n");
+        // 2.28 is before the release that emptied libpthread, so libpthread is real and has the
+        // names that later moved into libc.
+        assert!(dir.join("libpthread.so").is_file());
+        // The second time finds the same bytes and leaves the file alone, which is what keeps a
+        // linker in another build from ever reading one that is being replaced.
+        let before = fs::metadata(&libc).and_then(|m| m.modified()).expect("a time");
+        write_stubs(target, &pinned).expect("again");
+        let after = fs::metadata(&libc).and_then(|m| m.modified()).expect("a time");
+        assert_eq!(before, after);
+        // And nothing for a libc that is not glibc, whose sysroot has a real one in it.
+        let musl = LinkOptions {
+            cache: Some(cache.clone()),
+            pinned: Some("x86_64-linux-musl".parse().expect("musl")),
+            ..LinkOptions::default()
+        };
+        write_stubs(Triple::new(Arch::X86_64, Os::Linux, Env::Musl), &musl).expect("nothing");
+        assert!(!cache.join("stubs").join("x86_64-linux-musl").exists());
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn what_a_cross_link_searches_is_the_sysroot_and_not_this_machine() {
+        let dirs = search_dirs(&cached(), foreign());
+        // One directory, because that is what the line has, and the same one the line has, because
+        // `-print-search-dirs` is what a build system reads to write a link line of its own.
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        assert!(dirs[0].starts_with("/cache"), "{dirs:?}");
+        assert!(dirs[0].ends_with("lib"), "{dirs:?}");
+        // And what the user wrote still comes first, the way it does on the line itself.
+        let mine = LinkOptions { search: vec![PathBuf::from("/opt/mine")], ..cached() };
+        assert_eq!(search_dirs(&mine, foreign())[0], PathBuf::from("/opt/mine"));
+    }
+
+    #[test]
+    fn gnu_ld_is_not_looked_for_against_the_fetched_mingw_sysroot() {
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        assert_eq!(order(windows, &cached()), ["ld.lld", "lld"]);
+    }
+
+    #[test]
+    fn the_linker_looked_for_on_a_cross_link_is_one_that_can_cross() {
+        let names = cross_order(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
+        assert_eq!(names.first().map(String::as_str), Some("ld.lld"));
+        assert!(names.contains(&"aarch64-linux-gnu-ld".to_owned()), "{names:?}");
+        // mold links for the machine it is running on, and so does a distribution's own `ld`, so
+        // neither is a default here. `-fuse-ld=` is still there for somebody whose is different.
+        assert!(!names.iter().any(|name| name.contains("mold")), "{names:?}");
+        assert!(!names.contains(&"ld".to_owned()), "{names:?}");
+        // And the lookup the driver really does for a target that is not this machine.
+        assert_eq!(order(foreign(), &cached()), ["ld.lld", "lld"]);
+    }
+
+    #[test]
+    fn the_four_flags_become_the_five_modes_they_describe() {
+        let plain = LinkOptions::default();
+        assert_eq!(mode(&plain), LinkMode::Dynamic);
+        assert_eq!(
+            mode(&LinkOptions { pie: Some(false), ..plain.clone() }),
+            LinkMode::DynamicNoPie
+        );
+        assert_eq!(mode(&LinkOptions { is_static: true, ..plain.clone() }), LinkMode::Static);
+        let both = LinkOptions { is_static: true, pie: Some(true), ..plain.clone() };
+        assert_eq!(mode(&both), LinkMode::StaticPie);
+        assert_eq!(mode(&LinkOptions { shared: true, ..plain }), LinkMode::Shared);
+    }
+
+    #[test]
+    fn a_sysroot_that_has_not_been_built_is_named_before_anything_is_compiled() {
+        let opts = LinkOptions {
+            cache: Some(std::env::temp_dir().join("rucc-a-cache-nobody-filled")),
+            ..LinkOptions::default()
+        };
+        let error = preflight(foreign(), &opts).expect_err("nothing has built one");
+        let Error::Sysroot { dir, pinned, .. } = &error else { panic!("{error:?}") };
+        assert!(dir.ends_with("x86_64-none"), "{dir}");
+        // Nothing is pinned for that target, or for any target yet, so the message says that rather
+        // than naming a command that would not work.
+        assert!(!pinned, "nothing should be pinned for a bare metal target");
+        let said = error.to_string();
+        assert!(said.contains("pins none for it to fetch"), "{said}");
+    }
+
+    /// The other half of the same message, which is what a target this release does pin an artifact
+    /// for is told. Built by hand rather than through `preflight`, because what is being checked is
+    /// the message and not which targets `rucc_sysroot::artifact` happens to pin this release.
+    #[test]
+    fn a_sysroot_that_could_be_fetched_is_told_what_to_run() {
+        let said = Error::Sysroot {
+            target: "x86_64-linux-musl".to_owned(),
+            dir: "/somewhere/sysroots/x86_64-linux-musl".to_owned(),
+            pinned: true,
+        }
+        .to_string();
+        assert!(said.contains("`rucc --fetch x86_64-linux-musl`"), "{said}");
+        // And the other way out of it, because a person who has a tree already does not want a
+        // download.
+        assert!(said.contains("--sysroot=<dir>"), "{said}");
+    }
+
+    #[test]
+    fn a_link_against_this_machine_has_nothing_to_check_before_it_starts() {
+        // Its directories are looked for as the line is built, and one that is not there is simply
+        // one that is not offered, so there is no question to answer early.
+        assert!(preflight(linux(), &LinkOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn a_runtime_directory_that_is_not_on_this_machine_is_not_offered() {
+        let dirs = runtime_dirs(linux(), Some(Path::new("/definitely/not/a/sysroot")));
+        assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[test]
+    fn a_mingw_tree_named_with_sysroot_is_linked_the_way_the_fetched_one_is() {
+        // MSYS2's `/ucrt64`, as far as a link line reads it: the start file and the libraries in
+        // `lib`, and gcc's own runtime under a directory per version. tamnd/rucc#2573.
+        let tree = std::env::temp_dir().join(format!("rucc-link-ucrt64-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tree);
+        let lib = tree.join("lib");
+        let gcc = lib.join("gcc").join("x86_64-w64-mingw32");
+        for dir in [tree.join("include"), gcc.join("9.5.0"), gcc.join("14.2.0")] {
+            fs::create_dir_all(dir).expect("a scratch tree");
+        }
+        for file in ["crt2.o", "libmingw32.a", "libmsvcrt.a"] {
+            fs::write(lib.join(file), b"").expect("a file in lib");
+        }
+        for version in ["9.5.0", "14.2.0"] {
+            for file in ["crtbegin.o", "crtend.o", "libgcc.a"] {
+                fs::write(gcc.join(version).join(file), b"").expect("a file of gcc's");
+            }
+        }
+        let newest = gcc.join("14.2.0");
+        let shown = |path: PathBuf| path.display().to_string();
+
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        preflight(target, &opts).expect("the tree is one to link against");
+        let args = line(target, &opts, &one("a.o"), "a.exe").expect("a line for the named tree");
+        let at = |arg: &str| args.iter().position(|a| a == arg).unwrap_or_else(|| panic!("{arg}"));
+        assert_eq!(args[at("-m") + 1], "i386pep");
+        assert_eq!(args[at("--subsystem") + 1], "console");
+        assert!(args.contains(&format!("--sysroot={}", tree.display())), "{args:?}");
+        // The start file is the tree's, and gcc's `crtbegin.o` from its newest version follows it.
+        let crt2 = at(&shown(lib.join("crt2.o")));
+        assert_eq!(args[crt2 + 1], shown(newest.join("crtbegin.o")), "{args:?}");
+        assert!(crt2 < at("a.o"), "{args:?}");
+        // The tree's `lib` is searched, then gcc's directory, and nothing of the older gcc's.
+        assert!(at(&format!("-L{}", lib.display())) < at(&format!("-L{}", newest.display())));
+        assert!(!args.iter().any(|arg| arg.contains("9.5.0")), "{args:?}");
+        // The libraries are the ones the fetched tree's line names, out of this tree, after the
+        // objects, with ours last before `crtend.o` closes the line.
+        assert!(at("a.o") < at(&shown(lib.join("libmingw32.a"))), "{args:?}");
+        assert!(args.contains(&shown(lib.join("libmsvcrt.a"))), "{args:?}");
+        assert_eq!(args.last(), Some(&shown(newest.join("crtend.o"))), "{args:?}");
+        assert_eq!(args[args.len() - 2], shown(newest.join("libgcc.a")), "{args:?}");
+        assert!(args[args.len() - 3].ends_with("librucc_builtins.a"), "{args:?}");
+        // GNU ld reads the import libraries MSYS2 built for it, so it is looked for as well.
+        assert!(order(target, &opts).contains(&"x86_64-w64-mingw32-ld".to_owned()));
+        assert_eq!(search_dirs(&opts, target), [lib.clone(), newest]);
+
+        // A tree with no gcc in it is the same line without gcc's two files.
+        fs::remove_dir_all(lib.join("gcc")).expect("the gcc directory goes");
+        let args = line(target, &opts, &one("a.o"), "a.exe").expect("a line without gcc");
+        assert!(!args.iter().any(|arg| arg.contains("crtbegin") || arg.contains("crtend")));
+        assert!(args.contains(&shown(lib.join("crt2.o"))), "{args:?}");
+
+        // And without `--sysroot` the line is the cache's, as it always was.
+        let fetched = cross_line(target, &cached(), &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line for the fetched tree");
+        assert!(!fetched.iter().any(|arg| arg.contains("crtbegin")), "{fetched:?}");
+        assert!(!fetched.iter().any(|arg| arg.starts_with(&shown(tree.clone()))), "{fetched:?}");
+        let _ = fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn a_fetched_mingw_tree_takes_libgcc_from_the_mingw_gcc_on_this_machine() {
+        // What Debian's gcc-mingw-w64 leaves under /usr, two thread models of one version. The
+        // fetched tree has no gcc in it, and this is where the decimal routines come from then.
+        // tamnd/rucc#2145.
+        let usr = std::env::temp_dir().join(format!("rucc-link-mingw-usr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&usr);
+        let gcc = usr.join("lib/gcc/x86_64-w64-mingw32");
+        for version in ["13-posix", "13-win32"] {
+            fs::create_dir_all(gcc.join(version)).expect("a scratch gcc");
+            fs::write(gcc.join(version).join("libgcc.a"), b"").expect("a file of gcc's");
+        }
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { usr: Some(usr.clone()), ..cached() };
+        let libgcc = mingw_libgcc(target, &opts, None).expect("the host's mingw-w64 gcc");
+        assert!(libgcc.starts_with(&gcc) && libgcc.ends_with("libgcc.a"), "{libgcc:?}");
+        // A machine with no mingw-w64 gcc has none to give, and a Linux target never asks.
+        assert!(mingw_libgcc(target, &cached(), None).is_none());
+        assert!(mingw_libgcc(linux(), &opts, None).is_none());
+        let _ = fs::remove_dir_all(&usr);
+    }
+
+    fn freebsd() -> Triple {
+        Triple::new(Arch::X86_64, Os::FreeBsd(14), Env::None)
+    }
+
+    /// Whether this test runs on a BSD, where a BSD target with no sysroot is this machine.
+    fn on_a_bsd() -> bool {
+        Triple::host().is_some_and(|host| host.os.is_bsd())
+    }
+
+    #[test]
+    fn a_bsd_is_linked_by_its_own_line_and_not_by_the_one_of_the_cache() {
+        let root = a_machine("bsd-line", &["usr/lib/crt1.o"]);
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..cached() };
+        let args = line(freebsd(), &opts, &one("a.o"), "a.out").expect("a FreeBSD line");
+        assert_eq!(args[0], format!("--sysroot={}", root.display()));
+        assert!(args.windows(2).any(|pair| pair == ["-m", "elf_x86_64_fbsd"]), "{args:?}");
+        assert!(args.contains(&"/libexec/ld-elf.so.1".to_owned()), "{args:?}");
+        if !on_a_bsd() {
+            // Not the cache's line, which is a Linux one, and not a tree that is not there.
+            let Err(Error::Cross { why }) = line(freebsd(), &cached(), &one("a.o"), "a.out") else {
+                panic!("a FreeBSD link with no sysroot was not refused");
+            };
+            assert!(why.contains("--sysroot=<dir>"), "{why}");
+            // And not this machine's `ld`, which links for this machine.
+            assert!(!order(freebsd(), &cached()).contains(&"ld".to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_bsd_preflight_says_when_the_sysroot_is_not_a_bsd_tree() {
+        let root = a_machine("bsd-empty", &["etc/motd"]);
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..cached() };
+        let Err(Error::Cross { why }) = preflight(freebsd(), &opts) else {
+            panic!("a sysroot with no usr/lib was taken");
+        };
+        assert!(why.contains("no usr/lib"), "{why}");
+        let full = a_machine("bsd-full", &["usr/lib/crt1.o"]);
+        assert_eq!(preflight(freebsd(), &LinkOptions { sysroot: Some(full), ..cached() }), Ok(()));
+        let fixed =
+            LinkOptions { is_static: true, pie: Some(true), sysroot: Some(root), ..cached() };
+        assert!(matches!(preflight(freebsd(), &fixed), Err(Error::Cross { .. })));
+    }
+
+    #[test]
+    fn a_relocatable_bsd_link_names_the_machine_of_its_line() {
+        let opts = LinkOptions { relocatable: true, ..LinkOptions::default() };
+        let args = line(freebsd(), &opts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-m", "elf_x86_64_fbsd", "-r", "a.o"]);
+        let netbsd = Triple::new(Arch::Aarch64, Os::NetBsd, Env::None);
+        let args = line(netbsd, &opts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-r", "a.o"]);
+    }
+
+    /// A link for another machine with the binutils of the target in a `-B` directory, as
+    /// FreeBSD's build passes them, takes that `ld` and gives it GCC's whole line.
+    #[test]
+    #[cfg(unix)]
+    fn a_bsd_link_by_the_gnu_ld_of_a_b_directory_gets_the_line_of_gcc() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if Triple::host().is_some_and(|host| host.os.is_bsd()) {
+            return;
+        }
+        let root = a_machine("bsd-gnu-ld", &["usr/lib/crt1.o"]);
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("a directory");
+        let ld = bin.join("ld");
+        let says = |text: &str| {
+            fs::write(&ld, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
+            fs::set_permissions(&ld, fs::Permissions::from_mode(0o755)).expect("executable");
+        };
+        let arm = Triple::new(Arch::Aarch64, Os::FreeBsd(14), Env::None);
+        let opts = LinkOptions {
+            sysroot: Some(root.clone()),
+            prefixes: vec![bin.clone()],
+            no_builtins_lib: true,
+            ..LinkOptions::default()
+        };
+        says("GNU ld (GNU Binutils) 2.44");
+        assert_eq!(find(arm, &opts).expect("the ld of -B").path, ld);
+        let args = line(arm, &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|arg| arg == "-maarch64fbsd"), "{args:?}");
+        let netbsd = Triple::new(Arch::X86_64, Os::NetBsd, Env::None);
+        let parts = LinkOptions { relocatable: true, ..opts.clone() };
+        let args = line(netbsd, &parts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-dc", "-dp", "-r", "a.o"]);
+
+        // The same file saying it is lld gets the line for lld.
+        says("LLD 19.1.7 (compatible with GNU linkers)");
+        let args = line(arm, &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|arg| arg == "-maarch64fbsd"), "{args:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bsd_searches_usr_lib_of_its_tree() {
+        let root = a_machine("bsd-search", &["usr/lib/gcc80/libgcc.a"]);
+        let link = LinkOptions {
+            sysroot: Some(root.clone()),
+            search: vec![PathBuf::from("/opt/lib")],
+            // No `-B` directory, which would come before the tree's. See `bsd::dirs`.
+            prefixes: Vec::new(),
+            ..cached()
+        };
+        let dragonfly = Triple::new(Arch::X86_64, Os::DragonFly, Env::None);
+        let gcc80 = root.join("usr/lib/gcc80");
+        assert_eq!(
+            search_dirs(&link, dragonfly),
+            [PathBuf::from("/opt/lib"), gcc80.clone(), root.join("usr/lib")]
+        );
+        assert_eq!(find_in_search(&link, dragonfly, "libgcc.a"), Some(gcc80.join("libgcc.a")));
+        assert_eq!(
+            search_dirs(&link, freebsd()),
+            [PathBuf::from("/opt/lib"), root.join("usr/lib")]
+        );
+    }
+}

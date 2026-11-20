@@ -1,0 +1,3981 @@
+//! The verifier: whether a module is one the rest of the compiler may believe.
+//!
+//! Design: `spec/08-ir.md` section 8.7.
+//!
+//! This is not a debug aid. It runs after every pass in a debug build, after every pass in CI,
+//! and on demand with `-fverify-ir`, and a pass that produces IR failing it is a build failure
+//! rather than a warning. The reason is that a pass which breaks an invariant does not usually
+//! produce wrong output there and then. It produces IR that a later pass reads under an
+//! assumption that no longer holds, and the wrong instruction comes out somewhere else
+//! entirely. Finding it here is the difference between a two-line diagnosis and a week.
+//!
+//! # What it checks
+//!
+//! Dominance, so that every use is reached by its definition. Block parameter arity and types
+//! against every branch that arrives. Terminator placement. Operand and result types, by the
+//! rules in section 8.2. That no instruction refers to a value whose definition has been taken
+//! out of the function. That `alloca` is in the entry block unless its size is dynamic. That an
+//! ordering is one the operation can be asked for. That the metadata is a tree. That every flag
+//! is one the opcode reads. That every block is reachable. There is no separate rule that `asm
+//! goto` ends its block, because inline assembly with labels is a terminator and terminator
+//! placement is the rule that says so.
+//!
+//! # What it does not check
+//!
+//! Whether a name resolves. A module is one translation unit and a symbol it calls or takes the
+//! address of is usually defined in another, so an unresolved name is the linker's question,
+//! not this one. What is checked is the part that is here: where a direct call names a function
+//! this module also holds, the signature at the call has to be the signature of that function.
+//!
+//! Side table indices are trusted. A `Sig` or the index of a `MemInfo` can only come from the
+//! method that appended it, so a bad one is not a thing a pass can produce by accident. Values
+//! and blocks are different, because a pass builds those by hand from indices it worked out
+//! itself, so those are bounds-checked before anything else looks at them.
+//!
+//! # Errors, plural
+//!
+//! Every problem is reported, not just the first. The parser stops at the first thing that does
+//! not add up because a malformed text has one author and one mistake. A module failing
+//! verification was produced by a pass, and the shape of the whole failure is what says which
+//! rewrite went wrong.
+
+use std::fmt;
+
+use rucc_base::Interner;
+use rucc_target::{Slot, TargetInfo};
+
+use crate::func::Func;
+use crate::inst::{
+    Abi, Block, CallInfo, Def, Inst, MetaNode, Param, PlaneNode, Signature, VaInfo, Value,
+};
+use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
+use crate::{Extra, Facts, Float, MemOrder, Meta, Opcode, PrefetchHint, Type};
+
+/// One thing wrong with a module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyError {
+    /// What it is about, as `@sum block1 add`, or `@counter` for a global, or `!1` for a
+    /// metadata node.
+    pub at: String,
+    /// What is wrong with it.
+    pub message: String,
+}
+
+impl fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.at, self.message)
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
+/// Checks a whole module.
+///
+/// # Errors
+///
+/// Gives back everything wrong with it, in the order the module is walked, which is the globals
+/// then the aliases then the functions then the metadata.
+pub fn verify(module: &Module, names: &Interner) -> Result<(), Vec<VerifyError>> {
+    let mut verifier = Verifier::new(module, names);
+    verifier.module();
+    verifier.finish()
+}
+
+/// Checks one function, and nothing else in the module it is in.
+///
+/// This is what a pass calls after rewriting a function, since walking the whole module after
+/// every function of it would be quadratic.
+///
+/// # Errors
+///
+/// Gives back everything wrong with that function.
+pub fn verify_func<'a>(
+    module: &'a Module,
+    func: &'a Func,
+    names: &'a Interner,
+) -> Result<(), Vec<VerifyError>> {
+    let mut verifier = Verifier::new(module, names);
+    verifier.func(func);
+    verifier.finish()
+}
+
+/// Checking one module.
+struct Verifier<'a> {
+    module: &'a Module,
+    names: &'a Interner,
+    errors: Vec<VerifyError>,
+    /// Where the walk is, which is what an error is labelled with. Built into a string only
+    /// when something is actually wrong, because the common case is that nothing is.
+    func: Option<&'a Func>,
+    block: Option<Block>,
+    inst: Option<Inst>,
+}
+
+impl<'a> Verifier<'a> {
+    fn new(module: &'a Module, names: &'a Interner) -> Self {
+        Verifier { module, names, errors: Vec::new(), func: None, block: None, inst: None }
+    }
+
+    fn finish(self) -> Result<(), Vec<VerifyError>> {
+        if self.errors.is_empty() { Ok(()) } else { Err(self.errors) }
+    }
+
+    // The module.
+
+    fn module(&mut self) {
+        let implied = DataLayout::for_target(&TargetInfo::for_tuple(self.module.tuple));
+        if self.module.datalayout != implied {
+            self.at(
+                format!("@{}", self.names.resolve(self.module.name)),
+                format!(
+                    "the datalayout is `{}` and {} implies `{implied}`",
+                    self.module.datalayout, self.module.tuple
+                ),
+            );
+        }
+
+        for id in self.module.globals() {
+            self.global(&self.module[id]);
+        }
+        for id in self.module.aliases() {
+            self.alias(&self.module[id]);
+        }
+        for id in self.module.funcs() {
+            self.func(&self.module[id]);
+        }
+        self.metadata();
+    }
+
+    fn global(&mut self, global: &Global) {
+        let at = format!("@{}", self.names.resolve(global.name));
+        if !global.align.is_power_of_two() {
+            self.at(
+                at.clone(),
+                format!("an alignment is a power of two and this is {}", global.align),
+            );
+        }
+        // A global with no image is a declaration of something another module defines, and
+        // there is nothing here to check about it. It may be constant: `extern const char
+        // *const sys_errlist[];` is a declaration of an object that lives in the library's
+        // read only data, and whether writing through a pointer to it is undefined is a fact
+        // about the object rather than about which module holds the bytes.
+        let Some(init) = global.init else { return };
+        let mut size = 0;
+        for &datum in &self.module[init] {
+            size += datum.size(self.module);
+            // An image is bytes and a scalar in one has to say how many it takes. `ptr` does
+            // not: the width of an address is the target's and not the type's, which is what
+            // makes a `ptr` here a scalar of no size that silently contributes nothing. An
+            // address in an image is [`Datum::Addr`], and a number the program wrote as one is
+            // the integer it is.
+            if let Datum::Scalar { ty, .. } = datum {
+                if ty.bits() == 0 {
+                    self.at(
+                        at.clone(),
+                        format!("a scalar in an image has a width and {ty} has none"),
+                    );
+                }
+            }
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = datum
+            {
+                let bytes = self.module[reloc].size;
+                if !matches!(bytes, 1 | 2 | 4 | 8) {
+                    self.at(
+                        at.clone(),
+                        format!(
+                            "an address is written as 1, 2, 4 or 8 bytes and this one as {bytes}"
+                        ),
+                    );
+                }
+            }
+        }
+        if size != global.size {
+            self.at(at, format!("the image is {size} bytes and the global is {}", global.size));
+        }
+    }
+
+    fn alias(&mut self, alias: &Alias) {
+        let at = format!("@{}", self.names.resolve(alias.name));
+        if alias.name == alias.target {
+            self.at(at, "an alias to itself");
+            return;
+        }
+        // Only what this module holds is checked. A target defined in another object is what
+        // an alias to a weak symbol looks like, and whether it resolves is the linker's answer.
+        let Some(found) = self.module.lookup(alias.target) else { return };
+        if alias.kind == AliasKind::IFunc && !matches!(found, SymbolRef::Func(_)) {
+            self.at(at, "an ifunc resolves through a function and this target is not one");
+        }
+    }
+
+    fn metadata(&mut self) {
+        for node in self.module.metadata() {
+            let at = format!("!{}", node.raw());
+            if let Some(named) = self.module[node].points_at() {
+                if named.raw() >= node.raw() {
+                    // A parent that comes later cannot be a tree, and a parent that is the node
+                    // itself is the cycle the walk up a TBAA tree would never leave. A plane
+                    // entry names a type rather than a parent and is under the same rule, so
+                    // that the table is read once from the top and nothing in it looks forward.
+                    self.at(
+                        at.clone(),
+                        format!(
+                            "a metadata node names one that comes before it and this one is !{}",
+                            named.raw()
+                        ),
+                    );
+                    continue;
+                }
+                if self.module[node].plane().is_some() && self.module[named].plane().is_some() {
+                    // A plane entry is a type or it is one of the three names, and one that
+                    // named another plane entry would be neither.
+                    self.at(
+                        at.clone(),
+                        format!("a plane entry names a type and !{} is a plane entry", named.raw()),
+                    );
+                }
+            }
+            if let MetaNode::Plane(PlaneNode::PointerSlot(k)) = self.module[node] {
+                // Which byte of a pointer it is, so a byte the target's pointers do not have is
+                // a plane the runtime could never write.
+                let bytes = self.module.datalayout.pointer_bits / 8;
+                if u32::from(k) >= bytes {
+                    self.at(
+                        at,
+                        format!("a pointer on this target is {bytes} bytes and this is byte {k}"),
+                    );
+                }
+            }
+        }
+    }
+
+    // The function.
+
+    fn func(&mut self, func: &'a Func) {
+        self.func = Some(func);
+        self.block = None;
+        self.inst = None;
+
+        if let Some((one, other)) = func.attrs.conflict() {
+            self.error(format!("`{one}` and `{other}` cannot both be true of a function"));
+        }
+        // The arguments `alloc_size` names are read off every call to the function, so one past
+        // the parameters is an index the optimizer would take out of a call that does not have it.
+        if let Some(alloc) = func.attrs.alloc_size {
+            let params = func.signature().params.len();
+            for number in [Some(alloc.size), alloc.count].into_iter().flatten() {
+                if number == 0 || usize::from(number) > params {
+                    self.error(format!(
+                        "`alloc_size` names argument {number} of a function that takes {params}"
+                    ));
+                }
+            }
+        }
+        // The part in front of the label is part of the total, and the code generator takes the one
+        // from the other.
+        if let Some((total, before)) = func.patchable.filter(|&(total, before)| before > total) {
+            self.error(format!("a patchable entry of {total} cannot have {before} in front"));
+        }
+        if func.is_declaration() {
+            self.func = None;
+            return;
+        }
+        // Everything after this indexes with values and blocks read out of the function, so
+        // nothing does until they are all known to be in range.
+        if !self.bounds(func) {
+            self.func = None;
+            return;
+        }
+
+        for signature in func.signatures() {
+            self.signature(signature);
+        }
+
+        let entry = func.entry().expect("a function with blocks has a first one");
+        let params: Vec<Type> = func[entry].params.iter().map(|&value| func[value].ty).collect();
+        let want: Vec<Type> = func.signature().param_types().collect();
+        if params != want {
+            self.error(format!(
+                "the entry block takes {} and the signature says {}",
+                types(&params),
+                types(&want)
+            ));
+        }
+
+        let doms = Doms::new(func);
+        let layout = Layout::new(func);
+        for block in func.blocks() {
+            self.block = Some(block);
+            self.block(func, block, &doms, &layout);
+        }
+        self.block = None;
+        self.inst = None;
+        self.mem_chain(func);
+        self.capabilities(func);
+        self.facts(func, &doms, &layout);
+        self.func = None;
+    }
+
+    /// What the ABI asks of a signature's parameters agrees with what they are.
+    ///
+    /// None of this is about the target. Whether a `struct` of twenty four bytes travels as its
+    /// own bytes or as the address of a copy is the classification's answer and this has no
+    /// opinion on it, but a `byval` on something that is not a pointer describes no call on any
+    /// target, and neither does a second `sret`.
+    fn signature(&mut self, signature: &Signature) {
+        for (index, param) in signature.params.iter().enumerate() {
+            let at = format!("parameter {}", index + 1);
+            self.abi(&at, param);
+            match param.abi {
+                Abi::Sret { .. } if index > 0 => {
+                    // It is the address the return value goes to, so it arrives before anything
+                    // the function was called with. A later one is a different calling
+                    // convention wearing the same word.
+                    self.error("sret is the first parameter and this one is not");
+                }
+                Abi::Sret { .. } if !signature.returns.is_empty() => {
+                    self.error("a signature returning through sret returns nothing else");
+                }
+                Abi::Chain if index + 1 != signature.params.len() => {
+                    // The chain of a nested function comes after everything a C caller names,
+                    // so the parameters in front of it are where they would be without it.
+                    self.error("chain is the last parameter and this one is not");
+                }
+                Abi::Chain if signature.variadic => {
+                    // On SysV the register the chain travels in is the one that says how many
+                    // vector registers a variadic call used, so the two cannot meet.
+                    self.error("a variadic signature cannot take a chain");
+                }
+                _ => {}
+            }
+        }
+        for (index, param) in signature.returns.iter().enumerate() {
+            let at = format!("result {}", index + 1);
+            self.abi(&at, param);
+            if param.abi.indirect() {
+                // A return value too large for the registers comes back through an `sret`
+                // parameter, which is a parameter and is checked as one.
+                self.error(format!("{at} travels indirectly and a result cannot"));
+            }
+        }
+    }
+
+    /// What a call says about the arguments its signature does not name.
+    ///
+    /// The list is empty when they all travel as the values in hand, so what is checked is the
+    /// other case: there is one entry for each of them, the call is variadic because nothing
+    /// else has such an argument, and each entry describes something an argument can do. An
+    /// `sret` cannot be one of them, since the space for a return value arrives first and the
+    /// first argument is one the signature names.
+    fn varargs(
+        &mut self,
+        func: &'a Func,
+        info: &CallInfo,
+        passed: usize,
+        arg: impl Fn(usize) -> Type,
+    ) {
+        let varargs = &func[info.varargs];
+        if varargs.is_empty() {
+            return;
+        }
+        let named = func[info.signature].params.len();
+        if !func[info.signature].variadic {
+            self.error("this call is not variadic and says how a variadic argument travels");
+            return;
+        }
+        if varargs.len() != passed.saturating_sub(named) {
+            self.error(format!(
+                "the call passes {} arguments the signature does not name and says how {} travel",
+                passed.saturating_sub(named),
+                varargs.len()
+            ));
+            return;
+        }
+        for (index, &abi) in varargs.iter().enumerate() {
+            let at = format!("argument {}", named + index + 1);
+            if matches!(abi, Abi::Sret { .. } | Abi::Chain) {
+                self.error(format!("{at} is an sret or a chain and only a parameter can be one"));
+                continue;
+            }
+            self.abi(&at, &Param { ty: arg(index + named), abi });
+        }
+    }
+
+    /// One parameter's attribute against its type.
+    fn abi(&mut self, at: &str, param: &Param) {
+        if param.ty.is_mem() {
+            // Memory is a value inside a function and it stops at the call. What a call does to
+            // it is what the callee's attributes say, per document 08.4, and a function that
+            // passed a version of memory to another would be claiming something else.
+            self.error(format!("{at} is memory, and no function takes or returns memory"));
+        }
+        if param.ty.is_cap() {
+            // Not a rule about this ABI or that one. A capability is metadata the instrumentation
+            // keeps beside a pointer, per `spec/safe-memory/05-representation.md` section 5.2, and
+            // a signature that carried one would be a calling convention only instrumented code
+            // could use, which is the thing that specification spends document 10 avoiding.
+            self.error(format!("{at} is a capability and a capability does not cross a call"));
+        }
+        match param.abi {
+            Abi::Plain => {}
+            Abi::Chain => {
+                if !param.ty.is_ptr() {
+                    self.error(format!("{at} is a chain and {} is not a pointer", param.ty));
+                }
+            }
+            Abi::Sext | Abi::Zext => {
+                if !param.ty.is_int() || param.ty.is_vector() {
+                    self.error(format!("{at} is extended and {} is not an integer", param.ty));
+                }
+            }
+            Abi::ByVal { size, align, .. } | Abi::Sret { size, align, .. } => {
+                if !param.ty.is_ptr() {
+                    self.error(format!(
+                        "{at} travels indirectly and {} is not a pointer",
+                        param.ty
+                    ));
+                }
+                if !align.is_power_of_two() {
+                    self.error(format!("an alignment is a power of two and this is {align}"));
+                }
+                if size == 0 {
+                    self.error(format!("{at} travels indirectly and has no size"));
+                }
+            }
+        }
+    }
+
+    /// Every value and every block an instruction names is one the function has.
+    ///
+    /// This is separate and comes first because everything else reads a `ValueData` or a
+    /// `BlockData` out of a table, and an index past the end of one is a panic rather than a
+    /// diagnosis.
+    fn bounds(&mut self, func: &'a Func) -> bool {
+        let counts = func.counts();
+        let before = self.errors.len();
+        for block in func.blocks() {
+            self.block = Some(block);
+            for &value in &func[block].params {
+                if value.index() >= counts.values {
+                    self.error(format!(
+                        "parameter %{} is not a value of this function",
+                        value.raw()
+                    ));
+                }
+            }
+            for inst in func.insts(block) {
+                self.inst = Some(inst);
+                for &value in &func[func[inst].args] {
+                    if value.index() >= counts.values {
+                        self.error(format!("%{} is not a value of this function", value.raw()));
+                    }
+                }
+                for value in func[inst].results() {
+                    if value.index() >= counts.values {
+                        self.error(format!("%{} is not a value of this function", value.raw()));
+                    }
+                }
+                for call in func.successors(inst) {
+                    if call.block.index() >= counts.blocks {
+                        self.error(format!(
+                            "block{} is not a block of this function",
+                            call.block.raw()
+                        ));
+                    }
+                    for &value in &func[call.args] {
+                        if value.index() >= counts.values {
+                            self.error(format!("%{} is not a value of this function", value.raw()));
+                        }
+                    }
+                }
+            }
+            self.inst = None;
+        }
+        self.block = None;
+        self.errors.len() == before
+    }
+
+    fn block(&mut self, func: &'a Func, block: Block, doms: &Doms, layout: &Layout) {
+        if !doms.reaches(block) {
+            self.error("this block is not reachable and has not been deleted");
+        }
+        if block == func.entry().expect("checked in func") {
+            for other in func.blocks() {
+                let last = func[other].last;
+                if last.is_some_and(|inst| func.successors(inst).any(|call| call.block == block)) {
+                    self.error("the entry block is branched to, and it takes the arguments");
+                }
+            }
+        }
+
+        let mut seen_terminator = false;
+        for inst in func.insts(block) {
+            self.inst = Some(inst);
+            if seen_terminator {
+                self.error("this comes after the block's terminator");
+            }
+            seen_terminator |= func.is_terminator(inst);
+            self.inst(func, inst, doms, layout);
+        }
+        self.inst = None;
+        if !seen_terminator {
+            self.error("this block does not end in a terminator");
+        }
+    }
+
+    fn inst(&mut self, func: &'a Func, inst: Inst, doms: &Doms, layout: &Layout) {
+        let data = &func[inst];
+        let opcode = data.opcode;
+
+        let stray = data.flags.without(crate::Flags::legal_on(opcode));
+        if !stray.is_empty() {
+            let names: Vec<&str> = stray.iter().map(|(_, name)| name).collect();
+            self.error(format!("{} does not read `{}`", opcode.name(), names.join("`, `")));
+        }
+        // A `ptr_add` may say how long the member it is the address of is, and may say nothing.
+        let member = opcode == Opcode::PtrAdd && data.extra.marked();
+        if data.extra.kind() != opcode.extra_kind() && !member {
+            // An instruction carrying some other opcode's payload prints as text the parser
+            // cannot read, so this is caught here rather than found as a round trip failure.
+            self.error(format!(
+                "{} carries {} and this one carries {}",
+                opcode.name(),
+                opcode.extra_kind().name(),
+                data.extra.kind().name()
+            ));
+        }
+        if let Some(want) = opcode.results() {
+            // An instruction that has been threaded onto the memory chain produces one more
+            // than its opcode says, which is the new version of memory. A `mem_entry` is the
+            // one whose memory is not extra, because memory is all it produces.
+            let want = want + u8::from(extra_mem(func, inst));
+            if want != data.results {
+                self.error(format!(
+                    "{} produces {want} values and this one produces {}",
+                    opcode.name(),
+                    data.results
+                ));
+            }
+        }
+
+        if let Extra::Node(at) = data.extra {
+            if at.index() >= self.module.counts().metadata {
+                self.error(format!("!{} is not a metadata node of this module", at.raw()));
+            } else {
+                self.names_the_right_node(opcode, at);
+            }
+        }
+
+        self.uses(func, inst, doms, layout);
+        self.branches(func, inst);
+        self.memory(func, inst);
+        self.mem_ssa(func, inst);
+        self.shape(func, inst);
+    }
+
+    /// Every use is reached by its definition.
+    fn uses(&mut self, func: &'a Func, inst: Inst, doms: &Doms, layout: &Layout) {
+        let block = layout.block_of(inst).expect("walking the blocks");
+        let check = |verifier: &mut Self, value: Value| match func[value].def {
+            Def::Param { block: def, index } => {
+                // Where a value says it comes from is a record the value keeps, and a pass that
+                // takes a parameter out leaves that record behind rather than paying to clear it.
+                // So the block has to be asked whether the parameter is still one of its own, and
+                // dominating a block it is no longer a parameter of proves nothing. This is the
+                // check that was missing when a use with no definition reached the printer, which
+                // was issue 1016.
+                let at = func[def].params.get(index as usize).copied();
+                if at != Some(value) {
+                    verifier.error(format!(
+                        "%{} is a parameter block{} no longer has",
+                        value.raw(),
+                        def.raw()
+                    ));
+                } else if !doms.dominates(def, block) {
+                    verifier.error(format!(
+                        "%{} arrives at block{} and does not reach here",
+                        value.raw(),
+                        def.raw()
+                    ));
+                }
+            }
+            Def::Result { inst: def, .. } => {
+                let Some(def_block) = layout.block_of(def) else {
+                    verifier.error(format!(
+                        "%{} is produced by an instruction that is not in the function",
+                        value.raw()
+                    ));
+                    return;
+                };
+                let reaches = if def_block == block {
+                    layout.position(def) < layout.position(inst)
+                } else {
+                    doms.dominates(def_block, block)
+                };
+                if !reaches {
+                    verifier.error(format!(
+                        "%{} is produced in block{} and does not reach here",
+                        value.raw(),
+                        def_block.raw()
+                    ));
+                }
+            }
+        };
+        for &value in &func[func[inst].args] {
+            check(self, value);
+        }
+        for call in func.successors(inst) {
+            for &value in &func[call.args] {
+                check(self, value);
+            }
+        }
+    }
+
+    /// Every branch passes what the block it goes to takes.
+    fn branches(&mut self, func: &'a Func, inst: Inst) {
+        if func[inst].opcode == Opcode::BlockAddr {
+            // The one instruction that names a block without arriving at it, so the block's
+            // parameters are nothing to do with it. That it passes no arguments is checked
+            // with the rest of its shape.
+            return;
+        }
+        for call in func.successors(inst) {
+            let params = &func[call.block].params;
+            let args = &func[call.args];
+            if params.len() != args.len() {
+                self.error(format!(
+                    "block{} takes {} arguments and this branch passes {}",
+                    call.block.raw(),
+                    params.len(),
+                    args.len()
+                ));
+                continue;
+            }
+            for (index, (&param, &arg)) in params.iter().zip(args).enumerate() {
+                let (want, got) = (func[param].ty, func[arg].ty);
+                if want != got {
+                    self.error(format!(
+                        "argument {} to block{} is {want} and this one is {got}",
+                        index + 1,
+                        call.block.raw()
+                    ));
+                }
+            }
+        }
+        if let Extra::Switch(info) = func[inst].extra {
+            let switch = &func[info];
+            let targets = &func[switch.targets];
+            let cases = &func[switch.cases];
+            if targets.len() != cases.len() + 1 {
+                self.error(format!(
+                    "a switch has one target per case and a default, and this one has {} targets for {} cases",
+                    targets.len(),
+                    cases.len()
+                ));
+            }
+            for (index, case) in cases.iter().enumerate() {
+                if cases[..index].contains(case) {
+                    self.error("two cases of this switch have the same value");
+                }
+            }
+        }
+    }
+
+    /// Whether a node reference is to the kind of node the instruction reads.
+    ///
+    /// The two type plane instructions read a plane entry and everything else reads an aliasing
+    /// node. They share the field because they share the table, and an instruction handed the
+    /// wrong kind would either ask the aliasing tree a question about `no_type` or walk a plane
+    /// entry as though it had a parent.
+    fn names_the_right_node(&mut self, opcode: Opcode, at: Meta) {
+        let wants_plane = matches!(opcode, Opcode::CheckType | Opcode::MetaType);
+        let is_plane = self.module[at].plane().is_some();
+        if wants_plane != is_plane {
+            let (asked, got) = if wants_plane {
+                ("a plane entry", "an aliasing node")
+            } else {
+                ("an aliasing node", "a plane entry")
+            };
+            self.error(format!("{} names {asked} and !{} is {got}", opcode.name(), at.raw()));
+        }
+    }
+
+    /// What an access says about itself.
+    fn memory(&mut self, func: &'a Func, inst: Inst) {
+        let opcode = func[inst].opcode;
+        let info = match func[inst].extra {
+            Extra::Mem(at) => func[at],
+            Extra::Rmw(_, at) => func[at],
+            Extra::VaObject(at) => {
+                let object = func[at];
+                self.slots(func, object);
+                func[object.mem]
+            }
+            Extra::Order(order) => {
+                if !order.is_valid_for_rmw() {
+                    self.error("a fence is not a fence unless it orders something");
+                }
+                return;
+            }
+            Extra::Question(kind) => {
+                if kind > 7 {
+                    self.error(format!("an object size question is 0 to 7 and this is {kind}"));
+                }
+                return;
+            }
+            Extra::Member(_) | Extra::Array(_) | Extra::Trailing(_) => return,
+            Extra::Counted(counter) => {
+                if !matches!(counter.width, 1 | 2 | 4 | 8) {
+                    self.error(format!(
+                        "a count is 1, 2, 4 or 8 bytes and this is {}",
+                        counter.width
+                    ));
+                }
+                return;
+            }
+            Extra::Prefetch(hint) => {
+                if !hint.is_valid() {
+                    self.error(format!(
+                        "a locality is nothing above {} and this is {}",
+                        PrefetchHint::MOST,
+                        hint.locality
+                    ));
+                }
+                return;
+            }
+            _ => return,
+        };
+        if !info.align.is_power_of_two() {
+            self.error(format!("an alignment is a power of two and this is {}", info.align));
+        }
+        if let Some(tbaa) = info.tbaa {
+            if tbaa.index() >= self.module.counts().metadata {
+                self.error(format!("!{} is not a metadata node of this module", tbaa.raw()));
+            } else {
+                self.names_the_right_node(opcode, tbaa);
+            }
+        }
+        if info.owns != 0 && !matches!(opcode, Opcode::Store | Opcode::AtomicStore) {
+            // Only a store records anything into the init plane, so the number is either on the
+            // wrong instruction or means something the reader of it will not do.
+            self.error(format!(
+                "a {} owns no padding, since only a store records any",
+                opcode.name()
+            ));
+        }
+        if info.restrict.clique == 0 && info.restrict.base != 0 {
+            // A base outside any scope disambiguates nothing and reads as though it did, so it
+            // is either a lowering bug or a hand-written function that means something else.
+            self.error(format!(
+                "restrict base {} is in no clique, and a base means nothing without one",
+                info.restrict.base
+            ));
+        }
+        let ok = match opcode {
+            Opcode::AtomicLoad => info.order.is_valid_for_load(),
+            Opcode::AtomicStore => info.order.is_valid_for_store(),
+            Opcode::AtomicRmw | Opcode::Cmpxchg => info.order.is_valid_for_rmw(),
+            // Everything else is the non-atomic form, and the atomic form is a different
+            // opcode, so an ordering here is one somebody meant to put on that one.
+            _ => info.order == MemOrder::NotAtomic,
+        };
+        if !ok {
+            self.error(format!("{} cannot be asked for {}", opcode.name(), info.order));
+        }
+        // A bulk operation that carries its length as an operand says zero here, because a number
+        // beside an operand saying the same thing is two answers that can disagree. So zero is the
+        // mistake on the one that has no operand and the shape on the one that has.
+        if matches!(opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset)
+            && info.size == 0
+            && func.bulk(inst).is_none_or(|bulk| bulk.length.is_none())
+        {
+            self.error(format!("{} moves no bytes", opcode.name()));
+        }
+    }
+
+    /// The memory chain, where the function has one.
+    ///
+    /// Design: `spec/optimizer/09-memory-ssa.md`. Memory is a value of type `mem`, it arrives on
+    /// an instruction as the last operand and leaves as the last result, and a memory phi is an
+    /// ordinary parameter of a block. That is the whole representation, and these are the rules
+    /// that make it mean what section 9.6 says it means.
+    fn mem_ssa(&mut self, func: &'a Func, inst: Inst) {
+        let opcode = func[inst].opcode;
+        let takes = func.mem_in(inst).is_some();
+        let gives = func.mem_out(inst).is_some();
+
+        if takes && !opcode.touches_memory() {
+            // Threading an instruction that does not read or write memory onto the chain puts a
+            // barrier where there is nothing to order, and every walk past it stops early.
+            self.error(format!(
+                "{} does not touch memory and is on the memory chain",
+                opcode.name()
+            ));
+        }
+        if gives && !opcode.writes_memory() && opcode != Opcode::MemEntry {
+            self.error(format!(
+                "{} does not write memory and produces a new version of it",
+                opcode.name()
+            ));
+        }
+        if opcode.writes_memory() && takes != gives {
+            // A write is where one version of memory ends and the next begins, so it is on the
+            // chain at both ends or at neither. Half of it is a chain with a hole in it.
+            self.error(format!(
+                "{} takes {} and produces {}, and a write does both or neither",
+                opcode.name(),
+                if takes { "memory" } else { "no memory" },
+                if gives { "a new version" } else { "none" }
+            ));
+        }
+
+        // Memory goes to the next instruction on the chain and to the blocks a branch arrives
+        // at, and nowhere else. Anything else reading one is arithmetic on a thing that has no
+        // bits, and it would keep a version alive somewhere the walk does not look.
+        let args = &func[func[inst].args];
+        let ordinary = args.len() - usize::from(takes);
+        for (index, &arg) in args[..ordinary].iter().enumerate() {
+            if func[arg].ty.is_mem() {
+                self.error(format!(
+                    "%{} is memory and operand {} of {} is not the memory operand",
+                    arg.raw(),
+                    index + 1,
+                    opcode.name()
+                ));
+            }
+        }
+    }
+
+    /// The memory chain over a whole function, which is the part no single instruction can see.
+    ///
+    /// Memory is all or nothing. Either every instruction that touches it is on the chain or none
+    /// of them is, because a walk that reaches an instruction with no memory operand cannot tell
+    /// whether that instruction was left off the chain or does not belong on it, and the honest
+    /// answer at that point is that the chain says nothing about this function at all. Section 9.6
+    /// gives this as the main argument for the explicit operand over a side table: a side table
+    /// has no place to write down that it is incomplete, and this does.
+    fn mem_chain(&mut self, func: &'a Func) {
+        let mut entries = Vec::new();
+        let mut on = Vec::new();
+        let mut off = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if func[inst].opcode == Opcode::MemEntry {
+                    entries.push((block, inst));
+                } else if func[inst].opcode.touches_memory() {
+                    if func.carries_mem(inst) { &mut on } else { &mut off }.push((block, inst));
+                }
+            }
+        }
+
+        if let Some(&(block, inst)) = entries.get(1) {
+            self.block = Some(block);
+            self.inst = Some(inst);
+            self.error("a function starts with one version of memory and this is a second one");
+        }
+        if on.is_empty() {
+            if let Some(&(block, inst)) = entries.first() {
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error("nothing in this function is on the memory chain, and this starts one");
+            }
+        } else {
+            if entries.is_empty() {
+                let (block, inst) = on[0];
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error("this is on the memory chain and the function has no mem_entry");
+            }
+            if let Some(&(block, inst)) = off.first() {
+                self.block = Some(block);
+                self.inst = Some(inst);
+                self.error(format!(
+                    "{} touches memory and is not on the chain, and the rest of this function is",
+                    func[inst].opcode.name()
+                ));
+            }
+        }
+        self.block = None;
+        self.inst = None;
+    }
+
+    /// Where a capability comes from.
+    ///
+    /// Six instructions make one, per `spec/safe-memory/06-instrumentation.md` section 6.2.2, and
+    /// nothing else may. That is the whole rule and it is worth stating separately from the shape
+    /// rules because it is about the type rather than about any one opcode: a `bitcast` that named
+    /// `cap` as its result, or a `load` of one, would be a way to conjure a capability out of a
+    /// value that has none of the provenance a capability stands for, and the checks downstream
+    /// would then be comparing an address against bounds nobody established.
+    ///
+    /// A block parameter may be one. Two paths that each hold a capability meet at a block and the
+    /// value that arrives is a capability, which is what block parameters are for, and the
+    /// instruction on each path is still one of the six.
+    fn capabilities(&mut self, func: &'a Func) {
+        for block in func.blocks() {
+            self.block = Some(block);
+            for inst in func.insts(block) {
+                self.inst = Some(inst);
+                if func[inst].opcode.makes_capability() {
+                    continue;
+                }
+                for value in func[inst].results() {
+                    if func[value].ty.is_cap() {
+                        self.error(format!(
+                            "{} produces a capability and only the cap instructions do that",
+                            func[inst].opcode.name()
+                        ));
+                    }
+                }
+            }
+            self.inst = None;
+        }
+        self.block = None;
+    }
+
+    /// What is claimed about a value, per `spec/safe-memory/06-instrumentation.md` section 6.2.3.
+    ///
+    /// A fact is a promise the optimizer is allowed to act on without checking, so a wrong one is
+    /// not a slow program but a silently unsafe one. Nothing here can tell whether a fact is true,
+    /// which is the pass that established it doing its job, but the shape of one is checkable and
+    /// a fact whose shape is wrong is a bug in that pass rather than in the program.
+    ///
+    /// The two values a `!bounds` names have to reach the value it is about, everywhere that value
+    /// does. A range whose start is computed after the pointer it is the range of is a range no
+    /// consumer of the fact could name, and the rule that gets that right at every use is that the
+    /// two dominate the definition.
+    fn facts(&mut self, func: &'a Func, doms: &Doms, layout: &Layout) {
+        for (value, facts) in func.known() {
+            let ty = func[value].ty;
+            if let Some((lo, hi)) = facts.range {
+                // The one fact about an integer, so it is the one that may stand on an integer
+                // and the one that may not stand on anything else.
+                let fits = |end: u128| ty.bits() >= 128 || end >> ty.bits() == 0;
+                if !ty.is_int() {
+                    self.error(format!("%{} is said to be in a range and it is {ty}", value.raw()));
+                } else if !fits(lo) || !fits(hi) {
+                    self.error(format!(
+                        "%{} is said to be between {lo} and {hi} and it is {ty}",
+                        value.raw()
+                    ));
+                }
+                if (Facts { range: None, ..facts }).is_empty() {
+                    continue;
+                }
+            }
+            if !ty.is_ptr() {
+                self.error(format!("%{} is said to be a pointer and it is {ty}", value.raw()));
+            }
+            match facts.align {
+                Some(align) if !align.is_power_of_two() => self.error(format!(
+                    "%{} is said to be aligned to {align} and an alignment is a power of two",
+                    value.raw()
+                )),
+                _ => {}
+            }
+            let Some(bounds) = facts.bounds else { continue };
+            let lo = func[bounds.lo].ty;
+            if !lo.is_ptr() {
+                self.error(format!(
+                    "the range %{} is in starts at a pointer and %{} is {lo}",
+                    value.raw(),
+                    bounds.lo.raw()
+                ));
+            }
+            let ext = func[bounds.ext].ty;
+            if !ext.lane().is_int() {
+                self.error(format!(
+                    "the range %{} is in has an integer extent and %{} is {ext}",
+                    value.raw(),
+                    bounds.ext.raw()
+                ));
+            }
+            for named in [bounds.lo, bounds.ext] {
+                if !self.reaches(func, doms, layout, named, value) {
+                    self.error(format!(
+                        "%{} names %{} and does not reach it",
+                        value.raw(),
+                        named.raw()
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Whether one value is defined everywhere another one is.
+    ///
+    /// Which for a block parameter is everywhere its block is reached from, and for a result is
+    /// everywhere after the instruction that produced it.
+    fn reaches(
+        &self,
+        func: &'a Func,
+        doms: &Doms,
+        layout: &Layout,
+        value: Value,
+        at: Value,
+    ) -> bool {
+        let point = |of: Value| match func[of].def {
+            Def::Param { block, .. } => Some((block, None)),
+            Def::Result { inst, .. } => layout.block_of(inst).map(|block| (block, Some(inst))),
+        };
+        let (Some((from, def)), Some((to, use_at))) = (point(value), point(at)) else {
+            // One of them is produced by an instruction that is not in the function, which the
+            // walk over the blocks has already reported.
+            return true;
+        };
+        if from != to {
+            return doms.dominates(from, to);
+        }
+        match (def, use_at) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(def), Some(use_at)) => layout.position(def) < layout.position(use_at),
+        }
+    }
+
+    /// Where an object read off a variable argument list travelled.
+    ///
+    /// Each slot holds bytes of the object, so a slot that reaches past the end of it is a
+    /// classification that does not belong to this object and the backend would read memory the
+    /// object never had.
+    fn slots(&mut self, func: &'a Func, object: VaInfo) {
+        let size = func[object.mem].size;
+        for &slot in &func[object.slots] {
+            let width = match slot {
+                Slot::Integer { size, .. } | Slot::Vector { size, .. } => u64::from(size),
+                Slot::Float { format, .. } => u64::from(format.width()).div_ceil(8),
+            };
+            if slot.offset() + width > size {
+                self.error(format!(
+                    "a slot holds bytes {} to {} of an object of {size} bytes",
+                    slot.offset(),
+                    slot.offset() + width
+                ));
+            }
+        }
+    }
+
+    /// The operand and result types, by the rules of section 8.2.
+    ///
+    /// The shape of each group is written out rather than derived from a table, because the
+    /// groups do not have the same shape as each other and a table general enough to hold all
+    /// of them would be harder to read than this.
+    #[expect(clippy::too_many_lines, reason = "one arm per group of opcodes, and they differ")]
+    fn shape(&mut self, func: &'a Func, inst: Inst) {
+        let data = &func[inst];
+        let opcode = data.opcode;
+        // Memory is the last operand and the last result when the function carries it, so
+        // taking the two of them off here leaves every arity and every result count below
+        // saying what the opcode says, which is the point of putting them last.
+        let all = &func[data.args];
+        let args = &all[..all.len() - usize::from(func.mem_in(inst).is_some())];
+        let arity = args.len();
+        let arg = |n: usize| func[args[n]].ty;
+        let results = usize::from(data.results) - usize::from(extra_mem(func, inst));
+        let res = |n: usize| func[data.results().nth(n).expect("within the count")].ty;
+
+        match opcode {
+            // Constants take nothing and say their own type.
+            Opcode::IConst => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).lane().is_int() {
+                    self.error(format!(
+                        "iconst produces an integer and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::FConst => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).lane().is_float() {
+                    self.error(format!(
+                        "fconst produces a floating point value and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::Splat => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).is_vector() {
+                    self.error(format!("splat produces a vector and this one produces {}", res(0)));
+                }
+            }
+            Opcode::GlobalAddr
+            | Opcode::StackSave
+            | Opcode::ThreadPointer
+            | Opcode::SpEntry
+            | Opcode::DwarfCfa
+            | Opcode::ApplyArgs => {
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "{} produces a pointer and this one produces {}",
+                        opcode.name(),
+                        res(0)
+                    ));
+                }
+            }
+            // What a named machine register holds, which takes nothing and answers a value of
+            // whatever type the object was declared with. A register is a run of bits and the
+            // program says what to read them as, so an integer, an address and a float are all
+            // here. Whether the register is wide enough for the type, and in the file the type is
+            // kept in, is the target's question and is asked where the register is looked up,
+            // since this crate has no targets in it.
+            Opcode::RegisterValue => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    let ty = res(0);
+                    if !(ty.is_ptr() || (ty.is_scalar() && (ty.is_int() || ty.is_float()))) {
+                        self.error(format!(
+                            "register_value produces an integer, an address or a float and this \
+                             one produces {ty}"
+                        ));
+                    }
+                }
+            }
+            // A write of a named machine register, which takes the value and answers nothing.
+            Opcode::SetRegister => {
+                if self.takes(opcode, arity, 1) {
+                    let ty = arg(0);
+                    if !(ty.is_ptr() || (ty.is_scalar() && (ty.is_int() || ty.is_float()))) {
+                        self.error(format!(
+                            "set_register takes an integer, an address or a float and this one \
+                             takes {ty}"
+                        ));
+                    }
+                }
+                if results != 0 {
+                    self.error("set_register produces nothing".to_owned());
+                }
+            }
+            // The two that walk the frames, which answer a pointer like the three above and take
+            // nothing, since how far up to walk is the depth beside the instruction rather than
+            // anything computed.
+            Opcode::FrameAddress | Opcode::ReturnAddress => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "{} produces a pointer and this one produces {}",
+                        opcode.name(),
+                        res(0)
+                    ));
+                }
+            }
+
+            // Integer arithmetic: two of one type, and that type back.
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::SDiv
+            | Opcode::UDiv
+            | Opcode::SRem
+            | Opcode::URem
+            | Opcode::UMulHigh
+            | Opcode::SMulHigh
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::Shl
+            | Opcode::LShr
+            | Opcode::AShr => {
+                if self.takes(opcode, arity, 2) {
+                    self.integer(opcode, arg(0), 0);
+                    self.agree(opcode, arg(0), arg(1));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+
+            // Floating point arithmetic, the same shape with one more operand for `fma`.
+            Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv | Opcode::FRem => {
+                if self.takes(opcode, arity, 2) {
+                    self.floating(opcode, arg(0), 0);
+                    self.agree(opcode, arg(0), arg(1));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+            Opcode::FNeg => {
+                if self.takes(opcode, arity, 1) {
+                    self.floating(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+            Opcode::Fma => {
+                if self.takes(opcode, arity, 3) {
+                    self.floating(opcode, arg(0), 0);
+                    self.agree(opcode, arg(0), arg(1));
+                    self.agree(opcode, arg(0), arg(2));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+
+            // A choice between two of the same thing, made by one bit per lane. The condition is
+            // where the lane counts have to be checked rather than assumed: a scalar bit choosing
+            // between two vectors is a real shape and so is a vector of bits choosing lane by lane,
+            // and the second is the one the two arms have to agree with.
+            Opcode::Select => {
+                if self.takes(opcode, arity, 3) {
+                    if arg(0).lane() != Type::I1 {
+                        self.error(format!(
+                            "operand 1 of select is the bit that chooses and is i1 or a vector of \
+                             i1, and this one is {}",
+                            arg(0)
+                        ));
+                    } else if arg(0).lanes() != 1 && arg(0).lanes() != arg(1).lanes() {
+                        self.error(format!(
+                            "operand 1 of select chooses one lane at a time, so it has {} lanes or \
+                             one, and this one has {}",
+                            arg(1).lanes(),
+                            arg(0).lanes()
+                        ));
+                    }
+                    self.agree(opcode, arg(1), arg(2));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(1));
+                    }
+                }
+            }
+
+            // A comparison answers one bit per lane, whatever it compared.
+            Opcode::ICmp | Opcode::FCmp => {
+                if self.takes(opcode, arity, 2) {
+                    if opcode == Opcode::FCmp {
+                        self.floating(opcode, arg(0), 0);
+                    } else if !arg(0).lane().is_int() && !arg(0).is_ptr() {
+                        self.error(format!(
+                            "operand 1 of icmp is an integer or a pointer and this one is {}",
+                            arg(0)
+                        ));
+                    }
+                    self.agree(opcode, arg(0), arg(1));
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0).with_lane(Type::I1));
+                    }
+                }
+            }
+
+            // Conversions, each of which says which way it goes and by how much.
+            Opcode::Trunc | Opcode::SExt | Opcode::ZExt => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.integer(opcode, arg(0), 0);
+                    self.lanes(opcode, res(0), arg(0));
+                    self.widens(opcode, res(0), arg(0), opcode != Opcode::Trunc);
+                }
+            }
+            Opcode::FPTrunc | Opcode::FPExt => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.floating(opcode, arg(0), 0);
+                    self.lanes(opcode, res(0), arg(0));
+                    self.widens(opcode, res(0), arg(0), opcode == Opcode::FPExt);
+                }
+            }
+            Opcode::FPToSI | Opcode::FPToUI => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.floating(opcode, arg(0), 0);
+                    self.lanes(opcode, res(0), arg(0));
+                    if !res(0).lane().is_int() {
+                        self.error(format!(
+                            "{} produces an integer and this one produces {}",
+                            opcode.name(),
+                            res(0)
+                        ));
+                    }
+                }
+            }
+            Opcode::SIToFP | Opcode::UIToFP => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.integer(opcode, arg(0), 0);
+                    self.lanes(opcode, res(0), arg(0));
+                    if !res(0).lane().is_float() {
+                        self.error(format!(
+                            "{} produces a floating point value and this one produces {}",
+                            opcode.name(),
+                            res(0)
+                        ));
+                    }
+                }
+            }
+            Opcode::PtrToInt => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, res(0), 0);
+                }
+            }
+            Opcode::IntToPtr => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    self.integer(opcode, arg(0), 0);
+                    if !res(0).is_ptr() {
+                        self.error(format!(
+                            "inttoptr produces a pointer and this one produces {}",
+                            res(0)
+                        ));
+                    }
+                }
+            }
+            Opcode::Bitcast => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    let (from, to) = (arg(0), res(0));
+                    if from.is_ptr() != to.is_ptr() {
+                        // Between an address and a number there is a conversion of its own,
+                        // and using this one would hide it from anything looking for one.
+                        self.error(
+                            "a bitcast between a pointer and a number is ptrtoint or inttoptr",
+                        );
+                    } else if width(from) != width(to) {
+                        self.error(format!("a bitcast keeps the width and {from} and {to} differ"));
+                    }
+                }
+            }
+
+            // Memory.
+            // Memory as the function found it. It takes nothing, produces one `mem`, and
+            // belongs where the function starts, because a version of memory from further in
+            // would be one that instructions before it could not have.
+            Opcode::MemEntry => {
+                if self.takes(opcode, arity, 0) && results == 1 && !res(0).is_mem() {
+                    self.error(format!(
+                        "mem_entry produces memory and this one produces {}",
+                        res(0)
+                    ));
+                }
+                if func.block_of(inst) != func.entry() {
+                    self.error("mem_entry belongs in the entry block");
+                }
+            }
+            Opcode::Alloca => {
+                if arity > 1 {
+                    self.takes(opcode, arity, 1);
+                } else if arity == 1 {
+                    self.integer(opcode, arg(0), 0);
+                } else if func.block_of(inst) != func.entry() {
+                    // One of a fixed size in a loop is a stack that grows every time round,
+                    // which is what the dynamic form asks for explicitly.
+                    self.error("an alloca of a fixed size belongs in the entry block");
+                }
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "alloca produces a pointer and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::Load | Opcode::AtomicLoad => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && res(0).is_void() {
+                    self.error(format!("{} reads a value and void is not one", opcode.name()));
+                }
+            }
+            Opcode::Store | Opcode::AtomicStore => {
+                if self.takes(opcode, arity, 2) {
+                    if arg(0).is_void() {
+                        self.error(format!("{} writes a value and void is not one", opcode.name()));
+                    }
+                    self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::PtrAdd => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    if results == 1 && !res(0).is_ptr() {
+                        self.error(format!(
+                            "ptr_add produces a pointer and this one produces {}",
+                            res(0)
+                        ));
+                    }
+                }
+            }
+            // Two operands where the payload says how many bytes, three where the program works
+            // the count out and the third is it. The count is an integer of any width here: how
+            // wide `size_t` is on the target is the front end's to know, and an IR the verifier
+            // reads may have come from a file rather than from it.
+            Opcode::Memcpy | Opcode::Memmove => {
+                if self.takes_either(opcode, arity, 2, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
+                }
+            }
+            Opcode::Memset => {
+                if self.takes_either(opcode, arity, 2, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
+                }
+            }
+            Opcode::AtomicRmw => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(1));
+                    }
+                }
+            }
+            Opcode::Cmpxchg => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.agree(opcode, arg(1), arg(2));
+                    if results == 2 {
+                        self.produces(opcode, res(0), arg(1));
+                        self.produces(opcode, res(1), arg(1).with_lane(Type::I1));
+                    }
+                }
+            }
+            Opcode::Fence
+            | Opcode::Unreachable
+            | Opcode::UnreachableHint
+            | Opcode::Trap
+            | Opcode::UnwindInit => {
+                self.takes(opcode, arity, 0);
+            }
+            // How far to move the stack and where to go, which is an integer as wide as an address
+            // and an address.
+            Opcode::EhReturn => {
+                if self.takes(opcode, arity, 2) {
+                    if !arg(0).is_int() {
+                        self.error(format!(
+                            "eh_return takes an integer offset and this one is {}",
+                            arg(0)
+                        ));
+                    }
+                    self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::Prefetch
+            | Opcode::StackRestore
+            | Opcode::LifetimeEnd
+            | Opcode::VaStart
+            | Opcode::VaEnd => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+            }
+            // The lanes. Which lane is written in the instruction, so it is checked here against
+            // the vector it is a lane of rather than left for the back end to find out of range.
+            Opcode::ExtractLane => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    let (from, to) = (arg(0), res(0));
+                    let lane = match data.extra {
+                        Extra::Lane(lane) => u32::from(lane),
+                        _ => 0,
+                    };
+                    if !from.is_vector() {
+                        self.error(format!("extractlane reads a vector and this one reads {from}"));
+                    } else if to != from.lane() {
+                        self.error(format!("a lane of {from} is {} and not {to}", from.lane()));
+                    } else if lane >= from.lanes() {
+                        self.error(format!("{from} has no lane {lane}"));
+                    }
+                }
+            }
+            Opcode::InsertLane => {
+                if self.takes(opcode, arity, 2) && results == 1 {
+                    let (into, value, to) = (arg(0), arg(1), res(0));
+                    let lane = match data.extra {
+                        Extra::Lane(lane) => u32::from(lane),
+                        _ => 0,
+                    };
+                    if !into.is_vector() || to != into {
+                        self.error(format!(
+                            "insertlane gives back the vector it was given and this one takes \
+                             {into} and gives {to}"
+                        ));
+                    } else if value != into.lane() {
+                        self.error(format!("a lane of {into} is {} and not {value}", into.lane()));
+                    } else if lane >= into.lanes() {
+                        self.error(format!("{into} has no lane {lane}"));
+                    }
+                }
+            }
+            Opcode::Shuffle => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    let (from, to) = (arg(0), res(0));
+                    if let Extra::Shuffle(shuffle) = data.extra {
+                        if !from.is_vector() || !to.is_vector() || from.lane() != to.lane() {
+                            self.error(format!(
+                                "a shuffle makes a vector of the lanes of another and this one \
+                                 takes {from} and gives {to}"
+                            ));
+                        } else if usize::try_from(to.lanes()).ok() != Some(shuffle.len()) {
+                            self.error(format!(
+                                "{to} has {} lanes and this shuffle names {}",
+                                to.lanes(),
+                                shuffle.len()
+                            ));
+                        } else if let Some(lane) =
+                            shuffle.lanes().find(|&lane| u32::from(lane) >= from.lanes())
+                        {
+                            self.error(format!("{from} has no lane {lane}"));
+                        }
+                    }
+                }
+            }
+            Opcode::ObjectSize => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && !res(0).is_int() {
+                    self.error(format!(
+                        "object_size produces an integer and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::IsConstant => {
+                if self.takes(opcode, arity, 1)
+                    && (arg(0).is_vector() || !(arg(0).is_int() || arg(0).is_float()))
+                {
+                    self.error(format!(
+                        "is_constant asks about an integer or a floating point value and this one \
+                         asks about {}",
+                        arg(0)
+                    ));
+                }
+                if results == 1 && res(0) != Type::int(32) {
+                    self.error(format!(
+                        "is_constant produces an i32 and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::VaArgPack | Opcode::VaArgPackLen => {
+                if self.takes(opcode, arity, 0) && results == 1 && res(0) != Type::int(32) {
+                    self.error(format!(
+                        "{} produces an i32 and this one produces {}",
+                        opcode.name(),
+                        res(0)
+                    ));
+                }
+            }
+            Opcode::VaCopy => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::VaArg => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && res(0).is_void() {
+                    self.error("va_arg reads a value and void is not one");
+                }
+            }
+            Opcode::VaObject => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 && res(0) != Type::PTR {
+                    self.error(format!(
+                        "va_object answers where the object is and {} is not an address",
+                        res(0)
+                    ));
+                }
+            }
+
+            // Control.
+            Opcode::Jump => {
+                self.takes(opcode, arity, 0);
+                self.targets(func, inst, 1);
+            }
+            Opcode::CheckWritten => {
+                if self.takes(opcode, arity, 1) && arg(0) != Type::I1 {
+                    self.error(format!(
+                        "check_written asks about an i1 and this one about {}",
+                        arg(0)
+                    ));
+                }
+            }
+            Opcode::BrIf => {
+                if self.takes(opcode, arity, 1) && arg(0) != Type::I1 {
+                    self.error(format!("br_if branches on an i1 and this one on {}", arg(0)));
+                }
+                self.targets(func, inst, 2);
+            }
+            Opcode::Switch => {
+                if self.takes(opcode, arity, 1) {
+                    self.integer(opcode, arg(0), 0);
+                }
+            }
+            Opcode::BlockAddr => {
+                self.takes(opcode, arity, 0);
+                self.targets(func, inst, 1);
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "block_addr produces a pointer and this one produces {}",
+                        res(0)
+                    ));
+                }
+                if func.successors(inst).any(|call| !func[call.args].is_empty()) {
+                    // Taking the address is not arriving, so there is nothing to hand over.
+                    // What the block takes is passed by the branch that goes there.
+                    self.error("block_addr names a block and passes it arguments");
+                }
+            }
+            Opcode::IndirectBr => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                // No count to check: how many blocks one of these can arrive at is how many
+                // the front end says, and a `goto *p` in a function with one label has one.
+            }
+            Opcode::Return => {
+                let want = &func.signature().returns;
+                if arity != want.len() {
+                    self.error(format!(
+                        "the signature returns {} and this returns {arity}",
+                        want.len()
+                    ));
+                } else {
+                    for (index, ty) in want.iter().map(|param| param.ty).enumerate() {
+                        if arg(index) != ty {
+                            self.error(format!(
+                                "result {} of the signature is {ty} and this returns {}",
+                                index + 1,
+                                arg(index)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Calls, whose signature is what says the shape.
+            Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
+                let Extra::Call(at) = data.extra else { return };
+                let info = func[at];
+                let signature = &func[info.signature];
+                // A `tail_call` with nobody named calls through its first operand, the way a
+                // `call_indirect` does.
+                let through = opcode == Opcode::CallIndirect
+                    || (opcode == Opcode::TailCall && info.callee.is_none());
+                let indirect = usize::from(through);
+                if indirect == 1 {
+                    if arity == 0 {
+                        self.error(format!("{opcode} calls through a pointer and has no operands"));
+                        return;
+                    }
+                    self.pointer(opcode, arg(0), 0);
+                }
+                let passed = arity - indirect;
+                let enough = if signature.variadic {
+                    passed >= signature.params.len()
+                } else {
+                    passed == signature.params.len()
+                };
+                if enough {
+                    for (index, ty) in signature.param_types().enumerate() {
+                        if arg(index + indirect) != ty {
+                            self.error(format!(
+                                "parameter {} of the signature is {ty} and this argument is {}",
+                                index + 1,
+                                arg(index + indirect)
+                            ));
+                        }
+                    }
+                } else {
+                    self.error(format!(
+                        "the signature takes {}{} and this call passes {passed}",
+                        signature.params.len(),
+                        if signature.variadic { " or more" } else { "" }
+                    ));
+                }
+                self.varargs(func, &info, passed, |n| arg(n + indirect));
+                if results != signature.returns.len() {
+                    self.error(format!(
+                        "the signature returns {} and this call produces {results}",
+                        signature.returns.len()
+                    ));
+                } else {
+                    for (index, ty) in signature.return_types().enumerate() {
+                        if res(index) != ty {
+                            self.error(format!(
+                                "result {} of the signature is {ty} and this call produces {}",
+                                index + 1,
+                                res(index)
+                            ));
+                        }
+                    }
+                }
+                // Where the callee is in this module, the signature at the call and the one at
+                // the function are the same signature or one of them is wrong.
+                if let Some(callee) = info.callee {
+                    if let Some(SymbolRef::Func(id)) = self.module.lookup(callee) {
+                        if self.module[id].signature() != signature {
+                            self.error(format!(
+                                "@{} is declared here with another signature",
+                                self.names.resolve(callee)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Bit counting, which answers in the type it was asked about.
+            Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
+                if self.takes(opcode, arity, 1) {
+                    self.integer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+
+            // The overflow-checked forms, which answer the value and whether it wrapped.
+            Opcode::SAddOverflow
+            | Opcode::UAddOverflow
+            | Opcode::SSubOverflow
+            | Opcode::USubOverflow
+            | Opcode::SMulOverflow
+            | Opcode::UMulOverflow => {
+                if self.takes(opcode, arity, 2) {
+                    self.integer(opcode, arg(0), 0);
+                    self.agree(opcode, arg(0), arg(1));
+                    if results == 2 {
+                        self.produces(opcode, res(0), arg(0));
+                        self.produces(opcode, res(1), arg(0).with_lane(Type::I1));
+                    }
+                }
+            }
+            // Two operands, the value and what it is expected to be, and a third holding how often
+            // the expectation holds where `__builtin_expect_with_probability` said. The third is
+            // not asked to agree with the other two: it is a number out of ten thousand rather than
+            // another value of whatever type the program is expecting something about.
+            Opcode::Expect => {
+                if self.takes_either(opcode, arity, 2, 3) {
+                    self.integer(opcode, arg(0), 0);
+                    self.agree(opcode, arg(0), arg(1));
+                    if arity == 3 {
+                        self.integer(opcode, arg(2), 2);
+                    }
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(0));
+                    }
+                }
+            }
+
+            // A call built from a block of saved arguments: the function, the block and how many
+            // bytes of arguments in memory go with it, and the block of what came back.
+            Opcode::Apply => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "apply produces a pointer and this one produces {}",
+                        res(0)
+                    ));
+                }
+            }
+
+            // The pair a `__builtin_setjmp` and a `__builtin_longjmp` become. One operand each,
+            // the buffer, and the save answers the `int` that says how control reached it. Neither
+            // is a terminator, because the edge between them is not an edge of this function: it
+            // is written into the buffer and taken at run time.
+            Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                if results == 1 {
+                    self.produces(opcode, res(0), Type::int(32));
+                }
+            }
+
+            // The unwind edge a call inside a cleanup handler's scope has under `-fexceptions`, and
+            // a load, a store or a division has under `-fnon-call-exceptions`. An `unwound` with
+            // nothing like that in front of it is one whose instruction was folded away, and it
+            // answers false, so only the shape is checked. The exception has to be the first thing
+            // its pad does, because the code generator finds the pad by it.
+            Opcode::Unwound => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::I1);
+                }
+            }
+            Opcode::Landing => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::PTR);
+                }
+                if func.prev_inst(inst).is_some() {
+                    self.error("landing is not the first instruction of its block".to_string());
+                }
+            }
+
+            // What is left says nothing about its operands here: inline assembly is whatever its
+            // constraints say, and a target intrinsic is the target's own rule.
+            Opcode::InlineAsm | Opcode::TargetIntrinsic => {}
+
+            // Capabilities. The rule that makes these worth checking is that a capability and
+            // the pointer it describes are two operands and never one, so an instruction that
+            // took the same value twice, or took them the other way round, is caught here rather
+            // than becoming a check that passes because it compared a pointer with itself.
+            Opcode::CapOf | Opcode::CapRecover => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            // The aux pair. Three operands and four rather than one and two, because the slot is
+            // found from the object the word is in and says its two numbers relative to the
+            // pointer beside it, and neither of those is recoverable from an address alone. See
+            // `spec/safe-memory/06-instrumentation.md` section 6.2.2.
+            Opcode::CapLoad => {
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            Opcode::CapNull => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::CAP);
+                }
+            }
+            Opcode::CapStore => {
+                if self.takes(opcode, arity, 4) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
+                    self.capability(opcode, arg(3), 3);
+                }
+            }
+            // The bulk form of that write, which is two ranges and a length and no capability at
+            // all. What each destination slot ends up saying is whatever the slot beside the word
+            // it came from said, so there is nothing here for the compiler to name, which is the
+            // shape the two plane copies below have and for the same reason.
+            Opcode::CapCopy => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+            }
+            Opcode::CapExtent | Opcode::CapExtentBack => {
+                // The capability and the address it is about, as everywhere else here, and then
+                // how many bytes the asker wants. The answer is a count of the same bytes the
+                // limit counts, so the two have one type and the caller picks it. The backward
+                // form counts the bytes below the address rather than the bytes from it on, which
+                // is a difference in what the answer means and not in the shape of the question.
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                    if results == 1 {
+                        self.produces(opcode, res(0), arg(2));
+                    }
+                }
+            }
+            // The capabilities a call hands over, one per pointer argument in the order the call
+            // passes them. How many there are is the call's business rather than this
+            // instruction's, and how many the frame has room for is the runtime's, so the only
+            // shape left to check is that every operand really is a capability and that there is at
+            // least one of them, since a publish describing nothing is a `cap_clear` spelled at
+            // length and the two of them mean opposite things to the callee.
+            Opcode::CapPublish => {
+                if self.takes_at_least(opcode, arity, 1) {
+                    for n in 0..arity {
+                        self.capability(opcode, arg(n), n);
+                    }
+                }
+            }
+            // And saying there is no frame, which is about the call rather than about any value.
+            Opcode::CapClear => {
+                self.takes(opcode, arity, 0);
+            }
+            // And reading one back out at the other end, which is the pointer the parameter holds
+            // and which of the call's arguments it was. Nothing here says the position is a
+            // constant, because a position the frame does not reach is the recovery rather than an
+            // error and the recovery is what the pointer operand is for.
+            Opcode::CapArg => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            // And the same pair again for the one value that crosses a call the other way. The
+            // writing end takes the capability and the reading end takes the pointer, which is the
+            // fallback rather than the subject, so neither of them mentions the other's operand.
+            Opcode::CapYield => {
+                if self.takes(opcode, arity, 1) {
+                    self.capability(opcode, arg(0), 0);
+                }
+            }
+            Opcode::CapResult => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+            Opcode::CapNarrow => {
+                if self.takes(opcode, arity, 3) {
+                    self.capability(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                    self.agree(opcode, arg(1), arg(2));
+                    if results == 1 {
+                        self.produces(opcode, res(0), Type::CAP);
+                    }
+                }
+            }
+
+            // The checks. Six of them ask about one pointer and the seventh asks whether a
+            // second one stayed inside the first one's capability, so that is the only
+            // difference in shape between them.
+            Opcode::CheckLive | Opcode::CheckRace | Opcode::CheckFree => {
+                if self.takes(opcode, arity, 2) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                }
+            }
+            Opcode::CheckBounds | Opcode::CheckType | Opcode::CheckInit => {
+                // Two operands is the access the front end wrote, whose length is in the payload.
+                // Three is the hoisted check of section 7.4, whose length the program computes, and
+                // the extra operand is that length in bytes. All three of these are a claim about a
+                // range that holds of every subrange of it, which is what makes one of them able to
+                // stand for a loop's worth. Four is a plane check over a walk that leaves gaps, and
+                // the last operand is the step. A bounds check is never written that way, since for
+                // it the whole span costs what the accesses in it cost.
+                let fits = if opcode == Opcode::CheckBounds {
+                    self.takes_either(opcode, arity, 2, 3)
+                } else if (2..=4).contains(&arity) {
+                    true
+                } else {
+                    let name = opcode.name();
+                    self.error(format!("{name} takes 2, 3 or 4 operands and this one has {arity}"));
+                    false
+                };
+                if fits {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    for at in 2..arity {
+                        self.integer(opcode, arg(at), at);
+                    }
+                }
+            }
+            Opcode::CheckDeriv => {
+                // The fourth operand is the stride, which is how wide one element of whatever is
+                // being stepped over is. Document 03 section 3.1 puts S5's window at
+                // `[lo - stride, hi]`, so the judgement cannot be made without it, and it is an
+                // operand rather than something written on the instruction because a walk over a
+                // variable length array steps by a width the program computes.
+                if self.takes(opcode, arity, 4) {
+                    self.capability(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.pointer(opcode, arg(2), 2);
+                    self.integer(opcode, arg(3), 3);
+                }
+            }
+
+            // The two `restrict` checks, which are one pointer and nothing else. No capability,
+            // because what they read is the record the enclosing block keeps rather than any
+            // plane, and the record is found from the clique in the payload.
+            Opcode::CheckRestrictRead | Opcode::CheckRestrictWrite => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                self.names_a_scope(func, inst, opcode);
+            }
+
+            // The markers around a block that declares `restrict` pointers. The operand is the
+            // storage the record lives in, so it is a pointer, and it is the same one both times.
+            Opcode::RestrictEnter => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+                self.names_a_scope(func, inst, opcode);
+            }
+            Opcode::RestrictLeave => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+            }
+
+            // The plane writes, which are all a range: where it starts and how long it is. No
+            // capability, because a plane write is what makes a capability true rather than
+            // something checked against one.
+            Opcode::MetaBegin
+            | Opcode::MetaEnd
+            | Opcode::MetaType
+            | Opcode::MetaInit
+            | Opcode::MetaEpoch
+            | Opcode::MetaTransfer => {
+                if self.takes(opcode, arity, 2) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.integer(opcode, arg(1), 1);
+                }
+            }
+
+            // The two plane writes that are about two ranges rather than one. Neither carries a
+            // node, because what the destination ends up saying is whatever the source said and the
+            // compiler does not know that: the plane over the source is where it is written down.
+            Opcode::MetaTypeCopy | Opcode::MetaInitCopy => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+            }
+
+            // The two halves of a synchronization edge, which take the address of the atomic
+            // object the edge is keyed on and nothing else. No length, because an edge is not
+            // about a range of bytes: it is about everything the thread did either side of it.
+            Opcode::MetaRelease | Opcode::MetaAcquire => {
+                if self.takes(opcode, arity, 1) {
+                    self.pointer(opcode, arg(0), 0);
+                }
+            }
+
+            // The two halves of the edge a fence carries, which take nothing at all. A fence
+            // orders against every other thread rather than against one object, so there is no
+            // address here to be the key and no operand that could carry one.
+            Opcode::MetaFenceRelease | Opcode::MetaFenceAcquire => {
+                self.takes(opcode, arity, 0);
+            }
+
+            // The region markers, which say something about the code between them rather than
+            // about any value, so there is nothing here but the operand count.
+            Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => {
+                self.takes(opcode, arity, 0);
+            }
+        }
+    }
+
+    // The small questions the shapes are made of.
+
+    /// Whether the payload of a `restrict` instruction names a scope for the reader to find.
+    ///
+    /// Clique zero is how an access says the names did not tell the front end where its pointer
+    /// came from, and such an access carries no check at all. One that does carry a check and says
+    /// nothing about which scope it is in would be passed by the runtime every time, so it is a
+    /// lowering bug wearing the shape of a check rather than a check.
+    fn names_a_scope(&mut self, func: &'a Func, inst: Inst, opcode: Opcode) {
+        let Extra::Mem(at) = func[inst].extra else { return };
+        if func[at].restrict.clique == 0 {
+            self.error(format!(
+                "{} is in no restrict scope, so it would ask nothing",
+                opcode.name()
+            ));
+        }
+    }
+
+    /// Reports the operand count when it is wrong, and answers whether it was right.
+    fn takes(&mut self, opcode: Opcode, got: usize, want: usize) -> bool {
+        if got == want {
+            return true;
+        }
+        self.error(format!("{} takes {want} operands and this one has {got}", opcode.name()));
+        false
+    }
+
+    /// Reports the number of operands when it is neither of the two an opcode allows.
+    fn takes_either(&mut self, opcode: Opcode, got: usize, one: usize, other: usize) -> bool {
+        if got == one || got == other {
+            return true;
+        }
+        self.error(format!(
+            "{} takes {one} or {other} operands and this one has {got}",
+            opcode.name()
+        ));
+        false
+    }
+
+    /// Reports the number of operands when an opcode has a floor rather than a count.
+    fn takes_at_least(&mut self, opcode: Opcode, got: usize, least: usize) -> bool {
+        if got >= least {
+            return true;
+        }
+        self.error(format!(
+            "{} takes {least} operands or more and this one has {got}",
+            opcode.name()
+        ));
+        false
+    }
+
+    /// Reports the number of branch targets when it is wrong.
+    fn targets(&mut self, func: &'a Func, inst: Inst, want: usize) {
+        let got = func.successors(inst).count();
+        if got != want {
+            self.error(format!(
+                "{} branches to {want} blocks and this one to {got}",
+                func[inst].opcode.name()
+            ));
+        }
+    }
+
+    fn integer(&mut self, opcode: Opcode, ty: Type, n: usize) {
+        if !ty.lane().is_int() {
+            self.error(format!(
+                "operand {} of {} is an integer and this one is {ty}",
+                n + 1,
+                opcode.name()
+            ));
+        }
+    }
+
+    fn floating(&mut self, opcode: Opcode, ty: Type, n: usize) {
+        if !ty.lane().is_float() {
+            self.error(format!(
+                "operand {} of {} is a floating point value and this one is {ty}",
+                n + 1,
+                opcode.name()
+            ));
+        }
+    }
+
+    fn capability(&mut self, opcode: Opcode, ty: Type, n: usize) {
+        if !ty.is_cap() {
+            self.error(format!(
+                "operand {} of {} is a capability and this one is {ty}",
+                n + 1,
+                opcode.name()
+            ));
+        }
+    }
+
+    fn pointer(&mut self, opcode: Opcode, ty: Type, n: usize) {
+        if !ty.is_ptr() {
+            self.error(format!(
+                "operand {} of {} is a pointer and this one is {ty}",
+                n + 1,
+                opcode.name()
+            ));
+        }
+    }
+
+    /// Two operands that have to be the same type as each other.
+    fn agree(&mut self, opcode: Opcode, first: Type, second: Type) {
+        if first != second {
+            self.error(format!(
+                "the operands of {} have one type and these are {first} and {second}",
+                opcode.name()
+            ));
+        }
+    }
+
+    /// A result that has to be a particular type.
+    fn produces(&mut self, opcode: Opcode, got: Type, want: Type) {
+        if got != want {
+            self.error(format!(
+                "{} produces {want} here and this one produces {got}",
+                opcode.name()
+            ));
+        }
+    }
+
+    /// A conversion that keeps the lane count, since none of them changes it.
+    fn lanes(&mut self, opcode: Opcode, to: Type, from: Type) {
+        if to.lanes() != from.lanes() {
+            self.error(format!(
+                "{} keeps the lane count and {from} has {} and {to} has {}",
+                opcode.name(),
+                from.lanes(),
+                to.lanes()
+            ));
+        }
+    }
+
+    /// A conversion that has to go the way its name says.
+    fn widens(&mut self, opcode: Opcode, to: Type, from: Type, wider: bool) {
+        let (a, b) = (to.lane().bits(), from.lane().bits());
+        // A decimal and a binary float of the same width are different numbers in the same bits, so
+        // a conversion between them is real work at one width. Which of the two opcodes it is goes
+        // by the name libgcc gives the routine: toward the decimal is a widening and away from it is
+        // a narrowing, so `_Decimal64` from `double` is `fpext` and `double` from it is `fptrunc`.
+        let decimal = |ty: Type| ty.lane().format().is_some_and(Float::is_decimal);
+        let across = a == b && decimal(to) != decimal(from) && decimal(to) == wider;
+        // A half and a brain float are both sixteen bits. Toward the brain float is a narrowing,
+        // which is libgcc's `__trunchfbf2`, so the half from one is a widening.
+        let brain = |ty: Type| ty.lane().format() == Some(Float::BF16);
+        let half = |ty: Type| ty.lane().format() == Some(Float::F16);
+        let sixteen =
+            a == b && ((brain(to) && half(from) && !wider) || (half(to) && brain(from) && wider));
+        let ok = across || sixteen || if wider { a > b } else { a < b };
+        if !ok {
+            let way = if wider { "wider" } else { "narrower" };
+            self.error(format!(
+                "{} produces something {way} and {from} to {to} is not",
+                opcode.name()
+            ));
+        }
+    }
+
+    // Reporting.
+
+    fn error(&mut self, message: impl Into<String>) {
+        let at = self.locate();
+        self.at(at, message);
+    }
+
+    fn at(&mut self, at: String, message: impl Into<String>) {
+        self.errors.push(VerifyError { at, message: message.into() });
+    }
+
+    /// Where the walk is, as text.
+    ///
+    /// A block is named by its index rather than by the number the printer would give it,
+    /// which is the same number for a module that came from the parser and can differ for one
+    /// a pass has been reordering.
+    fn locate(&self) -> String {
+        use fmt::Write as _;
+        let mut at = String::new();
+        if let Some(func) = self.func {
+            let _ = write!(at, "@{}", self.names.resolve(func.name));
+            if let Some(block) = self.block {
+                let _ = write!(at, " block{}", block.raw());
+            }
+            if let Some(inst) = self.inst {
+                let _ = write!(at, " {}", func[inst].opcode.name());
+            }
+        }
+        at
+    }
+}
+
+/// Where each instruction is, so that a use in the same block as its definition can be told
+/// from a use before it.
+struct Layout {
+    block: Vec<Option<Block>>,
+    position: Vec<u32>,
+}
+
+impl Layout {
+    fn new(func: &Func) -> Self {
+        let counts = func.counts();
+        let mut layout =
+            Layout { block: vec![None; counts.insts], position: vec![0; counts.insts] };
+        for block in func.blocks() {
+            for (position, inst) in func.insts(block).enumerate() {
+                layout.block[inst.index()] = Some(block);
+                layout.position[inst.index()] = position as u32;
+            }
+        }
+        layout
+    }
+
+    fn block_of(&self, inst: Inst) -> Option<Block> {
+        self.block[inst.index()]
+    }
+
+    fn position(&self, inst: Inst) -> u32 {
+        self.position[inst.index()]
+    }
+}
+
+/// Which block dominates which, by the iterative algorithm of Cooper, Harvey and Kennedy,
+/// "A Simple, Fast Dominance Algorithm" (2001).
+///
+/// The one in the verifier rather than a shared analysis, because the optimizer's dominator
+/// tree is incrementally maintained across a pass and this one is built from nothing every time
+/// it is asked for. The two want different things from the same idea. It is public for the passes
+/// after the optimizer that need to ask the question once and have no tree of their own, which
+/// `rucc_safety::handover` is: a capability it hands to a call has to be one the call can see.
+#[derive(Debug)]
+pub struct Doms {
+    /// Where each block is in reverse postorder, which is the order the fixed point converges
+    /// fastest in, and `None` for one the entry does not reach.
+    rank: Vec<Option<u32>>,
+    /// The rank of each block's immediate dominator, indexed by rank.
+    idom: Vec<u32>,
+}
+
+impl Doms {
+    /// Works out the tree for a function as it stands.
+    ///
+    /// # Panics
+    ///
+    /// On a function with no blocks, which has nothing to dominate.
+    #[must_use]
+    pub fn new(func: &Func) -> Self {
+        let counts = func.counts();
+        let entry = func.entry().expect("a function with blocks has a first one");
+
+        // Every edge the terminators make, and one more for a `block_addr` whose block no
+        // `indirect_br` in the function lists. Taking an address is not arriving, so where an
+        // `indirect_br` does list the block, that jump is the way in and the `block_addr` is not
+        // one. Counting it anyway made the label look entered from wherever its address was
+        // taken, which is usually the entry, and a label inside a loop then stopped being
+        // dominated by the loop header whose parameters it reads. That was issue 1009. Where
+        // nothing jumps to the block, its address has left the function, and the edge is what
+        // keeps it out of the reachability report.
+        let mut listed = vec![false; counts.blocks];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if func[inst].opcode == Opcode::IndirectBr {
+                    for call in func.successors(inst) {
+                        listed[call.block.index()] = true;
+                    }
+                }
+            }
+        }
+        let mut succs: Vec<Vec<Block>> = vec![Vec::new(); counts.blocks];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let taken = func[inst].opcode == Opcode::BlockAddr;
+                let into = func.successors(inst).map(|call| call.block);
+                let into = into.filter(|to| !taken || !listed[to.index()]);
+                succs[block.index()].extend(into);
+            }
+        }
+
+        // Postorder by an explicit stack, since a chain of blocks can be as long as the
+        // function is and the recursive form would run out of stack on one.
+        let mut order = Vec::new();
+        let mut seen = vec![false; counts.blocks];
+        let mut stack = vec![(entry, 0usize)];
+        seen[entry.index()] = true;
+        while let Some((block, next)) = stack.pop() {
+            match succs[block.index()].get(next) {
+                Some(&target) => {
+                    stack.push((block, next + 1));
+                    if !seen[target.index()] {
+                        seen[target.index()] = true;
+                        stack.push((target, 0));
+                    }
+                }
+                None => order.push(block),
+            }
+        }
+        order.reverse();
+
+        let mut rank = vec![None; counts.blocks];
+        for (index, &block) in order.iter().enumerate() {
+            rank[block.index()] = Some(index as u32);
+        }
+        let mut preds: Vec<Vec<u32>> = vec![Vec::new(); order.len()];
+        for (index, &block) in order.iter().enumerate() {
+            for &target in &succs[block.index()] {
+                if let Some(target) = rank[target.index()] {
+                    preds[target as usize].push(index as u32);
+                }
+            }
+        }
+
+        // The entry dominates itself, and everything else starts undefined, which is what the
+        // sentinel is. The fixed point is reached in one pass over a reducible CFG and in two
+        // over the ones a `goto` produces.
+        const NONE: u32 = u32::MAX;
+        let mut idom = vec![NONE; order.len()];
+        if !order.is_empty() {
+            idom[0] = 0;
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in 1..order.len() {
+                let mut new = NONE;
+                for &pred in &preds[index] {
+                    if idom[pred as usize] == NONE {
+                        continue;
+                    }
+                    new = if new == NONE { pred } else { meet(&idom, new, pred) };
+                }
+                if new != NONE && idom[index] != new {
+                    idom[index] = new;
+                    changed = true;
+                }
+            }
+        }
+        Doms { rank, idom }
+    }
+
+    /// Whether the entry block reaches this one at all.
+    fn reaches(&self, block: Block) -> bool {
+        self.rank[block.index()].is_some()
+    }
+
+    /// Whether every path from the entry to `block` goes through `of`.
+    ///
+    /// A block the entry does not reach is dominated by everything, which is vacuously true and
+    /// keeps an unreachable block from being reported twice over, once for being unreachable
+    /// and once for every value it uses.
+    #[must_use]
+    pub fn dominates(&self, of: Block, block: Block) -> bool {
+        let (Some(a), Some(b)) = (self.rank[of.index()], self.rank[block.index()]) else {
+            return true;
+        };
+        let mut walk = b;
+        while walk > a {
+            walk = self.idom[walk as usize];
+        }
+        walk == a
+    }
+}
+
+/// Whether the new version of memory is one result on top of what the opcode produces anyway.
+///
+/// It is, for every instruction that writes memory, and it is not for `mem_entry`, whose one
+/// result is the version of memory the function starts with.
+fn extra_mem(func: &Func, inst: Inst) -> bool {
+    func[inst].opcode.writes_memory() && func.mem_out(inst).is_some()
+}
+
+/// The nearest block that dominates both, walking the two chains towards the entry.
+fn meet(idom: &[u32], mut a: u32, mut b: u32) -> u32 {
+    while a != b {
+        while a > b {
+            a = idom[a as usize];
+        }
+        while b > a {
+            b = idom[b as usize];
+        }
+    }
+    a
+}
+
+/// How many bits a value of that type occupies, counting every lane.
+fn width(ty: Type) -> u64 {
+    u64::from(ty.bits()) * u64::from(ty.lanes())
+}
+
+/// A list of types, as the text writes them.
+fn types(list: &[Type]) -> String {
+    if list.is_empty() {
+        return "nothing".to_string();
+    }
+    list.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::{Idx, Interner, Symbol};
+    use rucc_diag::Span;
+    use rucc_target::{Arch, Env, Os, Triple};
+
+    use super::*;
+    use crate::fixtures::{EXAMPLE, SAFETY, SYMBOLS, ZOO};
+    use crate::func::Builder;
+    use crate::inst::{InstData, MetaNode, Signature, TbaaNode};
+    use crate::{Flags, IntPred, parse};
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    /// Everything wrong with a module written as text, which is how most of these are written:
+    /// the parser turns down what is malformed and what is left is what the verifier is for.
+    fn errors(text: &str) -> Vec<String> {
+        let mut names = Interner::new();
+        let module = match parse(text, &mut names) {
+            Ok(module) => module,
+            Err(error) => panic!("{error}"),
+        };
+        match verify(&module, &names) {
+            Ok(()) => Vec::new(),
+            Err(errors) => errors.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// The one thing wrong with it.
+    fn only(text: &str) -> String {
+        let found = errors(text);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        found.into_iter().next().expect("just counted one")
+    }
+
+    const HEADER: &str = "\
+; ModuleID = 'bad.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+";
+
+    /// A function around that body, with that signature.
+    fn wrap(signature: &str, body: &str) -> String {
+        format!("{HEADER}\nfunc @f{signature}, linkage(external) {{\n{body}}}\n")
+    }
+
+    /// Whether any of the reports says that.
+    ///
+    /// The capability rules below fire more than once on purpose. A parameter of that type is
+    /// both a signature the ABI has no answer for and a value nothing produced, and reporting one
+    /// of the two and not the other would mean the second went unnoticed the day the first was
+    /// relaxed.
+    fn reports(text: &str, message: &str) {
+        let found = errors(text);
+        assert!(found.iter().any(|error| error.contains(message)), "{message}\nin {found:#?}");
+    }
+
+    /// The lanes of a vector read, replaced and put in another order, which is well formed, and
+    /// the ways each of the three can name a lane the vector does not have.
+    #[test]
+    fn a_lane_is_one_the_vector_has() {
+        let body = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = insertlane %1, %0, lane 3
+    %3 = shuffle %2, lanes [3, 2, 1, 0]
+    %4 = extractlane.i32 %3, lane 0
+    return %4
+";
+        assert_eq!(errors(&wrap("(i32) -> i32", body)), Vec::<String>::new());
+
+        let past = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = extractlane.i32 %1, lane 4
+    return %2
+";
+        assert_eq!(only(&wrap("(i32) -> i32", past)), "@f block0 extractlane: i32x4 has no lane 4");
+
+        let wrong = "block0(%0: i64):
+    %1 = splat.i32x4 7
+    %2 = insertlane %1, %0, lane 1
+    %3 = extractlane.i32 %2, lane 0
+    return %3
+";
+        assert_eq!(
+            only(&wrap("(i64) -> i32", wrong)),
+            "@f block0 insertlane: a lane of i32x4 is i32 and not i64"
+        );
+
+        let short = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = shuffle.i32x2 %1, lanes [0, 5]
+    %3 = extractlane.i32 %2, lane 0
+    return %3
+";
+        assert_eq!(only(&wrap("(i32) -> i32", short)), "@f block0 shuffle: i32x4 has no lane 5");
+    }
+
+    #[test]
+    fn the_four_fixtures_are_modules_the_compiler_may_believe() {
+        for text in [EXAMPLE, ZOO, SYMBOLS, SAFETY] {
+            assert_eq!(errors(text), Vec::<String>::new());
+        }
+    }
+
+    /// A function on the memory chain, which every rule below breaks one way or another.
+    const CHAIN: &str = "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4 [mem %3]
+    return %4
+";
+
+    #[test]
+    fn a_function_carrying_memory_is_one_the_compiler_may_believe() {
+        assert_eq!(errors(&wrap("(ptr) -> i32", CHAIN)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_instruction_that_touches_no_memory_and_is_on_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = add %2, %2 [mem %3]
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 add: add does not touch memory and is on the memory chain"
+        );
+    }
+
+    #[test]
+    fn a_write_on_the_chain_at_one_end_only_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    store %2 -> %0, size 4, align 4 [mem %1]
+    %3 = load.i32 %0, size 4, align 4 [mem %1]
+    return %3
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 store: store takes memory and produces none, and a write does both or neither"
+        );
+    }
+
+    #[test]
+    fn memory_reaching_somewhere_that_is_not_the_memory_operand_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = store %1 -> %0, size 8, align 8 [mem %3]
+    %5 = load.i32 %0, size 4, align 4 [mem %4]
+    return %5
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 store: %1 is memory and operand 1 of store is not the memory operand"
+        );
+    }
+
+    #[test]
+    fn a_memory_phi_is_an_ordinary_block_parameter() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = mem_entry
+    br_if %1, block1(%2), block2(%2)
+
+block1(%3: mem):
+    %4 = iconst.i32 7
+    %5 = store %4 -> %0, size 4, align 4 [mem %3]
+    jump block3(%5)
+
+block2(%6: mem):
+    jump block3(%6)
+
+block3(%7: mem):
+    %8 = load.i32 %0, size 4, align 4 [mem %7]
+    return %8
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_second_start_to_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = mem_entry
+    %3 = iconst.i32 7
+    %4 = store %3 -> %0, size 4, align 4 [mem %1]
+    %5 = load.i32 %0, size 4, align 4 [mem %4]
+    return %5
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 mem_entry: a function starts with one version of memory and this is a second one"
+        );
+    }
+
+    #[test]
+    fn a_chain_with_no_start_is_reported() {
+        // The only way to reach this is a function that says it takes memory, which is the other
+        // thing wrong with it, because the chain starts at `mem_entry` and nowhere else.
+        let text = wrap(
+            "(ptr, mem) -> i32",
+            "block0(%0: ptr, %1: mem):
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4 [mem %3]
+    return %4
+",
+        );
+        assert_eq!(
+            errors(&text),
+            [
+                "@f: parameter 2 is memory, and no function takes or returns memory",
+                "@f block0 store: this is on the memory chain and the function has no mem_entry",
+            ]
+        );
+    }
+
+    #[test]
+    fn half_a_function_on_the_chain_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = iconst.i32 7
+    %3 = store %2 -> %0, size 4, align 4 [mem %1]
+    %4 = load.i32 %0, size 4, align 4
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: load touches memory and is not on the chain, and the rest of this function is"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_starts_and_goes_nowhere_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = mem_entry
+    %2 = load.i32 %0, size 4, align 4
+    return %2
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 mem_entry: nothing in this function is on the memory chain, and this starts one"
+        );
+    }
+
+    #[test]
+    fn a_start_to_the_chain_outside_the_entry_block_is_reported() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = mem_entry
+    %3 = load.i32 %0, size 4, align 4 [mem %2]
+    return %3
+
+block2:
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(only(&text), "@f block1 mem_entry: mem_entry belongs in the entry block");
+    }
+
+    #[test]
+    fn a_bulk_operation_whose_length_is_an_operand_is_one_the_compiler_may_believe() {
+        let text = wrap(
+            "(ptr, ptr, i64) -> i32",
+            "block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = mem_entry
+    %4 = memcpy %0, %1, %2, align 4 [mem %3]
+    %5 = iconst.i8 0
+    %6 = memset %1, %5, %2, align 1 [mem %4]
+    %7 = iconst.i32 0
+    return %7
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_bulk_operation_of_no_bytes_and_no_length_operand_is_reported() {
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = mem_entry
+    %3 = memcpy %0, %1, align 4 [mem %2]
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(only(&text), "@f block0 memcpy: memcpy moves no bytes");
+    }
+
+    #[test]
+    fn a_bulk_length_that_is_not_an_integer_is_reported() {
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = mem_entry
+    %3 = memcpy %0, %1, %1, align 4 [mem %2]
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 memcpy: operand 3 of memcpy is an integer and this one is ptr"
+        );
+    }
+
+    #[test]
+    fn a_use_that_its_definition_does_not_reach_is_reported() {
+        let text = wrap(
+            "(i1) -> i32",
+            "block0(%0: i1):
+    br_if %0, block1, block2
+
+block1:
+    %1 = iconst.i32 7
+    jump block2
+
+block2:
+    return %1
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block2 return: %1 is produced in block1 and does not reach here"
+        );
+    }
+
+    #[test]
+    fn a_use_before_its_definition_in_the_same_block_is_reported() {
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = iconst.i32 1
+    %1 = add %2, %0
+    %2 = iconst.i32 2
+    return %1
+",
+        );
+        assert_eq!(only(&text), "@f block0 add: %2 is produced in block0 and does not reach here");
+    }
+
+    #[test]
+    fn a_call_that_takes_its_arguments_the_way_the_abi_says_is_believed() {
+        let text = wrap(
+            "(ptr sret(24, align 8), ptr byval(16, align 8), i8 zext)",
+            "block0(%0: ptr, %1: ptr, %2: i8):
+    return
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_call_that_says_how_an_argument_past_its_parameter_list_travels_is_believed() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 byval(24, align 8)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_call_that_says_it_of_something_that_is_not_a_pointer_is_reported() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = iconst.i32 1
+    call @p(%0, %1 byval(4, align 4)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 call: argument 2 travels indirectly and i32 is not a pointer"
+        );
+    }
+
+    #[test]
+    fn a_call_that_says_an_argument_past_its_parameter_list_is_an_sret_is_reported() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 sret(24, align 8)) : (ptr, ...)
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 call: argument 2 is an sret or a chain and only a parameter can be one"
+        );
+    }
+
+    #[test]
+    fn a_call_that_is_not_variadic_says_nothing_about_a_variadic_argument() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    call @p(%0, %0 byval(24, align 8)) : (ptr)
+    return
+",
+        );
+        assert_eq!(
+            errors(&text),
+            vec![
+                "@f block0 call: the signature takes 1 and this call passes 2",
+                "@f block0 call: this call is not variadic and says how a variadic argument \
+                 travels",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_sret_that_is_not_the_first_parameter_is_reported() {
+        let text = wrap(
+            "(ptr byval(8, align 8), ptr sret(16, align 8))",
+            "block0(%0: ptr, %1: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: sret is the first parameter and this one is not");
+    }
+
+    #[test]
+    fn a_function_returning_through_sret_returns_nothing_else() {
+        let text = wrap(
+            "(ptr sret(8, align 8)) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    return %1
+",
+        );
+        assert_eq!(only(&text), "@f: a signature returning through sret returns nothing else");
+    }
+
+    #[test]
+    fn an_object_that_travels_indirectly_travels_behind_a_pointer() {
+        let text = wrap(
+            "(i32 byval(4, align 4))",
+            "block0(%0: i32):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: parameter 1 travels indirectly and i32 is not a pointer");
+    }
+
+    #[test]
+    fn an_alignment_a_parameter_could_not_have_is_reported() {
+        let text = wrap(
+            "(ptr byval(24, align 3))",
+            "block0(%0: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: an alignment is a power of two and this is 3");
+    }
+
+    /// The slots say which bytes of the object came out of which register, so one reaching past
+    /// the end of the object is a classification that belongs to some other object, and a backend
+    /// acting on it would copy memory this object never had.
+    #[test]
+    fn a_slot_holding_bytes_the_object_does_not_have_is_reported() {
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    %1 = va_object %0, size 12, align 8, in(int 8 at 0, int 8 at 8)
+    return %1
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 va_object: a slot holds bytes 8 to 16 of an object of 12 bytes"
+        );
+    }
+
+    #[test]
+    fn a_result_does_not_travel_indirectly() {
+        // A return value too large for the registers comes back through a parameter, so this
+        // says an ABI nothing implements.
+        let text = wrap(
+            "() -> ptr byval(16, align 8)",
+            "block0:
+    %0 = iconst.i64 0
+    %1 = inttoptr.ptr %0
+    return %1
+",
+        );
+        assert_eq!(only(&text), "@f: result 1 travels indirectly and a result cannot");
+    }
+
+    #[test]
+    fn an_extension_is_asked_of_an_integer_and_not_of_anything_else() {
+        let text = wrap(
+            "(ptr zext)",
+            "block0(%0: ptr):
+    return
+",
+        );
+        assert_eq!(only(&text), "@f: parameter 1 is extended and ptr is not an integer");
+    }
+
+    #[test]
+    fn a_branch_that_passes_the_wrong_number_of_arguments_is_reported() {
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    jump block1(%0)
+
+block1:
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 jump: block1 takes 0 arguments and this branch passes 1"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_passes_the_wrong_type_is_reported() {
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = sext.i64 %0
+    jump block1(%1)
+
+block1(%2: i32):
+    return %2
+",
+        );
+        assert_eq!(only(&text), "@f block0 jump: argument 1 to block1 is i32 and this one is i64");
+    }
+
+    #[test]
+    fn a_block_that_does_not_end_in_a_terminator_is_reported() {
+        let text = wrap("()", "block0:\n    %0 = iconst.i32 1\n");
+        assert_eq!(only(&text), "@f block0: this block does not end in a terminator");
+    }
+
+    #[test]
+    fn an_instruction_after_the_terminator_is_reported() {
+        let text = wrap("()", "block0:\n    return\n    %0 = iconst.i32 1\n");
+        assert_eq!(only(&text), "@f block0 iconst: this comes after the block's terminator");
+    }
+
+    #[test]
+    fn an_unreachable_block_is_reported() {
+        let text = wrap("()", "block0:\n    return\n\nblock1:\n    return\n");
+        assert_eq!(only(&text), "@f block1: this block is not reachable and has not been deleted");
+    }
+
+    #[test]
+    fn a_block_a_jump_to_an_address_arrives_at_is_an_ordinary_target() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = block_addr block1
+    indirect_br %0, block1
+
+block1:
+    %2 = iconst.i32 1
+    return %2
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_block_whose_address_is_taken_is_reached_by_the_taking_of_it() {
+        // Nothing branches to block1 here and its address has left the function, so the one
+        // thing that says it is still somewhere control can arrive at is the `block_addr`.
+        let text = wrap(
+            "() -> ptr",
+            "block0:
+    %0 = block_addr block1
+    return %0
+
+block1:
+    unreachable
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_label_in_a_loop_reads_the_header_even_though_its_address_is_taken_at_the_entry() {
+        // block2 is only reached by the jump in block1, the header, so what the header takes
+        // reaches block2. The `block_addr` in block0 is not a
+        // way in. This is the shape a `goto *` into a loop body lowers to, from issue 1009.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = block_addr block2
+    jump block1(%0)
+
+block1(%2: i32):
+    indirect_br %1, block2
+
+block2:
+    return %2
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn taking_the_address_of_a_block_and_passing_it_arguments_is_reported() {
+        // Taking the address is not arriving, so there is nothing to hand over. What block1
+        // takes is passed by whatever branches there.
+        let text = wrap(
+            "(i32) -> ptr",
+            "block0(%0: i32):
+    %1 = block_addr block1(%0)
+    return %1
+
+block1(%2: i32):
+    unreachable
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 block_addr: block_addr names a block and passes it arguments"
+        );
+    }
+
+    #[test]
+    fn a_jump_to_something_that_is_not_an_address_is_reported() {
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    indirect_br %0, block1
+
+block1:
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 indirect_br: operand 1 of indirect_br is a pointer and this one is i32"
+        );
+    }
+
+    #[test]
+    fn a_branch_back_to_the_entry_block_is_reported() {
+        // The entry block's parameters are the function's arguments, so a branch to it would be
+        // a second place they arrive from.
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    jump block1
+
+block1:
+    jump block0(%0)
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0: the entry block is branched to, and it takes the arguments"
+        );
+    }
+
+    #[test]
+    fn an_entry_block_that_does_not_take_the_arguments_is_reported() {
+        let text = wrap("(i32)", "block0(%0: i64):\n    return\n");
+        assert_eq!(only(&text), "@f: the entry block takes i64 and the signature says i32");
+    }
+
+    #[test]
+    fn a_flag_the_opcode_does_not_read_is_reported() {
+        let text =
+            wrap("(i32) -> i32", "block0(%0: i32):\n    %1 = add.exact %0, %0\n    return %1\n");
+        assert_eq!(only(&text), "@f block0 add: add does not read `exact`");
+    }
+
+    #[test]
+    fn an_ordering_the_operation_cannot_be_asked_for_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = atomic_load.i32 %0, align 4, release\n    return %1\n",
+        );
+        assert_eq!(only(&text), "@f block0 atomic_load: atomic_load cannot be asked for release");
+    }
+
+    #[test]
+    fn an_ordering_on_the_non_atomic_form_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, acquire\n    return %1\n",
+        );
+        assert_eq!(only(&text), "@f block0 load: load cannot be asked for acquire");
+    }
+
+    #[test]
+    fn a_restrict_base_outside_any_clique_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, restrict(0, 2)\n    return %1\n",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: restrict base 2 is in no clique, and a base means nothing without one"
+        );
+    }
+
+    #[test]
+    fn padding_owned_by_something_that_is_not_a_store_is_reported() {
+        // The number says how far a store records into the init plane, and nothing but a store
+        // records anything, so one on a read is either a lowering bug or somebody meaning a
+        // different thing by the word.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):\n    %1 = load.i32 %0, align 4, owns 8\n    return %1\n",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 load: a load owns no padding, since only a store records any"
+        );
+    }
+
+    #[test]
+    fn a_va_object_that_answers_anything_but_an_address_is_reported() {
+        // Where the object is, which is the only thing it can answer, since the object it reads
+        // is an aggregate and an aggregate is not a value the IR has a type for.
+        let text = wrap(
+            "(ptr) -> i64",
+            "block0(%0: ptr):
+    %1 = va_object.i64 %0, size 16, align 8
+    return %1
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 va_object: va_object answers where the object is and i64 is not an address"
+        );
+    }
+
+    #[test]
+    fn an_alloca_of_a_fixed_size_outside_the_entry_block_is_reported() {
+        let text = wrap(
+            "()",
+            "block0:
+    jump block1
+
+block1:
+    %0 = alloca, size 16, align 8
+    return
+",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block1 alloca: an alloca of a fixed size belongs in the entry block"
+        );
+    }
+
+    #[test]
+    fn a_dynamic_alloca_may_be_anywhere() {
+        let text = wrap(
+            "(i64)",
+            "block0(%0: i64):
+    jump block1
+
+block1:
+    %1 = alloca %0, align 8
+    return
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn two_cases_of_a_switch_with_the_same_value_are_reported() {
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    switch %0, block1, [7 => block1, 7 => block1]
+
+block1:
+    return
+",
+        );
+        assert_eq!(only(&text), "@f block0 switch: two cases of this switch have the same value");
+    }
+
+    #[test]
+    fn operands_that_do_not_agree_are_reported() {
+        let text = wrap(
+            "(i32, i64) -> i32",
+            "block0(%0: i32, %1: i64):\n    %2 = add %0, %1\n    return %2\n",
+        );
+        assert_eq!(
+            only(&text),
+            "@f block0 add: the operands of add have one type and these are i32 and i64"
+        );
+    }
+
+    #[test]
+    fn a_conversion_that_goes_the_wrong_way_is_reported() {
+        let text = wrap("(i32) -> i64", "block0(%0: i32):\n    %1 = trunc.i64 %0\n    return %1\n");
+        assert_eq!(
+            only(&text),
+            "@f block0 trunc: trunc produces something narrower and i32 to i64 is not"
+        );
+    }
+
+    #[test]
+    fn a_bitcast_between_an_address_and_a_number_is_reported() {
+        let text =
+            wrap("(ptr) -> i64", "block0(%0: ptr):\n    %1 = bitcast.i64 %0\n    return %1\n");
+        assert_eq!(
+            only(&text),
+            "@f block0 bitcast: a bitcast between a pointer and a number is ptrtoint or inttoptr"
+        );
+    }
+
+    #[test]
+    fn an_operand_of_the_wrong_kind_is_reported() {
+        let text = wrap("(i32) -> i32", "block0(%0: i32):\n    %1 = fadd %0, %0\n    return %1\n");
+        assert_eq!(
+            only(&text),
+            "@f block0 fadd: operand 1 of fadd is a floating point value and this one is i32"
+        );
+    }
+
+    #[test]
+    fn a_condition_that_is_not_one_bit_is_reported() {
+        let text = wrap(
+            "(i32)",
+            "block0(%0: i32):
+    br_if %0, block1, block1
+
+block1:
+    return
+",
+        );
+        assert_eq!(only(&text), "@f block0 br_if: br_if branches on an i1 and this one on i32");
+    }
+
+    #[test]
+    fn a_return_that_does_not_match_the_signature_is_reported() {
+        let text = wrap("() -> i32", "block0:\n    return\n");
+        assert_eq!(only(&text), "@f block0 return: the signature returns 1 and this returns 0");
+    }
+
+    #[test]
+    fn a_call_that_disagrees_with_the_declaration_is_reported() {
+        let text = format!(
+            "{HEADER}
+func @g(i32, ...) -> i32, linkage(external);
+
+func @f(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = call @g(%0) : (i32) -> i32
+    return %1
+}}
+"
+        );
+        assert_eq!(only(&text), "@f block0 call: @g is declared here with another signature");
+    }
+
+    #[test]
+    fn a_global_whose_image_is_not_its_size_is_reported() {
+        let text =
+            format!("{HEADER}\nglobal @x : bytes 8 = {{ i32 7 }}, align 4, linkage(external)\n");
+        assert_eq!(only(&text), "@x: the image is 4 bytes and the global is 8");
+    }
+
+    #[test]
+    fn a_pointer_in_an_image_has_no_width_and_is_reported() {
+        // What a `NULL` in a static initializer used to become. A `ptr` takes the width of the
+        // target's addresses and a type says nothing about the target, so the datum measured
+        // zero bytes and the value it held went nowhere.
+        let text = format!(
+            "{HEADER}\nglobal @x : bytes 8 = {{ ptr 0x0, zero 8 }}, align 8, linkage(external)\n"
+        );
+        assert_eq!(only(&text), "@x: a scalar in an image has a width and ptr has none");
+    }
+
+    #[test]
+    fn a_declaration_of_something_another_module_defines_may_be_constant() {
+        // `extern const int x;` names an object in the library's read only data. Whether it may
+        // be written through is a fact about the object rather than about who holds the bytes.
+        let text = format!("{HEADER}\nglobal @x : bytes 4, align 4, linkage(external), constant\n");
+        assert!(errors(&text).is_empty(), "{:?}", errors(&text));
+    }
+
+    #[test]
+    fn an_alias_to_itself_is_reported() {
+        let text = format!("{HEADER}\nalias @a = @a, linkage(external)\n");
+        assert_eq!(only(&text), "@a: an alias to itself");
+    }
+
+    #[test]
+    fn an_ifunc_that_does_not_resolve_through_a_function_is_reported() {
+        let text = format!(
+            "{HEADER}
+global @g : i32 = 0, align 4, linkage(external)
+
+ifunc @f = @g, linkage(external)
+"
+        );
+        assert_eq!(
+            only(&text),
+            "@f: an ifunc resolves through a function and this target is not one"
+        );
+    }
+
+    #[test]
+    fn attributes_that_contradict_each_other_are_reported() {
+        let text =
+            format!("{HEADER}\nfunc @f(), linkage(external), attrs(always_inline, noinline);\n");
+        assert_eq!(
+            only(&text),
+            "@f: `always_inline` and `noinline` cannot both be true of a function"
+        );
+    }
+
+    // The rest are things no text can say, because the parser turns them down before the
+    // verifier would see them. They are what a pass produces, which is who the verifier is for.
+
+    fn one_error(module: &Module, func: &Func, names: &Interner) -> String {
+        match verify_func(module, func, names) {
+            Ok(()) => panic!("that was expected to be turned down"),
+            Err(errors) => {
+                assert_eq!(errors.len(), 1, "{errors:#?}");
+                errors[0].to_string()
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_the_function_does_not_have_is_reported() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let block = func.create_block();
+        let args = func.push_values(&[Value::from_usize(9)]);
+        let inst =
+            func.create_inst(InstData { args, ..InstData::new(Opcode::Return) }, &[], Span::DUMMY);
+        func.append_inst(block, inst);
+        assert_eq!(
+            one_error(&module, &func, &names),
+            "@f block0 return: %9 is not a value of this function"
+        );
+    }
+
+    #[test]
+    fn a_value_whose_definition_has_been_taken_out_is_reported() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let i32_ = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_returns(&[i32_]));
+        let block = func.create_block();
+        let mut b = Builder::new(&mut func, block);
+        let value = b.iconst(i32_, 7);
+        b.ret(&[value]);
+        let Def::Result { inst, .. } = func[value].def else { unreachable!("a constant") };
+        func.remove_inst(inst);
+        assert_eq!(
+            one_error(&module, &func, &names),
+            "@f block0 return: %0 is produced by an instruction that is not in the function"
+        );
+    }
+
+    #[test]
+    fn a_value_whose_parameter_has_been_taken_out_is_reported() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let i32_ = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let body = func.create_block();
+        let param = func.append_param(body, i32_);
+        Builder::new(&mut func, entry).jump(body, &[]);
+        let mut b = Builder::new(&mut func, body);
+        let one = b.iconst(i32_, 1);
+        b.binary(Opcode::Add, param, one, Flags::NONE);
+        b.ret(&[]);
+        // What control flow simplification used to leave behind when it took out a parameter
+        // nothing reads. The value still says which block it arrives at and that block still
+        // dominates this one, so the dominance question answers yes and says nothing.
+        func.retain_params(body, |_| false);
+        assert_eq!(
+            one_error(&module, &func, &names),
+            "@f block1 add: %0 is a parameter block1 no longer has"
+        );
+    }
+
+    #[test]
+    fn an_instruction_carrying_another_opcodes_payload_is_reported() {
+        // This one prints as text the parser cannot read back, so the round trip would fail on
+        // it somewhere else entirely if the verifier did not say so here.
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::int(32)]));
+        let block = func.create_block();
+        let param = func.append_param(block, Type::int(32));
+        let args = func.push_values(&[param, param]);
+        let inst = func.create_inst(
+            InstData { args, extra: Extra::IntPred(IntPred::Eq), ..InstData::new(Opcode::Add) },
+            &[Type::int(32)],
+            Span::DUMMY,
+        );
+        func.append_inst(block, inst);
+        let ret = func.create_inst(InstData::new(Opcode::Return), &[], Span::DUMMY);
+        func.append_inst(block, ret);
+        assert_eq!(
+            one_error(&module, &func, &names),
+            "@f block0 add: add carries nothing and this one carries an integer comparison"
+        );
+    }
+
+    #[test]
+    fn a_metadata_node_that_is_its_own_parent_is_reported() {
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("built.c"), &target());
+        module.add_meta(MetaNode::Tbaa(TbaaNode {
+            name: names.intern("int"),
+            parent: Some(Idx::from_usize(0)),
+            offset: 0,
+        }));
+        let found = match verify(&module, &names) {
+            Ok(()) => panic!("that was expected to be turned down"),
+            Err(errors) => errors,
+        };
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(
+            found[0].to_string(),
+            "!0: a metadata node names one that comes before it and this one is !0"
+        );
+    }
+
+    #[test]
+    fn a_datalayout_the_target_does_not_imply_is_reported() {
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("built.c"), &target());
+        module.datalayout = DataLayout::parse("e-p:32:32-i64:64-f80:32-S64").expect("a layout");
+        let found = match verify(&module, &names) {
+            Ok(()) => panic!("that was expected to be turned down"),
+            Err(errors) => errors,
+        };
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].to_string().starts_with("@built.c: the datalayout is "), "{}", found[0]);
+    }
+
+    #[test]
+    fn a_flag_riding_along_where_it_is_read_is_not_reported() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new().with_params(&[i32_]).with_returns(&[i32_]),
+        );
+        let block = func.create_block();
+        let param = func.append_param(block, i32_);
+        let mut b = Builder::new(&mut func, block);
+        let sum = b.binary(Opcode::Add, param, param, Flags::NSW);
+        b.ret(&[sum]);
+        assert!(verify_func(&module, &func, &names).is_ok());
+    }
+
+    #[test]
+    fn a_declaration_is_checked_and_has_nothing_else_to_check() {
+        let mut names = Interner::new();
+        let module = Module::new(names.intern("built.c"), &target());
+        let func = Func::new(Symbol::from_raw(0), Signature::new());
+        assert!(func.is_declaration());
+        assert!(verify_func(&module, &func, &names).is_ok());
+    }
+
+    // The forms holding a capability that the verifier has to turn down, from
+    // `spec/safe-memory/06-instrumentation.md` section 6.2.2. Six instructions make a capability
+    // and every other way of getting one is on this list.
+
+    #[test]
+    fn a_capability_parameter_is_reported() {
+        let text = wrap(
+            "(cap) -> i32",
+            "block0(%0: cap):
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "parameter 1 is a capability and a capability does not cross a call");
+    }
+
+    #[test]
+    fn a_capability_result_is_reported() {
+        let text = wrap(
+            "(i32) -> cap",
+            "block0(%0: i32):
+    unreachable
+",
+        );
+        reports(&text, "result 1 is a capability and a capability does not cross a call");
+    }
+
+    #[test]
+    fn a_capability_a_block_takes_is_a_capability_like_any_other() {
+        // Two paths each hold one and they meet. This is what block parameters are for and there
+        // is nothing about a capability that makes it the exception.
+        let text = wrap(
+            "(i1, ptr) -> i32",
+            "block0(%0: i1, %1: ptr):
+    %2 = cap_of %1
+    br_if %0, block1(%2), block1(%2)
+
+block1(%3: cap):
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(errors(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_instruction_that_is_not_a_cap_instruction_producing_one_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = bitcast.cap %1
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "bitcast produces a capability and only the cap instructions do that");
+    }
+
+    #[test]
+    fn a_capability_where_a_pointer_belongs_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    cap_store %1, %1, %0, %1
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 2 of cap_store is a pointer and this one is cap");
+    }
+
+    #[test]
+    fn a_pointer_where_a_capability_belongs_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    cap_store %0, %0, %0, %0
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "operand 1 of cap_store is a capability and this one is ptr");
+    }
+
+    #[test]
+    fn narrowing_by_an_offset_and_a_length_of_different_widths_is_reported() {
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = cap_of %0
+    %3 = iconst.i32 4
+    %4 = cap_narrow %2, %1, %3
+    %5 = iconst.i32 0
+    return %5
+",
+        );
+        reports(&text, "the operands of cap_narrow have one type and these are i64 and i32");
+    }
+
+    #[test]
+    fn an_extent_answered_in_a_different_width_from_the_limit_is_reported() {
+        // The limit and the answer count the same bytes, so a pass that asked in one width and
+        // read the answer in another has arithmetic that does not mean what it looks like.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = cap_of %0
+    %3 = cap_extent.i32 %2, %0, %1
+    return %3
+",
+        );
+        reports(&text, "cap_extent produces i64 here and this one produces i32");
+    }
+
+    #[test]
+    fn a_capability_instruction_with_the_wrong_number_of_operands_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0, %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "cap_of takes 1 operands and this one has 2");
+    }
+
+    #[test]
+    fn a_check_given_its_pointer_and_its_capability_the_other_way_round_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    check_live %0, %1
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 1 of check_live is a capability and this one is ptr");
+        reports(&text, "operand 2 of check_live is a pointer and this one is cap");
+    }
+
+    #[test]
+    fn a_check_on_the_same_value_twice_is_reported() {
+        // The one that would otherwise pass and mean nothing, since a pointer is within its
+        // own bounds however wrong the bounds are.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    check_bounds %0, %0, size 4, align 4
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "operand 1 of check_bounds is a capability and this one is ptr");
+    }
+
+    #[test]
+    fn a_bounds_check_over_a_length_that_is_not_a_number_is_reported() {
+        // The third operand is how many bytes the check is about, which section 7.4's hoisted check
+        // works out from a trip count, so it is a value and a value can be the wrong type.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    check_bounds %1, %0, %0, size 4, align 4
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "operand 3 of check_bounds is an integer and this one is ptr");
+    }
+
+    #[test]
+    fn a_bounds_check_with_a_fourth_operand_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 4
+    check_bounds %1, %0, %2, %2, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "check_bounds takes 2 or 3 operands and this one has 4");
+    }
+
+    #[test]
+    fn a_plane_check_may_carry_a_step_and_nothing_past_it() {
+        let stepped = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    %3 = iconst.i64 16
+    check_init %1, %0, %2, %3, size 4, align 4
+    %4 = iconst.i32 0
+    return %4
+",
+        );
+        assert_eq!(errors(&stepped), Vec::<String>::new());
+        let past = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    check_init %1, %0, %2, %2, %2, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&past, "check_init takes 2, 3 or 4 operands and this one has 5");
+        let pointer = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 116
+    check_init %1, %0, %2, %0, size 4, align 4
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&pointer, "operand 4 of check_init is an integer and this one is ptr");
+    }
+
+    #[test]
+    fn a_derivation_check_without_the_pointer_it_is_about_is_reported() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_of %0
+    %2 = iconst.i64 4
+    check_deriv %1, %0, %2
+    %3 = iconst.i32 0
+    return %3
+",
+        );
+        reports(&text, "check_deriv takes 4 operands and this one has 3");
+    }
+
+    #[test]
+    fn a_plane_write_over_a_length_that_is_not_a_number_is_reported() {
+        // The length is an operand and not a payload because a variable length array has one
+        // the front end cannot know, so it is a value and a value can be the wrong type.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    meta_end %0, %0
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "operand 2 of meta_end is an integer and this one is ptr");
+    }
+
+    #[test]
+    fn a_region_marker_handed_a_value_is_reported() {
+        // A region says something about the code between its two ends and nothing about any
+        // value, so there is no operand it could be given that would mean anything.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    safe_region_end %0
+    %1 = iconst.i32 0
+    return %1
+",
+        );
+        reports(&text, "safe_region_end takes 0 operands and this one has 1");
+    }
+
+    #[test]
+    fn a_fact_about_something_that_is_not_a_pointer_is_reported() {
+        // All four facts are about storage reached through a pointer, so there is nothing any of
+        // them could mean about an integer.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    return %0
+
+facts:
+    %0 = !live
+",
+        );
+        reports(&text, "%0 is said to be a pointer and it is i32");
+    }
+
+    #[test]
+    fn a_range_stands_on_an_integer_that_can_hold_it() {
+        let body = |ty: &str, fact: &str| {
+            format!("block0(%0: {ty}):\n    return %0\n\nfacts:\n    %0 = {fact}\n")
+        };
+        let held = wrap("(i32) -> i32", &body("i32", "!range(4294967295, 4)"));
+        assert_eq!(errors(&held), Vec::<String>::new());
+        let pointer = wrap("(ptr) -> ptr", &body("ptr", "!range(0, 4)"));
+        reports(&pointer, "%0 is said to be in a range and it is ptr");
+        let wide = wrap("(i8) -> i8", &body("i8", "!range(0, 256)"));
+        reports(&wide, "%0 is said to be between 0 and 256 and it is i8");
+    }
+
+    #[test]
+    fn an_alignment_that_is_not_a_power_of_two_is_reported() {
+        // Alignment is a power of two everywhere else in the IR and a fact is not the place to
+        // start meaning something else by the word.
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    return %0
+
+facts:
+    %0 = !aligned(6)
+",
+        );
+        reports(&text, "%0 is said to be aligned to 6 and an alignment is a power of two");
+    }
+
+    #[test]
+    fn a_range_that_starts_somewhere_that_is_not_a_pointer_is_reported() {
+        // A range is a place, so where it starts is an address. A number there would compare
+        // fine against another number and would be answering a different question.
+        let text = wrap(
+            "(ptr, i64) -> ptr",
+            "block0(%0: ptr, %1: i64):
+    return %0
+
+facts:
+    %0 = !bounds(%1, %1)
+",
+        );
+        reports(&text, "the range %0 is in starts at a pointer and %1 is i64");
+    }
+
+    #[test]
+    fn a_range_whose_extent_is_not_a_number_is_reported() {
+        let text = wrap(
+            "(ptr) -> ptr",
+            "block0(%0: ptr):
+    return %0
+
+facts:
+    %0 = !bounds(%0, %0)
+",
+        );
+        reports(&text, "the range %0 is in has an integer extent and %0 is ptr");
+    }
+
+    #[test]
+    fn a_range_computed_after_the_pointer_it_is_about_is_reported() {
+        // The fact is about the value everywhere it is live, so a range named by something
+        // computed later is a range half its uses could not name.
+        let text = wrap(
+            "(ptr, i64) -> ptr",
+            "block0(%0: ptr, %1: i64):
+    %2 = ptr_add %0, %1
+    %3 = iconst.i64 16
+    return %2
+
+facts:
+    %2 = !bounds(%0, %3)
+",
+        );
+        reports(&text, "%2 names %3 and does not reach it");
+    }
+
+    #[test]
+    fn a_load_handed_a_plane_entry_is_reported() {
+        // The two tables share the one numbering, so the kind is the only thing that says a
+        // reference is to the right node, and an aliasing query over `character` means nothing.
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr) -> i32, linkage(external) {{\n\
+             block0(%0: ptr):\n    %1 = load.i32 %0, align 4, tbaa !0\n    return %1\n}}\n\
+             \n!0 = plane character\n"
+        );
+        reports(&text, "load names an aliasing node and !0 is a plane entry");
+    }
+
+    #[test]
+    fn a_type_check_handed_an_aliasing_node_is_reported() {
+        let text = format!(
+            "{HEADER}\nfunc @f(ptr) -> i32, linkage(external) {{\n\
+             block0(%0: ptr):\n    %1 = cap_of %0\n    \
+             check_type %1, %0, size 4, align 4, tbaa !0\n    %2 = iconst.i32 0\n    \
+             return %2\n}}\n\n!0 = tbaa \"int\", offset 0\n"
+        );
+        reports(&text, "check_type names a plane entry and !0 is an aliasing node");
+    }
+
+    #[test]
+    fn a_plane_entry_for_a_byte_no_pointer_has_is_reported() {
+        // Which byte of a pointer it is, so byte eight of an eight byte pointer is a plane the
+        // runtime could never write.
+        let text = format!("{HEADER}\n!0 = plane pointer_slot 9\n");
+        reports(&text, "a pointer on this target is 8 bytes and this is byte 9");
+    }
+
+    #[test]
+    fn a_plane_entry_naming_another_plane_entry_is_reported() {
+        let text = format!("{HEADER}\n!0 = plane character\n!1 = plane !0\n");
+        reports(&text, "a plane entry names a type and !0 is a plane entry");
+    }
+
+    #[test]
+    fn a_null_capability_handed_an_operand_is_reported() {
+        // It is the one capability instruction that describes nothing, so a pointer next to it
+        // is a pointer somebody believed it was about.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = cap_null %0
+    %2 = iconst.i32 0
+    return %2
+",
+        );
+        reports(&text, "cap_null takes 0 operands and this one has 1");
+    }
+}

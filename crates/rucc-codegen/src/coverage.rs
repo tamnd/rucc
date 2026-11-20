@@ -1,0 +1,924 @@
+//! Which IR opcodes have somewhere to go, and which do not.
+//!
+//! Design: `spec/10-backend.md` section 10.2, under **Coverage**.
+//!
+//! Every opcode has to be lowered by something or be a hole somebody wrote down. Without this the
+//! way a hole is found is that somebody compiles a program containing one and the selector reports
+//! that it cannot lower an instruction, which is a fine diagnostic and a bad discovery mechanism:
+//! it turns a gap in the rule set into a user's problem rather than a failing build.
+//!
+//! # The three answers
+//!
+//! An opcode is lowered by a rule, or somewhere a rule cannot reach, or nowhere.
+//!
+//! The first is the ordinary answer and the one this can check by itself. [`crate::term`] says
+//! every name a rule could be written at, the table says every name one is written at, and an
+//! opcode is covered when each of its names is in both. That is what makes this a check about
+//! widths rather than about opcodes: an `add` with a rule at four widths and no rule at the fifth
+//! is not covered, and would be reported here as the missing name rather than as a covered opcode.
+//!
+//! The second is a lowering, which is not a gap. `spec/10-backend.md` names five of them and there
+//! are more now, and they are all the same kind of thing: an opcode whose lowering depends on
+//! something no pattern can see. Where a call's arguments go depends on the signature, where a
+//! local lives depends on the frame, an unconditional jump is an edge and edges live on the block,
+//! and a `memcpy` is a run of moves whose length is a constant the pattern would have to count. A
+//! rule matches one term and can say none of that. Which opcodes those are is
+//! [`crate::capability::lowering`] and is not written down here, because it was written down here
+//! and in the lowering group both and the two could disagree.
+//!
+//! The third is [`GAPS`], which is the number `spec/15-testing.md` section 15.8 says we keep. Each
+//! entry names why it is there and the issue that closes it, so that an opcode nobody has written a
+//! rule for is a decision somebody wrote down rather than a surprise.
+//!
+//! [`WIDTHS`] and [`NAMES`] are the same third answer said about something smaller than an opcode.
+//! A width on [`WIDTHS`] has no names at all, so no opcode is missing a rule at it, and a name on
+//! [`NAMES`] is one width of an opcode that lowers at its other widths. Both carry the issue that
+//! closes them for the same reason [`GAPS`] does.
+//!
+//! # What makes the lists honest
+//!
+//! An entry that stops being true fails. An opcode on either list that a rule starts covering is a
+//! stale entry and the tests below say so by name, which is the same rule the exclusion lists in
+//! the compatibility harness are kept under: a list nothing checks is a list that only grows.
+//!
+//! The direction this cannot check is an opcode moving from [`GAPS`] to a hand written lowering
+//! without [`crate::capability::HAND`] following it, because where an opcode is lowered by name is
+//! a `match` arm and there is nothing to ask about a `match` arm from here. What that costs is one
+//! line of a list going out of date; what it does not cost is a gap going unnoticed, since the
+//! opcode is still on a list and still counted.
+//!
+//! # The other question
+//!
+//! All of the above is about the rule set as it is written. [`Fired`] is about the rule set as it
+//! is used: which rules a compilation actually reached. A rule nothing reaches is proved and dead
+//! weight, or it is a construct the corpus does not contain and somebody should know which. The
+//! selector marks a rule as it fires it, the driver writes the marks out under
+//! `-Zrule-coverage=FILE`, and the harness in `tamnd/rucc-compat` unions those files over a corpus,
+//! which is what turns coverage of the rule set into a number. `spec/20-execution-testing.md`
+//! section 20.9 is the design and `tamnd/rucc#261` is the work.
+
+use core::fmt;
+use core::fmt::Write as _;
+
+use rucc_ir::Opcode;
+use rucc_target::Arch;
+
+use crate::capability::{self, pattern_heads};
+use crate::select::Table;
+use crate::term;
+
+/// An opcode nothing lowers, why it is here, and the issue that closes it.
+///
+/// This is the count `spec/15-testing.md` section 15.8 asks for. It is not zero yet and the
+/// spec says it should be, which is the honest reading of where the back end is: every one of
+/// these is a feature nobody has written, and every one of them is an opcode the front end cannot
+/// produce either, so a program that reaches one of these is a program that reaches an
+/// unimplemented builtin first. The remainder of two floats, the fused multiply add and the bit
+/// reversal used to be here too, and left when [`crate::lowering::Step::Maths`] made the first two
+/// calls to the maths library and [`crate::lowering::Step::Bytes`] carried the byte swap's halving
+/// down to single bits for the third.
+pub static GAPS: &[(Opcode, &str, &str)] = &[
+    (
+        Opcode::TargetIntrinsic,
+        "an operation of the machine's own, which only a vector builtin needs",
+        "tamnd/rucc#200",
+    ),
+    // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
+    // either, since the passes that would are milestones S5 and after, so there is no program the
+    // back end can be handed that reaches one. The ones the safety pass lowers are on `HAND`,
+    // and the five that make a capability all left this list without anything emitting them, which
+    // is the whole of tamnd/rucc#1085's lowering half: each has a lowering waiting for the pass that
+    // will write one, because a capability had to be a value the back end could hold before any of
+    // them could be written down at all. The two region markers left the same way and for a
+    // different reason, which is that what they cost is a count rather than a lowering.
+    // What is left is the plane writes, which the runtime does for itself today because the only
+    // ranges anything asks about are the ones its own allocator handed out. A stack object needs
+    // these, since nothing in the runtime sees a frame being set up or torn down.
+    (Opcode::MetaBegin, "a write over a range of the lifetime plane", "tamnd/rucc#856"),
+    (
+        Opcode::MetaEnd,
+        "the same write, with the version bumped past every capability",
+        "tamnd/rucc#856",
+    ),
+    (
+        Opcode::MetaTransfer,
+        "the same, and the state a range is in while a device owns it, which is S2's",
+        "tamnd/rucc#856",
+    ),
+];
+
+/// A width no rule is written at, why, and the issue that closes it.
+///
+/// The other half of coverage, and the half an opcode list cannot say. An opcode is covered when
+/// every name it has is a name a rule is written at, and a width with no name has no names to
+/// check: an `add` of two `__int128`s is not a missing rule for `add`, it is a width the rule
+/// language cannot spell. So the widths are written down here for the same reason the opcodes are
+/// written down above.
+pub static WIDTHS: &[(&str, &str, &str)] = &[
+    (
+        "one bit",
+        "everything but and, or, xor, a constant, and the widening out of one",
+        "tamnd/rucc#352",
+    ),
+    (
+        "a hundred and twenty eight bits",
+        "split into two halves before selection, except a division",
+        "tamnd/rucc#351",
+    ),
+    (
+        "eighty bits",
+        "a long double is on the x87 stack and no rule is about that stack",
+        "tamnd/rucc#326",
+    ),
+    (
+        "a hundred and twenty eight bits of float",
+        "turned into a call before selection, except a conditional move and the conversions \
+         against an integer that wide",
+        "tamnd/rucc#1064",
+    ),
+    (
+        "a vector other than sixteen bytes of integer lanes",
+        "a rule at a width says nothing about how many lanes, and the rules are written at four \
+         lanes of thirty two bits and two of sixty four on x86-64, and at those and eight of \
+         sixteen and sixteen of eight on AArch64",
+        "tamnd/rucc#200",
+    ),
+];
+
+/// A name a rule could be written at and deliberately is not, why, and the issue that puts it
+/// back.
+///
+/// The third list, and the one that is about a name rather than about an opcode or a width. An
+/// opcode on [`GAPS`] has no lowering at any width and a width on [`WIDTHS`] has no names at all,
+/// and neither of those can say that `add` is lowered at four widths and left alone at two.
+///
+/// This list used to be all of the narrow arithmetic. C promotes the operands of an arithmetic
+/// operator to `int` before the operator is applied, so `char a, b; a + b` is an `int` addition of
+/// two sign extended chars and there is no C program that asks the back end to add two bytes.
+/// Rules were written at those names anyway, ahead of the pass that would reach them, and they sat
+/// proved and never selected: `tamnd/rucc#261` measured that and `tamnd/rucc#368` took them out.
+/// They are back, because the width narrowing pass in `tamnd/rucc#375` is that caller and it
+/// writes a byte add out of the truncation the assignment back to a `char` already was. The last
+/// to come back were the divides, which narrow when the operands are zero extensions and, for
+/// sign extensions, when the ranges rule out the most negative value over minus one.
+///
+/// So the list was empty for a while, and what is on it now is the two narrow lane shapes of
+/// integer vector. AArch64 computes in those and gave them names, and nothing on x86-64 writes a
+/// vector of `short` or `char` lanes whole yet: the front end keeps those a lane at a time here.
+pub static NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i16x8",
+        "an integer vector of narrow lanes, which only AArch64 has rules for so far",
+        "tamnd/rucc#3775",
+    ),
+    ("add.i8x16", "the same", "tamnd/rucc#3775"),
+    ("and.i16x8", "the same", "tamnd/rucc#3775"),
+    ("and.i8x16", "the same", "tamnd/rucc#3775"),
+    ("load.i16x8", "the same", "tamnd/rucc#3775"),
+    ("load.i8x16", "the same", "tamnd/rucc#3775"),
+    ("or.i16x8", "the same", "tamnd/rucc#3775"),
+    ("or.i8x16", "the same", "tamnd/rucc#3775"),
+    ("store.i16x8", "the same", "tamnd/rucc#3775"),
+    ("store.i8x16", "the same", "tamnd/rucc#3775"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3775"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3775"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3775"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3775"),
+    (
+        "fpext.f16.f32",
+        "a half widened, which `crate::half` calls a routine for at this baseline",
+        "tamnd/rucc#4234",
+    ),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#4234"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#4234"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#4234"),
+    (
+        "store.f16",
+        "a half stored, which `crate::half` writes as its bits and an integer store",
+        "tamnd/rucc#4234",
+    ),
+];
+
+/// [`NAMES`] for `aarch64.rules`.
+///
+/// A list of its own because the two rule files are not the same size yet and a name left out of
+/// one is not left out of the other: AArch64 converts and stores a half in one instruction and
+/// x86-64 does not at its baseline. [`names`] is which list goes with which table.
+pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
+    (
+        "umulh.i32",
+        "the high half of a thirty two bit product, which only a division by a constant on a \
+         machine of thirty two bits writes: this one divides a word by multiplying at sixty four",
+        "tamnd/rucc#2247",
+    ),
+    ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
+    (
+        "bswap.i16",
+        "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
+        "tamnd/rucc#307",
+    ),
+];
+
+/// [`NAMES`] for `i386.rules`.
+///
+/// Every name here is at sixty four bits, which is twice what an i386 register holds. Most of them
+/// never reach the selector on this machine, since [`crate::wide`] splits the value into two
+/// thirty two bit halves first, and they are written down so the report says that rather than
+/// calling them missing rules. The last four have no split yet. The two high halves are never
+/// asked for at this width here, since [`crate::divide`] divides a word by multiplying words on a
+/// machine of thirty two bits.
+pub static X86_NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i64",
+        "a sixty four bit integer, which `crate::wide` splits into two registers before selection",
+        "tamnd/rucc#2247",
+    ),
+    ("and.i64", "the same", "tamnd/rucc#2247"),
+    ("ashr.i64", "the same", "tamnd/rucc#2247"),
+    ("bswap.i64", "the same", "tamnd/rucc#2247"),
+    ("fptosi.f32.i64", "the same", "tamnd/rucc#2247"),
+    ("fptosi.f64.i64", "the same", "tamnd/rucc#2247"),
+    ("iconst.i64", "the same", "tamnd/rucc#2247"),
+    ("load.i64", "the same", "tamnd/rucc#2247"),
+    ("lshr.i64", "the same", "tamnd/rucc#2247"),
+    ("mul.i64", "the same", "tamnd/rucc#2247"),
+    ("or.i64", "the same", "tamnd/rucc#2247"),
+    ("ret.i64", "the same", "tamnd/rucc#2247"),
+    ("sdiv.i64", "the same", "tamnd/rucc#2247"),
+    ("select.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i16.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i32.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i8.i64", "the same", "tamnd/rucc#2247"),
+    ("shl.i64", "the same", "tamnd/rucc#2247"),
+    ("sitofp.i64.f32", "the same", "tamnd/rucc#2247"),
+    ("sitofp.i64.f64", "the same", "tamnd/rucc#2247"),
+    ("srem.i64", "the same", "tamnd/rucc#2247"),
+    ("store.i64", "the same", "tamnd/rucc#2247"),
+    ("sub.i64", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i1", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i16", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i32", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i8", "the same", "tamnd/rucc#2247"),
+    ("udiv.i64", "the same", "tamnd/rucc#2247"),
+    ("urem.i64", "the same", "tamnd/rucc#2247"),
+    ("xor.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i1.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i16.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i32.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i8.i64", "the same", "tamnd/rucc#2247"),
+    (
+        "bitcast.f64.i64",
+        "a double's bits as one integer, which nothing splits yet",
+        "tamnd/rucc#2247",
+    ),
+    ("bitcast.i64.f64", "the same, the other way", "tamnd/rucc#2247"),
+    (
+        "smulh.i64",
+        "the high half of a sixty four bit product, which only a division by a constant writes \
+         and nothing splits yet",
+        "tamnd/rucc#2247",
+    ),
+    ("umulh.i64", "the same, unsigned", "tamnd/rucc#2247"),
+    (
+        "add.i32x4",
+        "an integer vector, which only x86-64 and AArch64 have rules for so far",
+        "tamnd/rucc#2320",
+    ),
+    ("add.i64x2", "the same", "tamnd/rucc#2320"),
+    ("and.i32x4", "the same", "tamnd/rucc#2320"),
+    ("and.i64x2", "the same", "tamnd/rucc#2320"),
+    ("load.i32x4", "the same", "tamnd/rucc#2320"),
+    ("load.i64x2", "the same", "tamnd/rucc#2320"),
+    ("or.i32x4", "the same", "tamnd/rucc#2320"),
+    ("or.i64x2", "the same", "tamnd/rucc#2320"),
+    ("store.i32x4", "the same", "tamnd/rucc#2320"),
+    ("store.i64x2", "the same", "tamnd/rucc#2320"),
+    ("sub.i32x4", "the same", "tamnd/rucc#2320"),
+    ("sub.i64x2", "the same", "tamnd/rucc#2320"),
+    ("xor.i32x4", "the same", "tamnd/rucc#2320"),
+    ("xor.i64x2", "the same", "tamnd/rucc#2320"),
+    (
+        "add.i16x8",
+        "an integer vector of narrow lanes, which only AArch64 has rules for so far",
+        "tamnd/rucc#3775",
+    ),
+    ("add.i8x16", "the same", "tamnd/rucc#3775"),
+    ("and.i16x8", "the same", "tamnd/rucc#3775"),
+    ("and.i8x16", "the same", "tamnd/rucc#3775"),
+    ("load.i16x8", "the same", "tamnd/rucc#3775"),
+    ("load.i8x16", "the same", "tamnd/rucc#3775"),
+    ("or.i16x8", "the same", "tamnd/rucc#3775"),
+    ("or.i8x16", "the same", "tamnd/rucc#3775"),
+    ("store.i16x8", "the same", "tamnd/rucc#3775"),
+    ("store.i8x16", "the same", "tamnd/rucc#3775"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3775"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3775"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3775"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3775"),
+    (
+        "ctlz.i64",
+        "a bit count of a pair of words, which `expand::counts` writes as counts of each word or \
+         as arithmetic before selection",
+        "tamnd/rucc#310",
+    ),
+    ("ctpop.i64", "the same", "tamnd/rucc#310"),
+    ("cttz.i64", "the same", "tamnd/rucc#310"),
+    (
+        "fpext.f16.f32",
+        "a half widened, which `crate::half` calls a routine for at this baseline",
+        "tamnd/rucc#4234",
+    ),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#4234"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#4234"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#4234"),
+    (
+        "store.f16",
+        "a half stored, which `crate::half` writes as its bits and an integer store",
+        "tamnd/rucc#4234",
+    ),
+];
+
+/// [`NAMES`] for `riscv64.rules`, a list of its own for the reason [`AARCH64_NAMES`] gives.
+pub static RISCV64_NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i16x8",
+        "an integer vector, which nothing on this machine carries yet",
+        "tamnd/rucc#3284",
+    ),
+    ("add.i32x4", "the same", "tamnd/rucc#3284"),
+    ("add.i64x2", "the same", "tamnd/rucc#3284"),
+    ("add.i8x16", "the same", "tamnd/rucc#3284"),
+    ("and.i16x8", "the same", "tamnd/rucc#3284"),
+    ("and.i32x4", "the same", "tamnd/rucc#3284"),
+    ("and.i64x2", "the same", "tamnd/rucc#3284"),
+    ("and.i8x16", "the same", "tamnd/rucc#3284"),
+    ("load.i16x8", "the same", "tamnd/rucc#3284"),
+    ("load.i32x4", "the same", "tamnd/rucc#3284"),
+    ("load.i64x2", "the same", "tamnd/rucc#3284"),
+    ("load.i8x16", "the same", "tamnd/rucc#3284"),
+    ("or.i16x8", "the same", "tamnd/rucc#3284"),
+    ("or.i32x4", "the same", "tamnd/rucc#3284"),
+    ("or.i64x2", "the same", "tamnd/rucc#3284"),
+    ("or.i8x16", "the same", "tamnd/rucc#3284"),
+    ("store.i16x8", "the same", "tamnd/rucc#3284"),
+    ("store.i32x4", "the same", "tamnd/rucc#3284"),
+    ("store.i64x2", "the same", "tamnd/rucc#3284"),
+    ("store.i8x16", "the same", "tamnd/rucc#3284"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3284"),
+    ("sub.i32x4", "the same", "tamnd/rucc#3284"),
+    ("sub.i64x2", "the same", "tamnd/rucc#3284"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3284"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3284"),
+    ("xor.i32x4", "the same", "tamnd/rucc#3284"),
+    ("xor.i64x2", "the same", "tamnd/rucc#3284"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3284"),
+    (
+        "fpext.f16.f32",
+        "a half widened, which `crate::half` calls a routine for without the half extension",
+        "tamnd/rucc#4276",
+    ),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#4276"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#4276"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#4276"),
+    (
+        "store.f16",
+        "a half stored, which `crate::half` writes as its bits and an integer store",
+        "tamnd/rucc#4276",
+    ),
+    (
+        "load.f128",
+        "a `long double`, which is a quad here and has no rules on this machine yet",
+        "tamnd/rucc#3284",
+    ),
+    ("store.f128", "the same", "tamnd/rucc#3284"),
+    ("ret.f128", "the same, returned in `a0` and `a1`", "tamnd/rucc#3284"),
+    (
+        "umulh.i32",
+        "the high half of a thirty two bit product, which only a division by a constant on a \
+         machine of thirty two bits writes: this one divides a word by multiplying at sixty four",
+        "tamnd/rucc#2247",
+    ),
+    ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
+    (
+        "ctlz.i32",
+        "a bit count, which `expand::counts` writes as arithmetic before selection on a machine \
+         with no count instruction",
+        "tamnd/rucc#310",
+    ),
+    ("ctlz.i64", "the same", "tamnd/rucc#310"),
+    ("ctpop.i32", "the same", "tamnd/rucc#310"),
+    ("ctpop.i64", "the same", "tamnd/rucc#310"),
+    ("cttz.i32", "the same", "tamnd/rucc#310"),
+    ("cttz.i64", "the same", "tamnd/rucc#310"),
+    (
+        "bswap.i16",
+        "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
+        "tamnd/rucc#307",
+    ),
+    ("bswap.i32", "the same", "tamnd/rucc#307"),
+    ("bswap.i64", "the same", "tamnd/rucc#307"),
+];
+
+/// The names left for later in the rule file `table` is built from.
+#[must_use]
+pub fn names(table: &Table) -> &'static [(&'static str, &'static str, &'static str)] {
+    if table.source == crate::select::aarch64::TABLE.source {
+        AARCH64_NAMES
+    } else if table.source == crate::select::riscv64::TABLE.source {
+        RISCV64_NAMES
+    } else if table.source == crate::select::x86::TABLE.source {
+        X86_NAMES
+    } else {
+        NAMES
+    }
+}
+
+/// What a target's rules cover, and what they do not.
+#[derive(Debug)]
+pub struct Report {
+    /// The rule file this is about, so that anything said about it names a file to open.
+    pub source: &'static str,
+    /// How many opcodes the IR has.
+    pub opcodes: usize,
+    /// The opcodes every name of which a rule is written at.
+    pub by_rule: Vec<Opcode>,
+    /// How many names those are, which is one per opcode and width.
+    pub names: usize,
+    /// A name a rule could be written at and none is, which is what a missing rule looks like.
+    pub uncovered: Vec<(Opcode, &'static str)>,
+    /// A name on [`NAMES`], which is a missing rule somebody decided to be missing.
+    pub deferred: Vec<(Opcode, &'static str)>,
+    /// A name a rule is written at that nothing can ever be called, which is a dead rule.
+    pub unreachable: Vec<&'static str>,
+    /// The opcodes lowered somewhere a rule cannot reach.
+    pub elsewhere: Vec<Opcode>,
+    /// The opcodes nothing lowers.
+    pub gaps: Vec<Opcode>,
+    /// The opcodes on none of the three lists, which is what a new opcode is until somebody says
+    /// where it goes. An opcode with a name on [`NAMES`] is not one of these, since that entry is
+    /// somebody saying so.
+    pub unaccounted: Vec<Opcode>,
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rucc-codegen: {} lowers {} of the {} IR opcodes by rule at {} names, {} are lowered \
+             where no rule reaches, {} have no lowering yet and {} names are left for later",
+            self.source,
+            self.by_rule.len(),
+            self.opcodes,
+            self.names,
+            self.elsewhere.len(),
+            self.gaps.len(),
+            self.deferred.len()
+        )
+    }
+}
+
+/// What a table covers.
+///
+/// Nothing is executed and nothing is compiled. The rule set and the naming of instructions are
+/// both data, and the answer is a comparison of two lists.
+#[must_use]
+pub fn report(table: &Table) -> Report {
+    let named = term::heads();
+    let patterns = pattern_heads(table);
+    let later = names(table);
+
+    let mut by_rule = Vec::new();
+    let mut uncovered = Vec::new();
+    let mut deferred = Vec::new();
+    for &(opcode, name) in &named {
+        if patterns.contains(&name) {
+            by_rule.push(opcode);
+        } else if later.iter().any(|&(deliberate, ..)| deliberate == name) {
+            deferred.push((opcode, name));
+        } else {
+            uncovered.push((opcode, name));
+        }
+    }
+    // An opcode is covered when every name it has is covered, so one missing width takes the
+    // whole opcode off the list however many of its other widths are there. A name on `NAMES` does
+    // not take it off, because the opcode is lowered and the entry says which widths were left for
+    // later and why: that is a narrower claim than the opcode having nowhere to go, and putting it
+    // on `GAPS` instead would say the wrong thing about an `add` that lowers perfectly well at
+    // four widths.
+    for &(opcode, _) in &uncovered {
+        by_rule.retain(|&covered| covered != opcode);
+    }
+    by_rule.sort_unstable();
+    by_rule.dedup();
+
+    let names = named.len() - uncovered.len() - deferred.len();
+    let unreachable: Vec<&'static str> = patterns
+        .iter()
+        .filter(|head| !named.iter().any(|(_, name)| name == *head))
+        .copied()
+        .collect();
+
+    let elsewhere: Vec<Opcode> =
+        Opcode::all().filter(|&opcode| capability::lowering(opcode).is_some()).collect();
+    let gaps: Vec<Opcode> = GAPS.iter().map(|&(opcode, ..)| opcode).collect();
+    let unaccounted: Vec<Opcode> = Opcode::all()
+        .filter(|opcode| {
+            !by_rule.contains(opcode)
+                && !elsewhere.contains(opcode)
+                && !gaps.contains(opcode)
+                && !deferred.iter().any(|&(at, _)| at == *opcode)
+                && !capability::LIBCALLS.iter().any(|&(at, ..)| at == *opcode)
+        })
+        .collect();
+
+    Report {
+        source: table.source,
+        opcodes: Opcode::all().count(),
+        by_rule,
+        names,
+        uncovered,
+        deferred,
+        unreachable,
+        elsewhere,
+        gaps,
+        unaccounted,
+    }
+}
+
+/// The rules a target lowers by, or `None` where no back end in this crate covers it.
+///
+/// The same question [`crate::pipeline::Machine::for_target`] answers about the rest of a machine,
+/// and it is here as well because a caller that wants to write down what a run covered has a
+/// target and no machine. An architecture gets an arm here when it gets a rule file, and until then
+/// it has no rules to report coverage of rather than an empty set of them.
+#[must_use]
+pub fn table(arch: Arch) -> Option<&'static Table> {
+    match arch {
+        Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
+        Arch::Aarch64 => Some(&crate::select::aarch64::TABLE),
+        Arch::X86 => Some(&crate::select::x86::TABLE),
+        Arch::Riscv64 => Some(&crate::select::riscv64::TABLE),
+        Arch::Wasm32 => None,
+    }
+}
+
+/// Which rules fired, over one function or over a whole compilation.
+///
+/// A bit per rule and nothing else. This is on the path of every instruction selected, so what it
+/// costs is paid by every compilation whether or not anybody asked for the number, and the cheapest
+/// thing that answers the question is a flag per rule set once.
+///
+/// The index of a rule is how this is kept and not how it is written down. An index moves the
+/// moment a rule is added above it, so [`Fired::listing`] names the rule file and the line instead:
+/// a line is a place somebody can open, and a report written by one build can still be read against
+/// a rule file that has grown since.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fired {
+    /// One entry per rule, true once that rule has fired. It grows to fit the highest index
+    /// marked rather than being sized from a table, so nothing here has to be told which target
+    /// is being compiled for.
+    seen: Vec<bool>,
+}
+
+impl Fired {
+    /// Nothing has fired yet.
+    #[must_use]
+    pub const fn new() -> Fired {
+        Fired { seen: Vec::new() }
+    }
+
+    /// Records that the rule at this index fired.
+    pub fn mark(&mut self, rule: usize) {
+        if self.seen.len() <= rule {
+            self.seen.resize(rule + 1, false);
+        }
+        self.seen[rule] = true;
+    }
+
+    /// Whether the rule at this index fired.
+    #[must_use]
+    pub fn has(&self, rule: usize) -> bool {
+        self.seen.get(rule).copied().unwrap_or(false)
+    }
+
+    /// How many rules fired.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.seen.iter().filter(|fired| **fired).count()
+    }
+
+    /// Takes in everything another one recorded.
+    ///
+    /// One compilation is many functions and one command line is many files, and the question is
+    /// about all of them together. Merging rather than writing a file per function is also what
+    /// keeps the answer the same however the work was scheduled.
+    pub fn merge(&mut self, other: &Fired) {
+        if self.seen.len() < other.seen.len() {
+            self.seen.resize(other.seen.len(), false);
+        }
+        for (mine, theirs) in self.seen.iter_mut().zip(&other.seen) {
+            *mine |= *theirs;
+        }
+    }
+
+    /// What `-Zrule-coverage=FILE` writes.
+    ///
+    /// One line per rule in the table, in the order the rule file writes them, each saying whether
+    /// the rule fired and naming the file and line it is written at. Every rule is listed rather
+    /// than only the ones that fired, so that one of these files says what the whole rule set was
+    /// as well as what this compilation reached: a reader unioning them over a corpus needs both
+    /// and would otherwise have to parse the rule file to get the second.
+    ///
+    /// The first line is a comment holding the count, which is the number a person wants and the
+    /// one thing here that is not worth making them add up.
+    #[must_use]
+    pub fn listing(&self, table: &Table) -> String {
+        let fired = table.rules.iter().enumerate().filter(|(index, _)| self.has(*index)).count();
+        let mut out = format!(
+            "# rucc rule coverage: {fired} of {} rules in {} fired\n",
+            table.rules.len(),
+            table.source
+        );
+        for (index, rule) in table.rules.iter().enumerate() {
+            let word = if self.has(index) { "fired" } else { "unused" };
+            let _ = writeln!(out, "{word} {}:{} {}", table.source, rule.line, rule.pattern);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::select::x86_64::TABLE;
+
+    /// Every rule file there is, since each claim below is about a rule set and holds for each.
+    fn tables() -> [&'static Table; 4] {
+        [
+            &TABLE,
+            &crate::select::aarch64::TABLE,
+            &crate::select::riscv64::TABLE,
+            &crate::select::x86::TABLE,
+        ]
+    }
+
+    /// The claim the whole module is for, in the direction that matters: a name an instruction
+    /// can be called by is a name a rule is written at. This is the width check as much as the
+    /// opcode check, since a name is an opcode and a width together.
+    #[test]
+    fn every_name_an_instruction_can_have_is_one_a_rule_is_written_at() {
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.uncovered.is_empty(),
+                "nothing in {} lowers these, and each is an opcode at a width the rule language \
+                 can spell: {:?}",
+                report.source,
+                report.uncovered
+            );
+        }
+    }
+
+    /// And the other direction, which costs nothing to ask and finds a rule that can never fire.
+    /// A pattern head no instruction is ever called by is a rule written against a name that was
+    /// renamed or misspelled, and it would sit there proved and unreachable.
+    #[test]
+    fn every_name_a_rule_is_written_at_is_one_an_instruction_can_have() {
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.unreachable.is_empty(),
+                "{} has rules for these and no instruction is ever called one: {:?}",
+                report.source,
+                report.unreachable
+            );
+        }
+    }
+
+    /// Every opcode is one of the three things, so a new opcode in the IR fails this until
+    /// somebody says where it goes. That is the whole point: the answer for a new opcode should
+    /// be written down when it is added rather than discovered by a user compiling a program.
+    #[test]
+    fn every_opcode_is_lowered_or_is_a_gap_somebody_wrote_down() {
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.unaccounted.is_empty(),
+                "no rule in {} lowers these, nothing rewrites them before selection, no runtime \
+                 function stands for them and `GAPS` does not say why: {:?}",
+                report.source,
+                report.unaccounted
+            );
+        }
+    }
+
+    /// An entry that starts being covered fails, which is the rule every list in this project is
+    /// kept under. An opcode a rule now lowers is one that should be off both lists, and a list
+    /// that keeps claiming otherwise is a list nobody can read.
+    #[test]
+    fn an_entry_a_rule_now_covers_is_a_stale_entry() {
+        for table in tables() {
+            let report = report(table);
+            for &(opcode, where_) in capability::HAND {
+                assert!(
+                    !report.by_rule.contains(&opcode),
+                    "`{}` is lowered by a rule in {} now, so the `HAND` entry saying it is \
+                     lowered by {where_} is stale",
+                    opcode.name(),
+                    report.source
+                );
+            }
+            for &(opcode, why, issue) in GAPS {
+                assert!(
+                    !report.by_rule.contains(&opcode),
+                    "`{}` is lowered by a rule in {} now, so the `GAPS` entry saying it is {why} \
+                     is stale and {issue} may be closed",
+                    opcode.name(),
+                    report.source
+                );
+                assert!(
+                    !report.elsewhere.contains(&opcode),
+                    "`{}` is on both lists, so it is both lowered and not lowered",
+                    opcode.name()
+                );
+            }
+        }
+    }
+
+    /// The same staleness rule one list down. A name a rule is written at is a name that is not
+    /// left for later, and an entry claiming otherwise is one that should have gone when the rule
+    /// arrived. The other direction is checked too: a name no instruction can ever have is a
+    /// misspelling, and it would sit here excusing nothing.
+    #[test]
+    fn a_name_a_rule_is_written_at_is_not_a_name_left_for_later() {
+        let named = term::heads();
+        for table in tables() {
+            let heads = pattern_heads(table);
+            let later = names(table);
+            for &(name, why, issue) in later {
+                assert!(
+                    !heads.contains(&name),
+                    "`{name}` is lowered by a rule in {} now, so the entry saying it is {why} is \
+                     stale and {issue} may be closer than it says",
+                    table.source
+                );
+                assert!(
+                    named.iter().any(|&(_, head)| head == name),
+                    "`{name}` is not a name any instruction can have, so the entry excuses nothing"
+                );
+            }
+            let report = report(table);
+            // Counted by name, since two opcodes can share one: a pointer add is an `add` at the
+            // width of an address.
+            let mut deferred: Vec<&str> = report.deferred.iter().map(|&(_, name)| name).collect();
+            deferred.sort_unstable();
+            deferred.dedup();
+            assert_eq!(deferred.len(), later.len(), "{:?}", report.deferred);
+        }
+    }
+
+    /// Every gap names an issue, since a gap with no issue behind it is a gap nobody has decided
+    /// anything about, which is the thing this module exists to stop.
+    #[test]
+    fn every_gap_names_the_issue_that_closes_it() {
+        let issues = GAPS
+            .iter()
+            .map(|&(_, _, issue)| issue)
+            .chain(WIDTHS.iter().map(|&(_, _, issue)| issue))
+            .chain(NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(AARCH64_NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(RISCV64_NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(X86_NAMES.iter().map(|&(_, _, issue)| issue));
+        for issue in issues {
+            let number = issue
+                .strip_prefix("tamnd/rucc#")
+                .unwrap_or_else(|| panic!("{issue} is not an issue in this project's tracker"));
+            assert!(number.parse::<u32>().is_ok(), "{issue} does not name an issue number");
+        }
+    }
+
+    /// The count, which `spec/15-testing.md` section 15.8 says we keep about ourselves. CI runs
+    /// this test with the output shown, so the number lands in a log next to the rule proof
+    /// rather than in a file somebody has to go and read.
+    #[test]
+    fn the_count_is_reported() {
+        for table in tables() {
+            let report = report(table);
+            println!("{report}");
+            for &(name, why, issue) in names(table) {
+                println!("rucc-codegen: no rule at `{name}`, which is {why}: {issue}");
+            }
+            assert_eq!(report.gaps.len(), GAPS.len());
+        }
+        for &(opcode, why, issue) in GAPS {
+            println!("rucc-codegen: no lowering for `{}`, which is {why}: {issue}", opcode.name());
+        }
+        for &(width, why, issue) in WIDTHS {
+            println!("rucc-codegen: no rule at {width}, which is {why}: {issue}");
+        }
+    }
+
+    /// What the root of the trie is, which is the assumption [`pattern_heads`] rests on. If the
+    /// rule compiler ever built the trie some other way this would say so, rather than the
+    /// coverage numbers quietly becoming a report about an empty list.
+    #[test]
+    fn the_root_of_the_trie_is_the_head_of_every_pattern() {
+        for table in tables() {
+            let heads = pattern_heads(table);
+            assert!(
+                !heads.is_empty(),
+                "the table has rules and the root of the trie tests nothing"
+            );
+            for rule in table.rules {
+                let head = rule
+                    .pattern
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.split([' ', ')']).next())
+                    .expect("a pattern is an application");
+                assert!(
+                    heads.contains(&head),
+                    "{}:{}: {} is a pattern whose head the root of the trie does not test",
+                    table.source,
+                    rule.line,
+                    rule.pattern
+                );
+            }
+        }
+    }
+
+    /// The four targets with a rule file, and the one still waiting for one. A machine that can be
+    /// compiled for has rules to report the coverage of, and one that cannot has none rather than
+    /// an empty set of them, which are different answers and would read the same as a number.
+    #[test]
+    fn a_target_with_a_back_end_is_a_target_with_a_rule_set() {
+        let x86 = table(Arch::X86_64).expect("x86-64 is what this crate lowers for");
+        assert_eq!(x86.source, TABLE.source);
+        assert!(!x86.rules.is_empty());
+        let arm = table(Arch::Aarch64).expect("aarch64 has a rule file");
+        assert_eq!(arm.source, crate::select::aarch64::TABLE.source);
+        assert!(!arm.rules.is_empty());
+        let i386 = table(Arch::X86).expect("i386 has a rule file");
+        assert_eq!(i386.source, crate::select::x86::TABLE.source);
+        assert!(!i386.rules.is_empty());
+        let rv = table(Arch::Riscv64).expect("riscv64 has a rule file");
+        assert_eq!(rv.source, crate::select::riscv64::TABLE.source);
+        assert!(!rv.rules.is_empty());
+        assert!(table(Arch::Wasm32).is_none(), "there is no wasm32 rule file");
+    }
+
+    /// What a rule is called outside this process. The index is not it: a rule added at the top of
+    /// the file moves every index below it, and a report from last week would then be a report
+    /// about the wrong rules. The file and the line do not move that way and are somewhere to look.
+    #[test]
+    fn a_rule_is_written_down_as_the_place_it_is_written_at() {
+        let mut fired = Fired::new();
+        fired.mark(0);
+        let listing = fired.listing(&TABLE);
+        let first =
+            format!("fired {}:{} {}", TABLE.source, TABLE.rules[0].line, TABLE.rules[0].pattern);
+        assert!(listing.contains(&first), "{listing}");
+        assert!(listing.lines().next().is_some_and(|line| line.starts_with('#')), "{listing}");
+    }
+
+    /// Every rule is listed and not only the ones that fired, which is what lets one of these files
+    /// be read on its own. A reader that only got the rules that fired would have to parse the rule
+    /// file to find out what the rest of them were.
+    #[test]
+    fn one_file_says_what_the_whole_rule_set_is() {
+        let listing = Fired::new().listing(&TABLE);
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines.len(), TABLE.rules.len() + 1, "one line per rule and one for the count");
+        assert_eq!(
+            lines.iter().filter(|line| line.starts_with("unused ")).count(),
+            TABLE.rules.len()
+        );
+        assert!(lines[0].contains(&format!("0 of {} rules", TABLE.rules.len())), "{}", lines[0]);
+    }
+
+    /// A compilation is many functions and a command line is many files, and the question is about
+    /// all of them at once. Merging is also what keeps the answer the same however the work was
+    /// scheduled, which is the rule `spec/03-architecture.md` section 3.7 holds everything to.
+    #[test]
+    fn what_two_runs_reached_is_what_either_of_them_reached() {
+        let mut one = Fired::new();
+        one.mark(3);
+        one.mark(3);
+        assert_eq!(one.count(), 1, "a rule that fires twice is one rule");
+        let mut two = Fired::new();
+        two.mark(0);
+        two.mark(9);
+        one.merge(&two);
+        assert_eq!(one.count(), 3);
+        assert!(one.has(0) && one.has(3) && one.has(9));
+        assert!(!one.has(1));
+
+        // The merge is symmetric, since neither order of two files is the right one.
+        let mut back = Fired::new();
+        back.mark(0);
+        back.mark(9);
+        let mut three = Fired::new();
+        three.mark(3);
+        back.merge(&three);
+        assert_eq!(back, one);
+    }
+}

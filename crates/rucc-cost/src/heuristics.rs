@@ -1,0 +1,2160 @@
+//! Every threshold any pass consults, with where it came from.
+//!
+//! Section 40.12 calls this "the deliverable this document exists to produce" and states the rule
+//! that goes with it: "A pass may not contain a bare numeric threshold; the coding standard test
+//! greps for one." So a pass that wants to know how many moves a block copy may expand to reads
+//! [`BLOCK_COPY_MOVES_FOR_SPEED`], and the number 12 appears in the compiler exactly once, here,
+//! next to the document that argued for it.
+//!
+//! The section names the file `crates/rucc-opt/src/costs.rs`. It is here instead, one crate lower,
+//! because the back end has thresholds too and a constant the optimizer owns is a constant the
+//! back end would copy. Nothing else about the arrangement changes.
+//!
+//! # Provenance is part of the constant
+//!
+//! Section 40.13 is blunt about why: "A constant marked chosen is a constant nobody should defend."
+//! Every entry below carries a [`Provenance`], and the three that say [`Provenance::Awaiting`] are
+//! the three the documents said would have to be measured and have not been. They are not hidden
+//! behind a plausible number. A report can print them, and [`ALL`] exists so that it can.
+//!
+//! # Moving one without a build
+//!
+//! Section 42.5's experiments change a constant and measure what moved, and a `const` can only
+//! change with a build. So a pass does not read the `const` bare but through
+//! [`param!`](crate::param), and `--param name=value` on the command line can set any row of
+//! [`ALL`] for one compilation. The name is the row's own in lower case with dashes, and gcc's where the row names
+//! a gcc parameter, so `--param max-inline-insns-auto=30` means what it means to gcc. With no
+//! `--param` every read is the `const`, and nothing about the output changes.
+//!
+//! # What is not here
+//!
+//! Anything that varies by target. How many operations a machine issues at once, what a mispredict
+//! costs it, and how narrow a store it is willing to do are facts about hardware and live in that
+//! target's [`crate::CostTable`]. The line is whether a second target would want a different
+//! number for a reason that is about the machine rather than about taste.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use crate::Cycles;
+
+/// Where a constant came from, which is the first thing to ask about any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Provenance {
+    /// GCC uses this number and we adopted it on purpose after reading why.
+    ///
+    /// The strongest provenance on offer here. It is not a proof that the number is right, but it
+    /// is decades of somebody else's regressions, which is more evidence than anything else in
+    /// this file has.
+    Gcc,
+
+    /// Measured here, on the shapes its own documentation names.
+    ///
+    /// As strong as [`Provenance::Gcc`] and more particular, since it is the number this
+    /// compiler's own code gave on the machines it was timed on. It is the one to measure again
+    /// when either of those changes.
+    Measured,
+
+    /// Somebody picked it and it has not been measured.
+    ///
+    /// The weakest. A constant marked this way is a constant to attack first when a heuristic
+    /// misbehaves, because nothing is defending it.
+    Chosen,
+
+    /// It follows from something else here, so changing it alone would be inconsistent.
+    Derived,
+
+    /// The document that needs it said it must be measured, and it has not been.
+    ///
+    /// The value present is a placeholder that keeps the compiler running. It is marked so that
+    /// the report says so out loud rather than presenting it alongside numbers that were earned.
+    Awaiting,
+}
+
+impl Provenance {
+    /// How the provenance reads in a report.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gcc => "adopted from gcc",
+            Self::Measured => "measured here",
+            Self::Chosen => "chosen, not measured",
+            Self::Derived => "derived from another constant here",
+            Self::Awaiting => "placeholder, awaiting measurement",
+        }
+    }
+
+    /// Whether this constant is standing on evidence.
+    #[must_use]
+    pub const fn is_evidence(self) -> bool {
+        matches!(self, Self::Gcc | Self::Measured)
+    }
+}
+
+impl std::fmt::Display for Provenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One row of section 40.12's table, for a report that wants to print the lot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Constant {
+    /// The name of the item in this module.
+    pub name: &'static str,
+    /// Its value, in whatever `unit` says.
+    pub value: i64,
+    /// What the value counts.
+    pub unit: &'static str,
+    /// The section of `spec/optimizer/` that argued for it.
+    pub document: &'static str,
+    /// The GCC parameter or macro this corresponds to, empty when there is none.
+    pub gcc: &'static str,
+    /// How much to trust it.
+    pub provenance: Provenance,
+}
+
+/// What a branch costs when optimizing for size, per section 40.5.
+///
+/// GCC's `BRANCH_COST` at `gcc/config/i386/i386.h:2023` answers 2 for every x86 target when
+/// `optimize_size`, and does so without consulting the cost table, which is the same shape as this.
+/// Two, because a conditional branch is the compare and the jump, and the thing being priced is
+/// whether removing the branch is worth the instructions that replace it.
+pub const BRANCH_COST_FOR_SIZE: Cycles = Cycles::insns(2);
+
+/// What a well predicted branch costs when optimizing for speed, per section 40.5.
+///
+/// Zero, and it is worth being clear that this is a claim about the hardware and not a rounding.
+/// A correctly predicted branch on an out of order machine costs no cycles at all: the front end
+/// fetched past it before it issued. Charging anything for it is what makes a pass if-convert a
+/// branch that was already free, turning a zero cost branch into two real operations.
+pub const BRANCH_COST_PREDICTABLE: Cycles = Cycles::ZERO;
+
+/// How far a branch's probability has to be from even before it counts as predictable, per section
+/// 40.5, as a percentage.
+///
+/// Two percent, so a branch taken 99 times in 100 is predictable and one taken 90 times in 100 is
+/// not. It is a hard threshold and section 40.5 pairs it with a rule that matters more than the
+/// number: a probability that came from a static heuristic never counts as predictable whatever it
+/// says, because the heuristic guessed.
+pub const PREDICTABLE_BRANCH_PERCENT: u32 = 2;
+
+/// How many instructions if-conversion may add to remove a predictable branch, per section 40.5.
+///
+/// Small, because there is nothing to win. The branch was free, so the budget only covers the case
+/// where removing it happens to shorten the code anyway.
+pub const IF_CONVERSION_BUDGET_PREDICTABLE: u32 = 20;
+
+/// The same for an unpredictable branch, per section 40.5.
+///
+/// Twice the predictable budget, because an unpredictable branch is paying a mispredict penalty
+/// some fraction of the time and there is real money to win.
+pub const IF_CONVERSION_BUDGET_UNPREDICTABLE: u32 = 40;
+
+/// The largest block if-conversion will consider, in instructions, per section 40.5.
+///
+/// A separate limit from the budget, and needed separately: a budget is about what the
+/// transformation costs and this is about the compile time of looking. A 400 instruction block
+/// will not be if-converted whatever the budget says, and finding that out cheaply is the point.
+pub const IF_CONVERSION_BLOCK_LIMIT: u32 = 10;
+
+/// How many instructions an arm of a diamond may hold and still be if-converted at the IR level,
+/// per section 22.2.
+///
+/// Two, and much smaller than the budgets above because it is being spent differently. Those price
+/// the whole conversion at the machine level, where the arms are already predicated and the
+/// question is the total. This is per arm and the work it counts is work that will be done on both
+/// paths afterwards, so the number is the answer to how much speculation is worth one branch. An
+/// arm of two cheap operations is a value being worked out. An arm of ten is a program.
+///
+/// The constant sweep found one retiring 4.9% fewer instructions over the 122 cases it changes, and
+/// timed they say otherwise: an arm of two that is left as a branch is a branch on data, and the
+/// two if-conversion cases that gained most took three times the cycles at one, with ten million
+/// branch misses where two did five thousand (tamnd/rucc#3157).
+pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
+
+/// How many levels deep phiopt factors a chain of operations both arms of a diamond share, per
+/// section 22.2.
+///
+/// Each level is one operation both arms did to values the level below worked out, and the walk
+/// stops at the first level where the two arms disagree. Four covers a conversion under an
+/// operation under another, which is the deepest the corpus writes, and keeps the walk down a long
+/// chain bounded the way [`PHIOPT_ARM_SCAN_INSTRUCTIONS`] bounds the one over an arm.
+pub const PHIOPT_FACTOR_DEPTH: u32 = 4;
+
+/// How long an arm may be before phiopt stops looking for the work in it that the head already
+/// does, per section 22.6.
+///
+/// An arm is charged only for work the head is not doing, since GVN merges the rest, and finding
+/// that is a walk over the head for each instruction of the arm. Past this length the arm is
+/// charged whole and so refused, which keeps the walk bounded on a long arm. Four times
+/// [`PHIOPT_ARM_INSTRUCTIONS`] and eight more, so an arm is only charged whole when most of it would
+/// have to be repeated work to fit.
+pub const PHIOPT_ARM_SCAN_INSTRUCTIONS: u32 = 4 * PHIOPT_ARM_INSTRUCTIONS + 8;
+
+/// How near even a branch's probability has to be before if-conversion will speculate an arm into
+/// it, per section 22.2, as a percentage.
+///
+/// Three, so the window is 3% to 97%. It was twenty five, which kept the branch on anything
+/// `__builtin_expect` had been written on, and that was measured and found wrong. The if-conversion
+/// facet in tamnd/rucc-corpus has a diamond with an add in one arm and a multiply in the other,
+/// taken at a rate a predictor can learn and nothing else about it. The conditional move costs the
+/// same at every rate, and the branch costs a little under it plus about 24 cycles a miss. At 90%
+/// the branch was 10% slower and at 95% it was 3% slower. It only won at 99%, and the two cross
+/// near 97%. gcc's `predictable-branch-outcome` is 2, which puts its line at 98%, and a plain
+/// `__builtin_expect` is if-converted there as it now is here (#1902).
+///
+/// It is still not [`PREDICTABLE_BRANCH_PERCENT`], because that one is asked of a measured
+/// probability only and this one takes a guess at its word.
+pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 3;
+
+/// How much work the right operand of a `&&` or a `||` may be and still be folded into one branch,
+/// per section 22.5.
+///
+/// Two, the same as [`PHIOPT_ARM_INSTRUCTIONS`], because the work is counted the same way: an
+/// integer constant is not counted, since it becomes the immediate of the instruction that reads
+/// it. The shape this is for is a comparison against a constant, which is one instruction, and two
+/// leaves room for one operation under the comparison. A right operand of three or more is a
+/// computation rather than a test, and speculating a computation to save one branch is a trade in
+/// the wrong direction.
+///
+/// It was three when constants were counted, which let `v + w < 9` through and not `(v & 1) == 0`,
+/// only because the second has two constants and the first has one (#735).
+pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 2;
+
+/// How many scalar moves a block copy may expand to when optimizing for speed, per section 40.7.
+///
+/// GCC's `MOVE_RATIO`. Above this the copy becomes a call to `memcpy`, which is written in assembly
+/// by somebody who measured, and below it the inline expansion wins because it avoids the call and
+/// lets the surrounding code see through it.
+///
+/// Twelve is where `cargo xtask stringop` found the two cross (tamnd/rucc#2971). On both of the AMD
+/// EPYC machines rucc is measured on, a copy of up to 96 bytes, which is twelve eight byte moves,
+/// ran faster as moves than as a call to glibc's `memcpy`, by 16% and 29% between 81 and 96 bytes.
+/// The two were level from 97 to 112, and from there the call pulled ahead until it was 1.7 times
+/// as fast at 256 bytes, the 32 moves the lowering used to stop at.
+pub const BLOCK_COPY_MOVES_FOR_SPEED: u32 = 12;
+
+/// The same when optimizing for size, per section 40.7.
+///
+/// GCC's `MOVE_RATIO` when it optimizes for size, which is three on x86. A move of a word is a load
+/// and a store of about eight bytes between them, and a call is five bytes plus the three registers
+/// it is passed in, so the call is the smaller from about the third word on.
+pub const BLOCK_COPY_MOVES_FOR_SIZE: u32 = 3;
+
+/// How many scalar stores a block fill may expand to when optimizing for speed, per section 40.7.
+///
+/// GCC's `CLEAR_RATIO`. A fill has no loads, but glibc's `memset` is cheaper than its `memcpy` for
+/// the same reason, and `cargo xtask stringop` found the same twelve for both (tamnd/rucc#2971):
+/// stores of up to 96 bytes beat the call on both machines, by 15% and 28% between 81 and 96 bytes,
+/// and from 97 bytes on one of them had the call ahead. That is a fill in the middle of a function.
+/// A first version of the harness let the call be a jump the function left by, which is cheaper,
+/// and had the stores behind from 80 bytes, but a fill that ends a function is the rarer case.
+pub const BLOCK_CLEAR_MOVES_FOR_SPEED: u32 = 12;
+
+/// The same when optimizing for size, per section 40.7.
+///
+/// GCC's `CLEAR_RATIO` when it optimizes for size, which is two on x86. A store of zero to a word is
+/// about seven bytes, and a call to `memset` is five bytes plus the three registers it is passed
+/// in, so the call is the smaller from the third word on.
+pub const BLOCK_CLEAR_MOVES_FOR_SIZE: u32 = 2;
+
+/// The most bytes of a local scalar replacement turns into values, per section 18.2.
+///
+/// GCC bounds the same thing with `sra-max-scalarization-size-Ospeed`, which it works out from the
+/// move ratio and the word size and which comes to a little over a hundred bytes on x86-64. A local
+/// past this is an array or a buffer rather than a record, and its pieces would not fit in the
+/// registers they are meant to end up in.
+pub const SRA_MAX_BYTES: u32 = 128;
+
+/// The most pieces one local is cut into by scalar replacement, per section 18.2.
+///
+/// Each piece is a value the function keeps in a register, and a loop that reads them all keeps all
+/// of them at once. Eight is half of the sixteen general purpose registers x86-64 has, which leaves
+/// the other half for the loop's own values. At 32 the corpus's `simd-lfind.lfind8` programs had
+/// their sixteen byte vectors cut into sixteen bytes each, and the spills that followed cost 8% more
+/// instructions than keeping the vectors in memory. At eight the same programs run 5% fewer.
+pub const SRA_MAX_PIECES: u32 = 8;
+
+/// The same where every piece is four bytes or more, which is an array of words the program
+/// indexes by constants rather than a vector cut into its bytes.
+///
+/// Sixteen is the general purpose registers x86-64 has. The eight above is about bytes: the
+/// `lfind8` vectors were sixteen of them each, and a byte in a register of its own is a register
+/// spent on an eighth of what it holds. A word is what a register holds anyway. libsodium's scalar
+/// salsa20/8 core keeps a `uint32_t x[16]` it reads and writes by constant index in a loop, and gcc
+/// 16 keeps it in registers. Held in memory it ran 1.3 times as long as gcc's (tamnd/rucc#2765).
+pub const SRA_MAX_WORD_PIECES: u32 = 16;
+
+/// How many instructions a loop header may hold and still be worth copying, per section 26.6.
+///
+/// GCC's `max-loop-header-insns`, `Init(20)` at `gcc/params.opt:690`. The copy is what turns a
+/// `while` into a `do-while`, and what it costs is the header again in front of the loop, so the
+/// number is how much code a program will pay once per loop for a body that is one region and a
+/// test at the bottom.
+pub const LOOP_HEADER_INSNS_FOR_SPEED: u32 = 20;
+
+/// The same when optimizing for size, per section 26.6.
+///
+/// Five, which is what that section asks for in words rather than a number GCC has: "it runs with
+/// a much smaller limit, on the order of five instructions". The do-while form is slightly smaller
+/// in the steady state, so the copy is worth making at a size where the header is a test and
+/// little else, and not at one that writes twenty instructions out twice.
+pub const LOOP_HEADER_INSNS_FOR_SIZE: u32 = 5;
+
+/// How many instructions a block may hold and still be copied onto an edge threaded past it, per
+/// section 23.4.
+///
+/// GCC's `max-jump-thread-duplication-stmts`, `Init(15)` at `gcc/params.opt:677`. The copy is the
+/// price of skipping the branch at the bottom of the block, and fifteen is where GCC stops paying it.
+pub const JUMP_THREAD_DUPLICATION_INSNS: u32 = 15;
+
+/// How many threads that need a copy one run of the pass makes in one function, per section 23.4.
+///
+/// GCC's `max-jump-thread-paths`, `Init(64)` at `gcc/params.opt:681`. GCC spends it on the paths
+/// its backward search looks at, and there is no backward search here, so it bounds the paths that
+/// are actually copied instead. Threading enables threading, and this is what stops one function
+/// with a long chain of decided branches from copying its way through all of them.
+pub const JUMP_THREAD_PATHS: u32 = 64;
+
+/// How many instructions a chain of copies may add up to, per section 23.4.
+///
+/// GCC's `max-fsm-thread-path-insns`, `Init(100)` at `gcc/params.opt:601`. A copy whose edge came
+/// out of an earlier copy is the next block of one path, and the path is what is limited.
+pub const JUMP_THREAD_PATH_INSNS: u32 = 100;
+
+/// How much more an instruction costs when the thread it is copied for crosses a back edge, per
+/// section 23.4.
+///
+/// GCC's `fsm-scale-path-stmts`, `Init(2)` at `gcc/params.opt:161`. A thread that goes round a
+/// loop is the one that changes the loop's shape, so it gets half the budget.
+pub const JUMP_THREAD_BACK_EDGE_SCALE: u32 = 2;
+
+/// How wide a reassociation tree is on a target nobody has tuned, per section 40.8.
+///
+/// One, which means no reassociation. A chain of adds becomes a tree only to use execution units
+/// that are otherwise idle, so a machine whose parallelism nobody has stated gets the chain, which
+/// is correct and no slower than what the program said.
+pub const REASSOC_WIDTH_UNTUNED: u32 = 1;
+
+/// The largest frequency ratio the inliner will believe without a profile, per section 40.11.
+///
+/// A hundred. Static frequencies come from guesses that multiply through a loop nest, so a call
+/// three loops deep can come out ten thousand times hotter than the entry block on nothing but the
+/// assumption that a loop runs some number of times. The clamp says that a guess, however deeply
+/// nested, is worth at most two orders of magnitude.
+pub const INLINE_FREQUENCY_CLAMP: u32 = 100;
+
+/// Where the inliner starts squaring the growth term, per section 40.11.
+///
+/// GCC's `overall_growth` bound. Below it growth is linear in the badness formula and above it the
+/// term is squared, which turns a gradual disincentive into a wall. It exists because inlining a
+/// large function into many callers is the one thing that reliably makes a compilation never
+/// finish.
+pub const INLINE_GROWTH_SQUARING_BOUND: u32 = 256;
+
+/// The largest body a callee declared `inline` may have and still be inlined, per section 33.6.
+///
+/// GCC's `max-inline-insns-single`, which is seventy at every level but `-O3`. GCC counts in its
+/// own estimate of the instructions a body comes to and this counts IR instructions before the
+/// caller's constants have folded anything away, which comes out larger for the same body, so the
+/// number is on the careful side of GCC's rather than the same limit.
+pub const INLINE_INSNS_SINGLE: u32 = 70;
+
+/// The same at `-O3`, per section 33.6, where GCC raises it to two hundred.
+pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
+
+/// How much a call may grow its caller and still be inlined whatever is known about how often it
+/// runs, per section 33.6.
+///
+/// GCC's `early-inlining-insns`. The early inliner runs before GCC has worked out that a function
+/// written `cold` is unlikely to run, so it takes a call that grows the caller by no more than this
+/// into a `cold` caller as readily as into any other. A callee that makes calls of its own is held
+/// to this for each of them and itself together.
+pub const INLINE_EARLY_INSNS: u32 = 6;
+
+/// The same at `-O3`, per section 33.6, where GCC raises it to fourteen.
+pub const INLINE_EARLY_INSNS_O3: u32 = 14;
+
+/// How much a call to a function nobody declared `inline` may grow its caller and still be
+/// inlined, per section 33.6.
+///
+/// GCC's `max-inline-insns-auto` at `-O2`, where `-finline-small-functions` is on. A growth as
+/// large as this is refused.
+pub const INLINE_INSNS_AUTO: u32 = 15;
+
+/// The same at `-O3`, per section 33.6, where GCC raises it to thirty.
+pub const INLINE_INSNS_AUTO_O3: u32 = 30;
+
+/// The largest body a `static` function called from one place may have and still be inlined there,
+/// per section 33.1.
+///
+/// GCC's `max-inline-functions-called-once-insns`. The out of line copy goes away once the call
+/// is inlined, so what the program grows by is the call and nothing else, and the limit is only
+/// there so one very long function does not make its caller one that takes minutes to compile.
+pub const INLINE_CALLED_ONCE_INSNS: u32 = 4000;
+
+/// How many loops deep the one call to a `static` function may be and still be inlined there, per
+/// section 33.1.
+///
+/// GCC's `max-inline-functions-called-once-loop-depth`, counting the way GCC counts, so a call in no
+/// loop is zero deep and a call in one loop is one deep. A body copied into the middle of a deep
+/// nest makes the innermost loop large for a call that may run rarely, and past this the call is
+/// left alone however small the body is.
+pub const INLINE_CALLED_ONCE_LOOP_DEPTH: u32 = 6;
+
+/// How much larger than its own locals a caller's frame may grow by inlining, in percent, per
+/// section 33.6.
+///
+/// GCC's `large-stack-frame-growth`, which is a thousand, so a frame may become eleven times what
+/// the caller asked for itself. A call that is `always_inline` is inlined whatever this says.
+pub const INLINE_FRAME_GROWTH: u32 = 1000;
+
+/// The frame size below which inlining never counts as growing the frame too much, in bytes, per
+/// section 33.6.
+///
+/// GCC's `large-stack-frame`. A caller with almost no locals of its own would otherwise be refused
+/// a helper with a few, since eleven times nothing is nothing.
+pub const INLINE_LARGE_FRAME: u32 = 256;
+
+/// [`INLINE_FRAME_GROWTH`] under `-fconserve-stack`, per section 33.6.
+///
+/// gcc sets `large-stack-frame-growth` to 40 under that flag, which the Linux kernel builds with
+/// because its stacks are a few pages and a frame gcc keeps small has to stay small here too.
+pub const INLINE_FRAME_GROWTH_CONSERVE: u32 = 40;
+
+/// [`INLINE_LARGE_FRAME`] under `-fconserve-stack`, per section 33.6. gcc sets `large-stack-frame`
+/// to 100 under that flag.
+pub const INLINE_LARGE_FRAME_CONSERVE: u32 = 100;
+
+/// How much a hint raises the limit a call is held to, in percent, per section 33.5.
+///
+/// GCC's `inline-heuristics-hint-percent` at `-O2`. A call whose copy would make a loop's trip
+/// count or stride known, turn a call through a pointer into a direct one, or answer a
+/// `__builtin_constant_p` gets a limit twice the size. With both kinds of hint the limit is scaled
+/// by the square of this over a hundred, which is what gcc does.
+///
+/// The constant sweep found a hundred writing 43.69% less text over the 8 cases it changes, for
+/// 0.084% fewer instructions. On SQLite the same hundred writes 1.27% less text and is slower, 3.1%
+/// more cycles at its fastest run and 3.6% more at the median of fifteen, with 11% more branch
+/// misses, so it is a trade of speed for size and two hundred stays (tamnd/rucc#3158).
+pub const INLINE_HINT_PERCENT: u32 = 200;
+
+/// [`INLINE_HINT_PERCENT`] at `-O3`, per section 33.5, where gcc raises it to six hundred.
+pub const INLINE_HINT_PERCENT_O3: u32 = 600;
+
+/// How much of the time a call and its caller take inlining has to save before a call over its
+/// limit is taken anyway, in percent, per section 33.5.
+///
+/// GCC's `inline-min-speedup` at `-O2`. A body that the constants a call passes fold most of away
+/// is worth the size, but only when what it saves is a real part of what the caller does.
+pub const INLINE_MIN_SPEEDUP: u32 = 30;
+
+/// [`INLINE_MIN_SPEEDUP`] at `-O3`, per section 33.5, where gcc lowers it to fifteen.
+pub const INLINE_MIN_SPEEDUP_O3: u32 = 15;
+
+/// How much the inliner's second pass may grow the whole unit, in percent, per section 33.6.
+///
+/// GCC's `inline-unit-growth`. The bound is taken from the larger of the unit as it was and
+/// [`LARGE_UNIT_INSNS`], so a small file is never held to a bound smaller than a large one would.
+pub const INLINE_UNIT_GROWTH: u32 = 40;
+
+/// The size below which a unit is treated as being this size when its growth is bounded, per
+/// section 33.6. GCC's `large-unit-insns`.
+pub const LARGE_UNIT_INSNS: u32 = 10_000;
+
+/// The size a caller may reach before the second pass bounds how much it grows, per section 33.6.
+///
+/// GCC's `large-function-insns`. A caller smaller than this may grow as much as the unit bound
+/// lets it.
+pub const LARGE_FUNCTION_INSNS: u32 = 2700;
+
+/// How much a caller larger than [`LARGE_FUNCTION_INSNS`] may grow, in percent of the larger of
+/// itself and the callee, per section 33.6. GCC's `large-function-growth`.
+pub const LARGE_FUNCTION_GROWTH: u32 = 100;
+
+/// What a call costs in the second inliner pass's measure of time, before its arguments, per
+/// section 33.5.
+///
+/// gcc's `eni_time_weights.call_cost`. A call is ten, and a move for each argument and for the
+/// result comes on top, which is what a copy saves besides the work the constants fold out of it.
+pub const INLINE_CALL_TIME: u32 = 10;
+
+/// How many clauses a condition in an inliner summary may have, and how many conditions a clause,
+/// per section 33.3.
+///
+/// gcc's `MAX_CLAUSES` in `ipa-predicate.h`. A body whose blocks need longer conditions than that
+/// is weighed for each call by walking it, which gives the same answer more slowly.
+pub const INLINE_SUMMARY_CLAUSES: u32 = 8;
+
+/// How cold a block may be and still count as hot in its own function, as a fraction of the entry
+/// block, per section 11.4.
+///
+/// GCC's `param_hot_bb_frequency_fraction`. One part in a thousand, which is a low bar on purpose:
+/// the question it answers is whether a block is worth spending compile time and code size on, and
+/// a block that runs once per thousand calls is still a block on somebody's path. The bar for
+/// being the hot path is a different and much higher one, and it is asked as a comparison against
+/// the other blocks rather than against this.
+pub const HOT_BLOCK_FRACTION: u32 = 1000;
+
+/// How often the arm a `__builtin_expect` names is the one taken, in percent, per section 11.2.
+///
+/// GCC's `param_builtin_expect_probability`. Ninety rather than a hundred because the hint is a
+/// statement about the common case and not a promise, and a hint treated as a promise turns the
+/// other arm into dead code that still has to run correctly.
+///
+/// The constant sweep found 180, a hint taken as a promise, ahead by a little. Measured again it
+/// retires 5.95% more instructions over the 17 cases it changes and writes 0.26% more text
+/// (tamnd/rucc#3159).
+pub const PREDICT_EXPECT: u32 = 90;
+
+/// How often the arm that does not come back is the one not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_NORETURN`, whose hit rate is `PROB_VERY_LIKELY`, rounded to the percent this table
+/// works in. This is the predictor that makes error handling cold, and error handling is most of
+/// what a C program branches on: `if (x) { report(); abort(); }` is the shape, and without this
+/// predictor the reporting path is as hot as the work.
+pub const PREDICT_NEVER_RETURNS: u32 = 99;
+
+/// How often the arm that calls a `cold` function is the one not taken, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_COLD_FUNCTION`, again `PROB_VERY_LIKELY`. Section 11.2 says the `cold` and `hot`
+/// attributes are the user's explicit statement and must be honoured absolutely rather than
+/// blended, so this sits with the strongest numbers here rather than with the guesses.
+pub const PREDICT_COLD_CALL: u32 = 99;
+
+/// How often a loop exit is the edge not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_LOOP_EXIT`. A loop that is worth writing runs more than once, and this number is
+/// what says so: eighty nine percent of the time the iteration that reaches the test is not the
+/// last one. Ball and Larus measured it and it has held up because it is a fact about how people
+/// write programs rather than about any machine.
+pub const PREDICT_LOOP_EXIT_NOT_TAKEN: u32 = 89;
+
+/// How often the branch that guards a loop enters it, in percent, per section 11.2.
+///
+/// GCC's `PRED_LOOP_GUARD`. Weaker than the exit predictor, because a guard is written by somebody
+/// who thought the loop might not run at all, and lower than it for the same reason.
+pub const PREDICT_LOOP_GUARD_TAKEN: u32 = 73;
+
+/// How often a pointer compared against null is not null, in percent, per section 11.2.
+///
+/// GCC's `PRED_POINTER`. A pointer that is tested is usually a pointer that is about to be used,
+/// and the test is there for the case that does not happen.
+///
+/// The constant sweep found 35 saving 0.60% of text over the 74 cases it changes. It does that by
+/// calling the test even, and 41 of those cases retire more instructions against 24 that retire
+/// fewer, so this stays at gcc's number (tamnd/rucc#3160).
+pub const PREDICT_POINTER_NOT_NULL: u32 = 70;
+
+/// How often the arm that returns a negative constant is the one not taken, in percent, per
+/// section 11.2.
+///
+/// GCC's `PRED_NEGATIVE_RETURN`. A negative return value in C means the call failed, which is the
+/// strongest of the return value predictors because nothing else returns one on purpose.
+pub const PREDICT_NEGATIVE_RETURN: u32 = 98;
+
+/// How often the arm that returns a null pointer is the one not taken, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_NULL_RETURN`. The same idea as the negative return and a much weaker number,
+/// because a null pointer is also an ordinary answer: the end of a list is not a failure.
+pub const PREDICT_NULL_RETURN: u32 = 71;
+
+/// How often the arm containing a call is the one not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_CALL`. The weakest predictor kept, and it is here because it is the one that fires
+/// on code no other predictor recognises. Section 11.2 drops everything below sixty five percent,
+/// on the grounds that a predictor at fifty nine moves a probability by nine points and no
+/// decision downstream of it changes.
+///
+/// The constant sweep found 33 saving 0.50% of instructions over 188 cases, 94 of them better and
+/// 68 worse. The 24 that moved most took 0.71% fewer cycles at 33, which is inside the noise of
+/// programs that small, and at 33 the predictor says the opposite of gcc's and sits under the line
+/// section 11.2 drops one at (tamnd/rucc#3161).
+pub const PREDICT_CALL_NOT_TAKEN: u32 = 67;
+
+/// How often a `continue` is the edge taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_CONTINUE`. A jump back to the top of the loop from inside the body, which is a loop
+/// that goes round again without reaching the bottom.
+pub const PREDICT_CONTINUE_TAKEN: u32 = 67;
+
+/// How often a `return` written inside a test is the edge not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_TREE_EARLY_RETURN`. The front end marks such a `return` and the predictor reads the
+/// mark, since where a `return` was written is gone by the time there is a graph to predict on. It
+/// came after the other ten, for the inliner, which weighs what a call saves by how often each
+/// block of the callee runs (tamnd/rucc#3182).
+pub const PREDICT_EARLY_RETURN: u32 = 66;
+
+/// How often a test of whether two numbers are equal finds them not equal, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_OPCODE_NONEQUAL`, for numbers and not pointers. It is asked after every other
+/// predictor, so it only decides a branch none of them had anything to say about. An even branch lays out the arm for equal next,
+/// and in code that tests a state against one value after another that is the arm least often run.
+pub const PREDICT_OPCODE_NONEQUAL: u32 = 66;
+
+/// How many iterations a loop is predicted to run when nothing measured it, per section 11.2.
+///
+/// GCC's `max-predicted-iterations`. It is a cap and not an estimate: the frequency of a loop
+/// header is its entry frequency divided by the chance of leaving, and a loop whose exit no
+/// predictor recognised has no chance of leaving at all, so without a cap the division is by zero
+/// and with a small one it is by nearly zero. Section 11.6 names the overflow that follows as one
+/// of the two most common ways a frequency implementation breaks, the other being a float where a
+/// scaled integer belongs.
+pub const MAX_PREDICTED_ITERATIONS: u32 = 100;
+
+/// How far a block's frequency may sit from the sum of the frequencies arriving at it before the
+/// check in section 11.5 complains, in percent.
+///
+/// One percent. The sum is exact in real arithmetic, including at a loop header, where the entry
+/// and the back edge add up to the header's own frequency precisely because the geometric series
+/// says they do. What it is not exact in is fixed point: every edge divides by ten thousand and
+/// throws the remainder away. So the check needs a tolerance, and the tolerance has to be small
+/// enough that a pass which forgot a block is still caught, which a percent is.
+pub const PROFILE_SUM_TOLERANCE_PERCENT: u32 = 1;
+
+/// How many registers of each class loop invariant motion leaves unused, per section 40.6.
+///
+/// Two, which is GCC's `ira-loop-reserved-regs` at `gcc/params.opt:336`, "The number of registers
+/// in each class kept unused by loop invariant motion". A hoist that takes the pressure inside a
+/// loop up to the allocatable count has not saved anything: the value it hoisted is now live
+/// across the whole loop and something else has to be spilled to make room for it, and the spill
+/// is inside the loop while the computation it replaced might not have been. The margin is what
+/// stops the pass from walking up to the edge and stepping off it. It is the allocator's own
+/// parameter, which is the right place for it to come from, since the allocator is what pays.
+///
+/// The constant sweep found four ahead by a little, mostly in `crc32c`. Measured again it retires
+/// 7.35% more instructions over the 98 cases it changes, 95 of them worse, and writes 0.10% more
+/// text (tamnd/rucc#3162).
+pub const LOOP_RESERVED_REGS: u32 = 2;
+
+/// What a computation has to cost before it is worth hoisting out of a loop under pressure, per
+/// section 27.2.
+///
+/// GCC's `lim-expensive`, `Init(20)` at `gcc/params.opt:428`. It is not the price of an operation,
+/// it is the line between an operation worth a register held across the whole loop and one that is
+/// cheaper to do again. Below the line a hoist under pressure buys a computation per iteration and
+/// pays for it with a spill and a reload per iteration, which is the classic way loop invariant
+/// motion measures worse than not running it at all.
+pub const LICM_EXPENSIVE: u32 = 20;
+
+/// How many times a loop may run and still be unrolled away entirely, per section 29.2.
+///
+/// GCC's `max-completely-peel-times`, `Init(16)` at `gcc/params.opt:549`. It is a bound on the
+/// copies rather than on the code, which the instruction limit below is, and both are needed: a
+/// two instruction body run four hundred times is under nobody's idea of a small loop and would
+/// pass an instruction limit alone if the body were small enough.
+pub const UNROLL_MAX_TIMES: u32 = 16;
+
+/// How large the unrolled form may be, in instructions, per section 29.2.
+///
+/// GCC's `max-completely-peeled-insns`, `Init(200)` at `gcc/params.opt:553`. What is counted is
+/// the estimate of what survives the folding the unroll enables and not the body times the count,
+/// which section 29.2 says is the whole difficulty of the cost model: the induction variable is a
+/// constant in every copy, so the addressing folds, and a model that prices the output before that
+/// happens refuses transformations that would have made the function smaller.
+pub const UNROLL_MAX_INSNS: u32 = 200;
+
+/// How large a loop may be, in instructions, and still be split into a checked half and an
+/// unchecked one, per `spec/safe-memory/07-check-elimination.md` section 7.4.
+///
+/// GCC's `loop-versioning-max-inner-insns`, `Init(200)` at `gcc/params.opt:695`. That pass makes two
+/// copies of a loop under a test decided when the loop starts, which is the same shape and the same
+/// cost, so the limit it settled on is the one to take. What is counted here is the body as it
+/// stands rather than an estimate of what survives, because unlike unrolling nothing folds
+/// afterwards: both halves keep their branches and their counter, and the only difference between
+/// them is which checks they hold.
+pub const SPLIT_MAX_INSNS: u32 = 200;
+
+/// How many instructions the guard a split puts in front of a loop may write again to work out where
+/// a check's address is, per `spec/safe-memory/07-check-elimination.md` section 7.4.
+///
+/// No GCC parameter to take, because no GCC pass rematerializes an address to compare it against a
+/// bound. What sets it is what it buys: every instruction counted here runs once per iteration in the
+/// guard and what it removes is a call into the safety runtime, which is a call, a load of the
+/// capability, a compare and a branch at the very least. Eight is loose against that and is there to
+/// stop an address built out of half the loop body from having half the loop body copied into the
+/// guard, which is a real shape in generated code and not a real opportunity.
+///
+/// Eight is where the curve flattens, measured on SQLite by the checks the census stops reporting as
+/// unfollowed: 2194 at a cap of two, 2020 at four, 1956 at eight, and 1950 at both sixteen and
+/// thirty two. So sixteen reaches six more checks than eight does and leaves the object byte for byte
+/// the same size, which is not a reason to write twice as much arithmetic into a guard.
+pub const SPLIT_REMADE_INSNS: usize = 8;
+
+/// How deeply nested a loop may be and still be unrolled away entirely, per section 29.2.
+///
+/// GCC's `max-completely-peel-loop-nest-depth`, `Init(8)` at `gcc/params.opt:545`. The cost of
+/// unrolling an inner loop is paid once per iteration of everything outside it, so the depth is
+/// the multiplier on a limit that is otherwise about one loop in isolation.
+pub const UNROLL_MAX_DEPTH: u32 = 8;
+
+/// How far the return value predictors will walk to find the return they are predicting, in blocks,
+/// per section 11.2.
+///
+/// Eight, and it is ours rather than GCC's. GCC propagates a return value prediction backwards over
+/// every path that reaches the return, which needs the paths; this walks forward from the arm of
+/// the branch over blocks that have one way out, which needs nothing and finds `if (bad) return
+/// -1;` and the handful of statements somebody put in front of the return. A branch whose arm runs
+/// eight straight blocks before returning is not the shape the predictor was measured on.
+pub const PREDICT_RETURN_BLOCKS: u32 = 8;
+
+/// How cold a block may be and still be worth aligning, as a fraction of the hottest block, per
+/// section 38.5.
+///
+/// One hundredth. Alignment is padding, and padding a block nobody executes is bytes spent on
+/// nothing plus an instruction cache line that could have held something.
+pub const ALIGN_FREQUENCY_FRACTION: u32 = 100;
+
+/// How many iterations a loop must be estimated to run before its head is worth aligning, per
+/// section 38.5.
+///
+/// Four. Below that the padding is executed about as often as the loop body, so the alignment is
+/// paying for itself out of its own pocket.
+pub const LOOP_ALIGN_MIN_ITERATIONS: u32 = 4;
+
+/// How many induction variable uses a loop may have before the choosing gives up on it, per
+/// section 28.2.
+///
+/// GCC's `iv-max-considered-uses`, `Init(250)` at `gcc/params.opt:364`. The search is cubic in the
+/// uses, so this is the number that stops compile time being cubic in something the program chose
+/// rather than something the compiler did. Section 28.2's measurement over the corpus is that the
+/// most any loop in it has is sixteen, so the bound is a guard against a generated program and not
+/// a limit anything real runs into.
+pub const IV_MAX_CONSIDERED_USES: usize = 250;
+
+/// How many candidate variables a loop may have before the search stops looking at all of them
+/// together, per section 28.2.
+///
+/// GCC's `iv-consider-all-candidates-bound`, `Init(40)` at `gcc/params.opt:360`. Above it GCC
+/// considers only the candidates a use asked for rather than every candidate for every use, which
+/// is the same cubic term seen from the other side. The corpus measurement is fifteen candidates
+/// at most, so this does not bind either.
+pub const IV_CONSIDER_ALL_CANDIDATES_BOUND: usize = 40;
+
+/// How many candidates a loop may have before the ones nothing wants are dropped first, per
+/// section 28.2.
+///
+/// GCC's `iv-always-prune-cand-set-bound`, `Init(10)` at `gcc/params.opt:356`. Below it a useless
+/// candidate costs a column in a small search and is not worth the pass making a decision about.
+/// Above it every candidate kept is paid for in the selection, which is why the pruning is
+/// unconditional there.
+pub const IV_ALWAYS_PRUNE_CAND_SET_BOUND: usize = 10;
+
+/// How much a loop's own induction variables are preferred over made up ones, in increments, per
+/// section 28.1.
+///
+/// Three increments, which is three of whatever the target's own table charges for the `add` a new
+/// variable would be stepped by. It used to be three cycles, and the comment on it said that was
+/// about one add, which it is not on any table in the tree. A made up variable costs an `add` a
+/// turn and nothing else, so an `add` is the unit this preference is in whether or not it is
+/// written that way.
+///
+/// Writing it that way changes no number today. x86-64 and wasm32 are the targets with a table,
+/// and both goals of each put an `add` at one unit. What it buys is that the constant still means
+/// three increments on the next table anybody writes, rather than three of whatever that table
+/// happens to call a unit.
+///
+/// GCC's `tree-ssa-loop-ivopts.cc` says in `determine_iv_cost` that "the original variables are
+/// somewhat preferred" and prices that as a fifth of the candidate's own cost, which is a shape
+/// rather than a number and does not transfer to a different cost model. What the bias is for is
+/// real: a variable the loop already increments is one the rewrite does not have to introduce, one
+/// the register allocator has already been living with, and one the programmer can still recognise
+/// in a debugger.
+///
+/// Three is now measured rather than guessed, over the 1830 corpus programs that build at `-O2`,
+/// one binary per value, reading `.text`. Zero costs 10068 bytes against three and one costs 8796,
+/// so the whole of the interesting range is above one. The floor is flat from about five to twelve,
+/// where three buys back another 300 bytes or so, and a bias of a thousand, which is the pass
+/// switched off in all but name, is 15 bytes worse than three. Moving into that flat is a real
+/// change and not this one: it costs the single access walk of a wide element its pointer, which is
+/// a loop where the pointer is right on the instructions, so it is buying size on loops that should
+/// not have had a pointer by taking it away from loops that should. tamnd/rucc#922 carries the
+/// numbers.
+pub const IVOPTS_NEW_VARIABLE_BIAS: u32 = 3;
+
+/// What each induction variable past the register budget costs, in cycles, per section 28.2.
+///
+/// Ten, and it is not measured. A set larger than the registers left over spills, and a spill in a
+/// loop is a store and a reload every iteration, which is the failure mode section 28.7 lists as
+/// "a set that does not fit". The number has to be large enough that the selection would rather
+/// recompute an address than carry one more variable, and an address recomputation is an add or
+/// two, so ten leaves room. It is chosen from that relationship rather than from a measurement,
+/// and the relationship is what a change to it has to keep.
+pub const IVOPTS_SET_PENALTY: u32 = 10;
+
+/// How many instructions the scheduler will keep in its ready list, per section 38.8.
+///
+/// A hundred, and it is a compile time bound rather than a code quality one. The list is scanned
+/// once per instruction placed, so an unbounded list makes scheduling quadratic in the size of the
+/// block, and a block with more than a hundred ready instructions has more choice than the
+/// heuristic can tell apart anyway.
+pub const SCHEDULER_READY_LIST_BOUND: usize = 100;
+
+/// How many cells a switch conversion table may have for each label it replaces, per section 24.4.
+///
+/// Eight, which is gcc's `switch-conversion-max-branch-ratio`. `rucc_opt`'s switch conversion reads
+/// it as the most a table may span for its labels, so three labels may make a table of twenty four
+/// cells and not of twenty five. What it bounds is the data a `switch` costs, since the holes are
+/// cells nothing reads, and gcc's number is taken as it is because the cost it weighs is the same
+/// here.
+///
+/// The constant sweep found sixteen saving 15.64% of the text of the two cases it changes. Measured
+/// again those two go from 392 bytes of text to 1536 for 0.026% fewer instructions, so it stays at
+/// gcc's number (tamnd/rucc#3163).
+pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
+
+/// How many targets a switch needs before a jump table beats a walk of compares, per section 40.10.
+///
+/// Eleven, measured on an interpreter's shape: a `noinline` function whose `switch` has one dense
+/// case per arm, each arm doing different work, called in a loop over 4096 inputs that come either
+/// in order or at random. Each count of arms was built both ways and timed with `perf stat` on one
+/// pinned core of an AMD EPYC. In order the table is slower up to six arms and faster from seven,
+/// since the walk grows with the arms and a predicted indirect jump does not. At random the table
+/// is slower up to twelve arms and faster from sixteen, since it misses its one prediction nearly
+/// every time and the walk misses less. Where the two meet is where the geometric mean of the two
+/// ratios crosses one, which is between ten arms (1.02) and eleven (0.90). gcc 16 builds a table
+/// from five cases, and at five arms on this machine that is 8 percent slower in order and 58
+/// percent slower at random than the walk. tamnd/rucc#1759 has the table of numbers.
+///
+/// The constant sweep found five retiring 14.89% fewer instructions over the 30 cases it changes,
+/// which is what gcc's number looks like when only instructions are counted. Timed, the same cases
+/// took 174% more cycles, nearly all of it in the unpredictable interpreter, whose branch misses
+/// went from 1.2 million to 7.9 million, which is the timing above again (tamnd/rucc#3164).
+pub const JUMP_TABLE_MIN_TARGETS: u32 = 11;
+
+/// How often, in percent, a hint has to say one case of a `switch` is taken before that case is
+/// tested on its own ahead of the rest, per section 24.5.
+///
+/// LLVM's `switch-peel-threshold`, 66, which is two in three. Below that the one compare in front
+/// costs more often than it saves: the other cases go through it and then through the tree they
+/// would have gone through anyway. A plain `__builtin_expect` claims ninety, so it peels.
+pub const SWITCH_PEEL_PERCENT: u32 = 66;
+
+/// How many targets a switch needs before a jump table is smaller than a walk of compares, which
+/// is what [`JUMP_TABLE_MIN_TARGETS`] becomes when optimizing for size.
+///
+/// Six, measured on the same shapes at `-Os`. With the four bytes each cell takes counted in, the
+/// table is 132 bytes against the walk's 129 at five arms and 156 against 157 at six, and it is
+/// smaller by more with every arm after that. gcc builds one from five cases at `-Os` as well.
+pub const JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 6;
+
+/// What [`JUMP_TABLE_MIN_TARGETS`] is on wasm, where the table is a `br_table` and the engine
+/// writes the jump.
+///
+/// Twenty four, measured the way the native number was, on a `noinline` loop over 4096 inputs with
+/// one dense case per arm and each arm doing different work. The inputs are new random values on
+/// each pass, since a fixed buffer let the branch predictor learn the walk and made the walk look
+/// four times faster than it is. Each count of arms was built both ways and run under Wasmtime 49
+/// on an Apple M-series machine. The table is 8 percent slower at sixteen arms, the same at twenty
+/// four, 4 percent faster at thirty two and 18 percent faster at forty eight. The switch lowering
+/// splits a walk of more than thirty two clusters with a binary search first, so a long sparse
+/// `switch` stays fast with no table in it.
+pub const WASM_JUMP_TABLE_MIN_TARGETS: u32 = 24;
+
+/// What [`WASM_JUMP_TABLE_MIN_TARGETS`] becomes when optimizing for size.
+///
+/// Four. A cell of a `br_table` is one byte, where a native cell is four, and a compare and a
+/// branch are six to eight. Measured at `-Os` on the same loop, the code section is 119 bytes with
+/// the table against 125 with the walk at four arms, and the two are the same at three, where the
+/// cases are a bit test either way. LLVM builds a table from four cases on every target.
+pub const WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 4;
+
+/// How much worse than the reference the allocator may do before it counts as a regression, as a
+/// percentage, per section 39.4.
+///
+/// Not measured either, and for the same reason: the number that matters is how much spill code a
+/// real program tolerates before it shows up in run time, and that is a corpus question.
+pub const ALLOCATOR_DEGRADATION_PERCENT: u32 = 10;
+
+/// How many instructions dead store elimination walks past from one store before it keeps the
+/// store rather than look further, per section 17.3.
+///
+/// GCC's `dse-max-alias-queries-per-store`, `Init(256)` in `gcc/params.opt`. A store whose
+/// overwriting store is further away than this is almost always one a call or a loop sits between,
+/// and the walk would end there anyway.
+///
+/// Five hundred and twelve, twice gcc's, because the constant sweep found the longer walk removing
+/// stores that 256 kept: 0.36% less text over the 21 corpus cases it changes and no more
+/// instructions. On SQLite it writes 128 bytes less text and retires 0.016% fewer instructions,
+/// prints the same answers, and compiles no slower, 10.71 seconds against 11.10 (tamnd/rucc#3165).
+pub const DSE_WALK_LIMIT: u32 = 512;
+
+/// How many intervals a set of values compared against has to be before a bit test is written for
+/// it rather than a comparison per interval, per section 19.4.
+///
+/// Three, the same count `BIT_TEST_TARGETS` in the switch lowering starts at. Two intervals are two
+/// comparisons and an `or`, which is no more than the window comparison and the shift of a bit test.
+pub const RANGE_TEST_BIT_INTERVALS: usize = 3;
+
+/// The most values a set compared against can have and still be a `switch` with a case for each,
+/// per section 19.4.
+///
+/// Sixty four. The sets this is for are object ids and opcodes written out one comparison at a
+/// time, a few dozen at most, and a set bigger than this is ranges a `switch` would have to spell
+/// out value by value.
+pub const RANGE_SWITCH_CASES: u32 = 64;
+
+/// How many steps back from the operand of `__builtin_constant_p` the optimizer looks for a load
+/// before it decides the operand was not read from memory, per section 20.
+///
+/// Eight, which covers an address worked out from a pointer, an offset and a cast or two, the shape
+/// a dereference has by the time it reaches the question. Past that the walk is following a value
+/// built from many others, and those were not a dereference the kernel wrote in the source.
+pub const CONSTANT_P_LOAD_DEPTH: usize = 8;
+
+/// How many rewrites in a row one instruction gets when it is built, per section 12.1.
+///
+/// Rewriting at construction applies the rules to what a rule left as well as to what was there,
+/// which is the cascade, and a rule set with a cycle in it would cascade for ever. Section 12.7
+/// asks for a bound. Eight is more than any chain in the rule set needs today, and a cycle stops
+/// at it rather than hanging the compile.
+pub const CONS_CASCADE: u32 = 8;
+
+/// How many forms the rewrite rules may add to the e-classes of one function.
+///
+/// Section 12.7 asks for a budget per function, so that a rule set with a cycle in it stops adding
+/// forms and the extraction runs over what there is. [`CONS_CASCADE`] already bounds the forms one
+/// instruction gets, and this is the bound on all of them together. Sixty five thousand is more than
+/// the largest function in rucc-corpus or SQLite has instructions.
+pub const EGRAPH_NODES: u32 = 65_536;
+
+/// How many forms of one operand instruction selection offers the matcher, besides the one the
+/// rewriter extracted.
+///
+/// Section 12.3's third arm keeps the e-classes alive into selection, and every form offered is
+/// another walk of the rule trie for every plan the operand is part of. Two is what the address
+/// and the comparison cases need, and the average class in rucc-corpus holds fewer than that.
+pub const SELECT_FORMS: u32 = 2;
+
+/// How many times the conventional rewriter runs `simplify` over a function before it stops.
+///
+/// Arm A of section 12.3 applies the rules to a bounded fixpoint, which is how a peephole pass that
+/// walks in layout order finds what one rule left for another after the walk went past it. A run
+/// that changes nothing ends it sooner. Four is two more than the second run any chain in the rule
+/// set has been seen to need, and a rule set with a cycle in it stops at it.
+pub const SIMPLIFY_ROUNDS: u32 = 4;
+
+/// Section 40.12's table, in its order, so a report can print it and a test can check it.
+///
+/// The point of having the list as data is that "which of our heuristics are guesses" becomes a
+/// question with an answer, rather than a question that needs somebody to read every pass.
+pub const ALL: &[Constant] = &[
+    Constant {
+        name: "BRANCH_COST_FOR_SIZE",
+        value: 2,
+        unit: "operations",
+        document: "40.5",
+        gcc: "BRANCH_COST when optimize_size",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "BRANCH_COST_PREDICTABLE",
+        value: 0,
+        unit: "operations",
+        document: "40.5",
+        gcc: "BRANCH_COST for a predictable branch",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICTABLE_BRANCH_PERCENT",
+        value: 2,
+        unit: "percent",
+        document: "40.5",
+        gcc: "PROB_VERY_LIKELY",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IF_CONVERSION_BUDGET_PREDICTABLE",
+        value: 20,
+        unit: "instructions",
+        document: "40.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "IF_CONVERSION_BUDGET_UNPREDICTABLE",
+        value: 40,
+        unit: "instructions",
+        document: "40.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "IF_CONVERSION_BLOCK_LIMIT",
+        value: 10,
+        unit: "instructions",
+        document: "40.5",
+        gcc: "param_max_rtl_if_conversion_insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PHIOPT_ARM_INSTRUCTIONS",
+        value: 2,
+        unit: "instructions per arm",
+        document: "22.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "PHIOPT_FACTOR_DEPTH",
+        value: 4,
+        unit: "levels of shared operations",
+        document: "22.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "PHIOPT_ARM_SCAN_INSTRUCTIONS",
+        value: 16,
+        unit: "instructions per arm",
+        document: "22.6",
+        gcc: "",
+        provenance: Provenance::Derived,
+    },
+    Constant {
+        name: "PHIOPT_UNPREDICTABLE_MARGIN_PERCENT",
+        value: 3,
+        unit: "percent",
+        document: "22.2",
+        gcc: "predictable-branch-outcome",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "SHORT_CIRCUIT_INSTRUCTIONS",
+        value: 2,
+        unit: "instructions",
+        document: "22.5",
+        gcc: "LOGICAL_OP_NON_SHORT_CIRCUIT",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SRA_MAX_BYTES",
+        value: 128,
+        unit: "bytes",
+        document: "18.2",
+        gcc: "sra-max-scalarization-size-Ospeed",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SRA_MAX_PIECES",
+        value: 8,
+        unit: "pieces",
+        document: "18.2",
+        gcc: "sra-max-propagations",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SRA_MAX_WORD_PIECES",
+        value: 16,
+        unit: "pieces",
+        document: "18.2",
+        gcc: "sra-max-propagations",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "BLOCK_COPY_MOVES_FOR_SPEED",
+        value: 12,
+        unit: "moves",
+        document: "40.7",
+        gcc: "MOVE_RATIO",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "BLOCK_COPY_MOVES_FOR_SIZE",
+        value: 3,
+        unit: "moves",
+        document: "40.7",
+        gcc: "MOVE_RATIO when optimize_size",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "BLOCK_CLEAR_MOVES_FOR_SPEED",
+        value: 12,
+        unit: "moves",
+        document: "40.7",
+        gcc: "CLEAR_RATIO",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "BLOCK_CLEAR_MOVES_FOR_SIZE",
+        value: 2,
+        unit: "moves",
+        document: "40.7",
+        gcc: "CLEAR_RATIO when optimize_size",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_HEADER_INSNS_FOR_SPEED",
+        value: 20,
+        unit: "instructions",
+        document: "26.6",
+        gcc: "max-loop-header-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_HEADER_INSNS_FOR_SIZE",
+        value: 5,
+        unit: "instructions",
+        document: "26.6",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "JUMP_THREAD_DUPLICATION_INSNS",
+        value: 15,
+        unit: "instructions",
+        document: "23.4",
+        gcc: "max-jump-thread-duplication-stmts",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_PATHS",
+        value: 64,
+        unit: "copied paths per function",
+        document: "23.4",
+        gcc: "max-jump-thread-paths",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_PATH_INSNS",
+        value: 100,
+        unit: "instructions",
+        document: "23.4",
+        gcc: "max-fsm-thread-path-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_BACK_EDGE_SCALE",
+        value: 2,
+        unit: "times",
+        document: "23.4",
+        gcc: "fsm-scale-path-stmts",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "REASSOC_WIDTH_UNTUNED",
+        value: 1,
+        unit: "operations in parallel",
+        document: "40.8",
+        gcc: "TARGET_SCHED_REASSOCIATION_WIDTH default",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_FREQUENCY_CLAMP",
+        value: 100,
+        unit: "times the entry frequency",
+        document: "40.11",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "INLINE_GROWTH_SQUARING_BOUND",
+        value: 256,
+        unit: "instructions of growth",
+        document: "40.11",
+        gcc: "overall_growth in edge_badness",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_SINGLE",
+        value: 70,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-single",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_EARLY_INSNS",
+        value: 6,
+        unit: "instructions of growth",
+        document: "33.6",
+        gcc: "early-inlining-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_EARLY_INSNS_O3",
+        value: 14,
+        unit: "instructions of growth",
+        document: "33.6",
+        gcc: "early-inlining-insns at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_SINGLE_O3",
+        value: 200,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-single at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_AUTO",
+        value: 15,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-auto",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_AUTO_O3",
+        value: 30,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-auto at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALLED_ONCE_INSNS",
+        value: 4000,
+        unit: "instructions",
+        document: "33.1",
+        gcc: "max-inline-functions-called-once-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALLED_ONCE_LOOP_DEPTH",
+        value: 6,
+        unit: "loops",
+        document: "33.1",
+        gcc: "max-inline-functions-called-once-loop-depth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_FRAME_GROWTH",
+        value: 1000,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-stack-frame-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_LARGE_FRAME",
+        value: 256,
+        unit: "bytes",
+        document: "33.6",
+        gcc: "large-stack-frame",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_FRAME_GROWTH_CONSERVE",
+        value: 40,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-stack-frame-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_LARGE_FRAME_CONSERVE",
+        value: 100,
+        unit: "bytes",
+        document: "33.6",
+        gcc: "large-stack-frame",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_HINT_PERCENT",
+        value: 200,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-heuristics-hint-percent",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_HINT_PERCENT_O3",
+        value: 600,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-heuristics-hint-percent at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_MIN_SPEEDUP",
+        value: 30,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-min-speedup",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_MIN_SPEEDUP_O3",
+        value: 15,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-min-speedup at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_UNIT_GROWTH",
+        value: 40,
+        unit: "percent",
+        document: "33.6",
+        gcc: "inline-unit-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_UNIT_INSNS",
+        value: 10_000,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "large-unit-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_FUNCTION_INSNS",
+        value: 2700,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "large-function-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_FUNCTION_GROWTH",
+        value: 100,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-function-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALL_TIME",
+        value: 10,
+        unit: "time units",
+        document: "33.5",
+        gcc: "eni_time_weights.call_cost",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_SUMMARY_CLAUSES",
+        value: 8,
+        unit: "clauses",
+        document: "33.3",
+        gcc: "MAX_CLAUSES",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "HOT_BLOCK_FRACTION",
+        value: 1000,
+        unit: "one part in",
+        document: "11.4",
+        gcc: "param_hot_bb_frequency_fraction",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_EXPECT",
+        value: 90,
+        unit: "percent",
+        document: "11.2",
+        gcc: "param_builtin_expect_probability",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NEVER_RETURNS",
+        value: 99,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NORETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_COLD_CALL",
+        value: 99,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_COLD_FUNCTION",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_LOOP_EXIT_NOT_TAKEN",
+        value: 89,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_LOOP_EXIT",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_LOOP_GUARD_TAKEN",
+        value: 73,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_LOOP_GUARD",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_POINTER_NOT_NULL",
+        value: 70,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_POINTER",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NEGATIVE_RETURN",
+        value: 98,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NEGATIVE_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_NULL_RETURN",
+        value: 71,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_NULL_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_CALL_NOT_TAKEN",
+        value: 67,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_CALL",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_CONTINUE_TAKEN",
+        value: 67,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_CONTINUE",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_EARLY_RETURN",
+        value: 66,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_TREE_EARLY_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_OPCODE_NONEQUAL",
+        value: 66,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_OPCODE_NONEQUAL",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "MAX_PREDICTED_ITERATIONS",
+        value: 100,
+        unit: "iterations",
+        document: "11.2",
+        gcc: "param_max_predicted_iterations",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LOOP_RESERVED_REGS",
+        value: 2,
+        unit: "registers",
+        document: "40.6",
+        gcc: "param_ira_loop_reserved_regs",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LICM_EXPENSIVE",
+        value: 20,
+        unit: "cost units",
+        document: "27.2",
+        gcc: "param_lim_expensive",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "UNROLL_MAX_TIMES",
+        value: 16,
+        unit: "iterations",
+        document: "29.2",
+        gcc: "param_max_completely_peel_times",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "UNROLL_MAX_INSNS",
+        value: 200,
+        unit: "instructions",
+        document: "29.2",
+        gcc: "param_max_completely_peeled_insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "SPLIT_MAX_INSNS",
+        value: 200,
+        unit: "instructions",
+        document: "7.4 of spec/safe-memory/07-check-elimination.md",
+        gcc: "loop-versioning-max-inner-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "SPLIT_REMADE_INSNS",
+        value: 8,
+        unit: "instructions",
+        document: "7.4 of spec/safe-memory/07-check-elimination.md",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "UNROLL_MAX_DEPTH",
+        value: 8,
+        unit: "loops",
+        document: "29.2",
+        gcc: "param_max_completely_peel_loop_nest_depth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PROFILE_SUM_TOLERANCE_PERCENT",
+        value: 1,
+        unit: "percent",
+        document: "11.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "PREDICT_RETURN_BLOCKS",
+        value: 8,
+        unit: "blocks",
+        document: "11.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "ALIGN_FREQUENCY_FRACTION",
+        value: 100,
+        unit: "one part in",
+        document: "38.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "LOOP_ALIGN_MIN_ITERATIONS",
+        value: 4,
+        unit: "iterations",
+        document: "38.5",
+        gcc: "param_align_loop_iterations",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_MAX_CONSIDERED_USES",
+        value: 250,
+        unit: "uses",
+        document: "28.2",
+        gcc: "param_iv_max_considered_uses",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_CONSIDER_ALL_CANDIDATES_BOUND",
+        value: 40,
+        unit: "candidates",
+        document: "28.2",
+        gcc: "param_iv_consider_all_candidates_bound",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IV_ALWAYS_PRUNE_CAND_SET_BOUND",
+        value: 10,
+        unit: "candidates",
+        document: "28.2",
+        gcc: "param_iv_always_prune_cand_set_bound",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "IVOPTS_NEW_VARIABLE_BIAS",
+        value: 3,
+        unit: "increments",
+        document: "28.1",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "IVOPTS_SET_PENALTY",
+        value: 10,
+        unit: "cycles",
+        document: "28.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SCHEDULER_READY_LIST_BOUND",
+        value: 100,
+        unit: "instructions",
+        document: "38.8",
+        gcc: "param_max_sched_ready_insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "SWITCH_CONVERSION_MAX_GROWTH",
+        value: 8,
+        unit: "cells per label",
+        document: "24.4",
+        gcc: "param_switch_conversion_branch_ratio",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_TABLE_MIN_TARGETS",
+        value: 11,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "param_case_values_threshold",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "JUMP_TABLE_MIN_TARGETS_FOR_SIZE",
+        value: 6,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "param_case_values_threshold",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "SWITCH_PEEL_PERCENT",
+        value: 66,
+        unit: "percent",
+        document: "24.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "WASM_JUMP_TABLE_MIN_TARGETS",
+        value: 24,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE",
+        value: 4,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "ALLOCATOR_DEGRADATION_PERCENT",
+        value: 10,
+        unit: "percent",
+        document: "39.4",
+        gcc: "",
+        provenance: Provenance::Awaiting,
+    },
+    Constant {
+        name: "DSE_WALK_LIMIT",
+        value: 512,
+        unit: "instructions",
+        document: "17.3",
+        gcc: "dse-max-alias-queries-per-store",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "RANGE_TEST_BIT_INTERVALS",
+        value: 3,
+        unit: "intervals",
+        document: "19.4",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "RANGE_SWITCH_CASES",
+        value: 64,
+        unit: "values",
+        document: "19.4",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "CONSTANT_P_LOAD_DEPTH",
+        value: 8,
+        unit: "steps",
+        document: "20",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "CONS_CASCADE",
+        value: 8,
+        unit: "rewrites",
+        document: "12.1",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "EGRAPH_NODES",
+        value: 65_536,
+        unit: "forms",
+        document: "12.7",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SELECT_FORMS",
+        value: 2,
+        unit: "forms",
+        document: "12.3",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SIMPLIFY_ROUNDS",
+        value: 4,
+        unit: "runs",
+        document: "12.3",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+];
+
+/// What a slot of [`SET`] holds when `--param` did not set its constant.
+const UNSET: i64 = i64::MIN;
+
+/// What `--param` set, one slot for each row of [`ALL`] in the same order.
+///
+/// A slot is written while the command line is read, before any pass runs, and read by every pass
+/// after that, from more than one thread when the driver compiles in parallel. Nothing orders one
+/// slot against another, so a relaxed load is all a read needs.
+static SET: [AtomicI64; ALL.len()] = [const { AtomicI64::new(UNSET) }; ALL.len()];
+
+/// Where the constant called `name` is in [`ALL`].
+///
+/// [`param!`](crate::param) runs this while the compiler is built, so a name that is not in the
+/// table stops the build rather than reading a default nobody can move.
+///
+/// # Panics
+///
+/// When `name` is not a row of [`ALL`], which at compile time is an error at the read.
+#[must_use]
+pub const fn at(name: &str) -> usize {
+    let mut i = 0;
+    while i < ALL.len() {
+        if same(ALL[i].name.as_bytes(), name.as_bytes()) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("not the name of a constant in heuristics::ALL");
+}
+
+/// Whether two names are the same, which `==` on strings cannot answer in a `const fn`.
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// A type a constant here has, and how it goes to the number in [`Constant::value`] and back.
+pub trait Knob: Copy {
+    /// The number the table holds for this value.
+    fn value(self) -> i64;
+    /// The value for a number `--param` gave, which [`Param::new`] has already checked fits.
+    fn from_value(value: i64) -> Self;
+}
+
+impl Knob for u32 {
+    fn value(self) -> i64 {
+        i64::from(self)
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::try_from(value).unwrap_or(Self::MAX)
+    }
+}
+
+impl Knob for usize {
+    fn value(self) -> i64 {
+        i64::try_from(self).unwrap_or(i64::MAX)
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::try_from(value).unwrap_or(Self::MAX)
+    }
+}
+
+impl Knob for Cycles {
+    /// The table holds a cost in whole operations, which is what the first two rows say.
+    fn value(self) -> i64 {
+        self.raw() / Self::insns(1).raw()
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::insns(value)
+    }
+}
+
+/// The constant in row `at` of [`ALL`] as `--param` left it, which is `default` unless it set it.
+///
+/// What [`param!`](crate::param) expands to. A debug build checks that `default` is the value the
+/// row says, at every read a test reaches, which is the check
+/// `the_table_matches_the_constants_it_describes` could only make by hand for a few of them.
+#[must_use]
+pub fn read<K: Knob>(at: usize, default: K) -> K {
+    debug_assert_eq!(
+        default.value(),
+        ALL[at].value,
+        "{} is not the value heuristics::ALL gives it",
+        ALL[at].name
+    );
+    match SET[at].load(Ordering::Relaxed) {
+        UNSET => default,
+        value => K::from_value(value),
+    }
+}
+
+/// The name `--param` takes for a constant whatever gcc calls it, which is its own in lower case
+/// with dashes, so `INLINE_EARLY_INSNS` is `inline-early-insns`.
+#[must_use]
+pub fn param_name(constant: &Constant) -> String {
+    constant.name.to_ascii_lowercase().replace('_', "-")
+}
+
+/// The gcc parameter a constant is, when [`Constant::gcc`] names one rather than a macro or a
+/// place in gcc's source.
+///
+/// `max-inline-insns-auto` is one as it stands, `param_max_completely_peel_times` is gcc's
+/// variable for `max-completely-peel-times`, and `inline-min-speedup at -O3` is the same parameter
+/// as the row for the other levels. `MOVE_RATIO` and `overall_growth in edge_badness` are not
+/// parameters, and `--param` does not take them.
+#[must_use]
+pub fn gcc_param(constant: &Constant) -> Option<String> {
+    let gcc = constant.gcc.strip_suffix(" at -O3").unwrap_or(constant.gcc);
+    let gcc =
+        gcc.strip_prefix("param_").map_or_else(|| gcc.to_owned(), |rest| rest.replace('_', "-"));
+    let word = gcc.contains('-') && gcc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    word.then_some(gcc)
+}
+
+/// One `--param name=value`, read and checked but not yet set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    /// The rows of [`ALL`] the name names. A gcc parameter can be more than one, since gcc has one
+    /// parameter where the table has a row for `-O3` or for `-fconserve-stack` beside it, and
+    /// setting it on the command line sets it at every level, as it does with gcc.
+    rows: Vec<usize>,
+    /// What they are set to.
+    value: i64,
+}
+
+/// Why a `--param` was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamError {
+    /// It was not `name=value`.
+    Form,
+    /// No row of [`ALL`] goes by the name.
+    Unknown(String),
+    /// The value is not a whole number from zero to `u32::MAX`.
+    Value(String),
+}
+
+impl std::fmt::Display for ParamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Form => f.write_str("--param takes name=value"),
+            Self::Unknown(name) => {
+                let mut known: Vec<String> = ALL.iter().map(param_name).collect();
+                known.extend(ALL.iter().filter_map(gcc_param));
+                known.sort_unstable();
+                known.dedup();
+                write!(
+                    f,
+                    "unknown --param name `{name}`, and the names rucc knows are {}",
+                    known.join(", ")
+                )
+            }
+            Self::Value(value) => {
+                write!(f, "--param value `{value}` is not a whole number from 0 to {}", u32::MAX)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParamError {}
+
+impl Param {
+    /// Reads `name=value`, the part of `--param name=value` after the flag.
+    ///
+    /// # Errors
+    ///
+    /// When it is not `name=value`, when no row goes by the name, or when the value is not a whole
+    /// number that fits every type a constant here has.
+    pub fn new(spec: &str) -> Result<Self, ParamError> {
+        let (name, value) = spec.split_once('=').ok_or(ParamError::Form)?;
+        let number: i64 = value.parse().map_err(|_| ParamError::Value(value.to_owned()))?;
+        if !(0..=i64::from(u32::MAX)).contains(&number) {
+            return Err(ParamError::Value(value.to_owned()));
+        }
+        let rows: Vec<usize> = ALL
+            .iter()
+            .enumerate()
+            .filter(|(_, constant)| {
+                param_name(constant) == name || gcc_param(constant).as_deref() == Some(name)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if rows.is_empty() {
+            return Err(ParamError::Unknown(name.to_owned()));
+        }
+        Ok(Self { rows, value: number })
+    }
+
+    /// Sets the rows it names, for every read after this one.
+    pub fn set(&self) {
+        for &at in &self.rows {
+            SET[at].store(self.value, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Every row of [`ALL`] as `--param` has left it, one to a line: the name `--param` takes, the
+/// value and its unit, and gcc's name for it where it has one.
+#[must_use]
+pub fn listing() -> String {
+    let mut out = String::new();
+    for (at, constant) in ALL.iter().enumerate() {
+        let value = match SET[at].load(Ordering::Relaxed) {
+            UNSET => constant.value,
+            value => value,
+        };
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("{} = {value} {}", param_name(constant), constant.unit),
+        );
+        if let Some(gcc) = gcc_param(constant) {
+            if gcc != param_name(constant) {
+                out.push_str(&format!(", gcc {gcc}"));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Reads a constant of [`heuristics`](crate::heuristics) as `--param` left it.
+///
+/// Every pass reads its thresholds through this rather than naming the `const` bare, so that the
+/// experiments of section 42.5 can move one without a build. The constant is named the way the
+/// caller would name it anyway, `param!(heuristics::LICM_EXPENSIVE)` where the module is imported
+/// and `param!(LICM_EXPENSIVE)` where the constant is. Its name is looked up in
+/// [`ALL`](crate::heuristics::ALL) while the compiler is built, so one that is not in the table
+/// does not build.
+#[macro_export]
+macro_rules! param {
+    (@ $name:ident, $default:expr) => {
+        $crate::heuristics::read(
+            const { $crate::heuristics::at(stringify!($name)) },
+            $default,
+        )
+    };
+    ($name:ident) => {
+        $crate::param!(@ $name, $name)
+    };
+    ($module:ident :: $name:ident) => {
+        $crate::param!(@ $name, $module::$name)
+    };
+    ($krate:ident :: $module:ident :: $name:ident) => {
+        $crate::param!(@ $name, $krate::$module::$name)
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ALL, ALLOCATOR_DEGRADATION_PERCENT, BLOCK_CLEAR_MOVES_FOR_SIZE,
+        BLOCK_CLEAR_MOVES_FOR_SPEED, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED,
+        BRANCH_COST_FOR_SIZE, BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
+        IF_CONVERSION_BUDGET_UNPREDICTABLE, INLINE_FRAME_GROWTH_CONSERVE,
+        INLINE_LARGE_FRAME_CONSERVE, JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
+        Provenance, WASM_JUMP_TABLE_MIN_TARGETS, WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
+    };
+    use crate::Cycles;
+
+    #[test]
+    fn the_table_matches_the_constants_it_describes() {
+        // The list is data and the constants are code, and the two drifting apart would make the
+        // report a description of a compiler nobody is running. Checking the whole list
+        // automatically is not possible without a macro that would be larger than the list, so the
+        // ones a pass is most likely to be wrong about are checked by hand.
+        let by_name = |name: &str| ALL.iter().find(|c| c.name == name).expect(name).value;
+        assert_eq!(by_name("BRANCH_COST_FOR_SIZE") * 100, BRANCH_COST_FOR_SIZE.raw());
+        assert_eq!(by_name("BRANCH_COST_PREDICTABLE") * 100, BRANCH_COST_PREDICTABLE.raw());
+        assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SPEED"), i64::from(BLOCK_COPY_MOVES_FOR_SPEED));
+        assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SIZE"), i64::from(BLOCK_COPY_MOVES_FOR_SIZE));
+        assert_eq!(by_name("BLOCK_CLEAR_MOVES_FOR_SPEED"), i64::from(BLOCK_CLEAR_MOVES_FOR_SPEED));
+        assert_eq!(by_name("BLOCK_CLEAR_MOVES_FOR_SIZE"), i64::from(BLOCK_CLEAR_MOVES_FOR_SIZE));
+        assert_eq!(by_name("JUMP_TABLE_MIN_TARGETS"), i64::from(JUMP_TABLE_MIN_TARGETS));
+        assert_eq!(
+            by_name("INLINE_FRAME_GROWTH_CONSERVE"),
+            i64::from(INLINE_FRAME_GROWTH_CONSERVE)
+        );
+        assert_eq!(by_name("INLINE_LARGE_FRAME_CONSERVE"), i64::from(INLINE_LARGE_FRAME_CONSERVE));
+        assert_eq!(
+            by_name("JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
+            i64::from(JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
+        );
+        assert_eq!(by_name("WASM_JUMP_TABLE_MIN_TARGETS"), i64::from(WASM_JUMP_TABLE_MIN_TARGETS));
+        assert_eq!(
+            by_name("WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
+            i64::from(WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
+        );
+    }
+
+    #[test]
+    fn every_constant_in_the_file_has_a_row() {
+        // A constant without one is a threshold `--param` cannot reach, and the read of it does
+        // not build, so this says which one it is before a pass that reads it is compiled.
+        let source = include_str!("heuristics.rs");
+        let mut constants = 0;
+        for line in source.lines() {
+            let Some(rest) = line.strip_prefix("pub const ") else { continue };
+            if rest.starts_with("fn ") {
+                continue;
+            }
+            let name = rest.split(':').next().unwrap_or_default();
+            if name == "ALL" {
+                continue;
+            }
+            constants += 1;
+            assert!(ALL.iter().any(|row| row.name == name), "{name} has no row in ALL");
+        }
+        assert_eq!(constants, ALL.len());
+    }
+
+    #[test]
+    fn every_constant_names_the_document_that_argued_for_it() {
+        for constant in ALL {
+            assert!(
+                constant.document.starts_with(|c: char| c.is_ascii_digit()),
+                "{} cites {:?}, which is not a section number",
+                constant.name,
+                constant.document
+            );
+            assert!(!constant.unit.is_empty(), "{} does not say what it counts", constant.name);
+        }
+    }
+
+    #[test]
+    fn a_constant_with_no_gcc_parameter_does_not_claim_to_be_adopted_from_gcc() {
+        // The provenance is the only defence a number has, so a number claiming a defence it does
+        // not have is worse than one admitting it was chosen.
+        for constant in ALL {
+            if constant.provenance == Provenance::Gcc {
+                assert!(
+                    !constant.gcc.is_empty(),
+                    "{} says it came from gcc without saying from where",
+                    constant.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_unmeasured_constant_is_marked_and_not_dressed_up() {
+        // Section 39.4 said the number would have to be measured. Until it is, the honest thing
+        // is that a report can find it, and this test is what keeps it findable when somebody
+        // later picks a value that looks confident. Section 40.10's jump table threshold was the
+        // other one here until tamnd/rucc#1759 measured it.
+        let waiting: Vec<&str> =
+            ALL.iter().filter(|c| c.provenance == Provenance::Awaiting).map(|c| c.name).collect();
+        assert_eq!(waiting, ["ALLOCATOR_DEGRADATION_PERCENT"]);
+    }
+
+    #[test]
+    fn an_unpredictable_branch_gets_a_larger_budget_than_a_predictable_one() {
+        // The relationship matters more than either number. If a predictable branch ever got the
+        // larger budget, if-conversion would spend the most instructions on the branches that were
+        // already free. Both sides are constants, so the check happens at compile time and the
+        // test is here to name what is being checked rather than to run it.
+        const {
+            assert!(IF_CONVERSION_BUDGET_UNPREDICTABLE > IF_CONVERSION_BUDGET_PREDICTABLE);
+        }
+        assert_eq!(BRANCH_COST_PREDICTABLE, Cycles::ZERO);
+        assert!(BRANCH_COST_FOR_SIZE > BRANCH_COST_PREDICTABLE);
+    }
+
+    #[test]
+    fn every_predictor_kept_is_above_the_bar_section_11_2_set() {
+        // The document keeps the predictors at sixty five percent and above and drops the rest,
+        // because a predictor at fifty nine moves a probability by nine points and nothing
+        // downstream of it decides differently. A rate above ninety nine would be a certainty,
+        // and a predictor that is certain is a fact and belongs in the analysis rather than here.
+        for constant in ALL.iter().filter(|c| c.name.starts_with("PREDICT_") && c.unit == "percent")
+        {
+            assert!(
+                (65..=99).contains(&constant.value),
+                "{} predicts at {} percent, which section 11.2 would not have kept",
+                constant.name,
+                constant.value
+            );
+        }
+    }
+
+    #[test]
+    fn a_param_sets_the_row_it_names_and_no_other() {
+        // `ALLOCATOR_DEGRADATION_PERCENT` because no pass reads it yet, so setting it here
+        // cannot change what another test running beside this one reads.
+        let at = super::at("ALLOCATOR_DEGRADATION_PERCENT");
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 10);
+        super::Param::new("allocator-degradation-percent=25").expect("a row of the table").set();
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 25);
+        assert!(super::listing().contains("allocator-degradation-percent = 25 percent\n"));
+        super::SET[at].store(super::UNSET, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 10);
+    }
+
+    #[test]
+    fn a_param_takes_gcc_s_name_and_sets_every_level_s_row() {
+        let both = super::Param::new("inline-heuristics-hint-percent=300").expect("gcc's name");
+        assert_eq!(
+            both.rows,
+            [super::at("INLINE_HINT_PERCENT"), super::at("INLINE_HINT_PERCENT_O3")]
+        );
+        let auto = super::Param::new("max-inline-insns-auto=20").expect("gcc's name");
+        assert_eq!(auto.rows, [super::at("INLINE_INSNS_AUTO"), super::at("INLINE_INSNS_AUTO_O3")]);
+        let early = super::Param::new("early-inlining-insns=10").expect("gcc's name");
+        assert_eq!(
+            early.rows,
+            [super::at("INLINE_EARLY_INSNS"), super::at("INLINE_EARLY_INSNS_O3")]
+        );
+        let peel = super::Param::new("max-completely-peel-times=4").expect("gcc's name");
+        assert_eq!(peel.rows, [super::at("UNROLL_MAX_TIMES")]);
+        let own = super::Param::new("unroll-max-times=4").expect("the row's own name");
+        assert_eq!(own.rows, peel.rows);
+        // A macro of gcc's is not a parameter of gcc's.
+        assert!(super::Param::new("MOVE_RATIO=4").is_err());
+    }
+
+    #[test]
+    fn a_param_that_is_not_one_says_what_is() {
+        let error = super::Param::new("max-inline-insns-autoo=30").expect_err("a misspelling");
+        let said = error.to_string();
+        assert!(said.contains("`max-inline-insns-autoo`"), "{said}");
+        assert!(said.contains("max-inline-insns-auto,"), "{said}");
+        assert!(said.contains("inline-early-insns"), "{said}");
+        assert_eq!(super::Param::new("inline-early-insns"), Err(super::ParamError::Form));
+        for value in ["-1", "4294967296", "six", ""] {
+            assert!(
+                matches!(
+                    super::Param::new(&format!("inline-early-insns={value}")),
+                    Err(super::ParamError::Value(_))
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_name_in_the_table_is_distinct() {
+        let mut names: Vec<&str> = ALL.iter().map(|c| c.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before);
+    }
+}

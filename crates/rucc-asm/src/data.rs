@@ -1,0 +1,1316 @@
+//! Global variables as the image a file carries and the facts a linker needs about it.
+//!
+//! Design: `spec/11-asm-objects-debug.md` section 11.1, which asks that the text path and the
+//! binary path share one description so they cannot disagree. That is what this is for data: the
+//! walk over a module's globals happens once, here, and what it produces is a list of pieces that
+//! [`crate::att`] writes down as directives and [`Globals::image`] writes down as bytes. A `.long`
+//! in a listing and the four bytes in the object beside it come from the same piece.
+//!
+//! # What a piece is
+//!
+//! As much of an image as one directive says. The four kinds are the four things C can put in an
+//! initializer: a run of zeros, a run of literal bytes, one scalar, and the address of a symbol.
+//! The first three are bytes the compiler knows and the fourth is a hole the linker fills, which
+//! is the only reason data has relocations at all.
+//!
+//! Where a variable goes is worked out here too, from what the variable is rather than from
+//! anything the object format says: a variable nothing writes through goes in a page the loader
+//! can map read only, one whose image is all zeros goes in the section that carries no image, and
+//! one the program named a section for goes where the program said. What those sections are
+//! called is the format's business and is in [`crate::format`].
+//!
+//! # The second names
+//!
+//! [`aliases`] is the same idea for what `__attribute__((alias("target")))` asks for, and is here
+//! for the same reason: `.set b, a` in a listing and a second symbol table entry in an object have
+//! to be saying the same thing. There is no image in one, which is what makes an alias free.
+//!
+//! # What is refused
+//!
+//! A thread-local variable on a format that is not ELF. ELF says one with a section flag and a
+//! symbol type, which is what [`place`] and [`crate::format`] write. Windows hands out an index at
+//! load time and reaches a variable through a table the index names, and Mach-O puts a descriptor
+//! in front of every one and reaches it by calling through the descriptor, so neither is this
+//! written a different way and both are refused by name rather than written out as an ordinary
+//! variable that every thread would share.
+//!
+//! An ifunc on a format that is not ELF. An ifunc is the other thing an alias in the IR can be: a
+//! name the dynamic loader resolves once at program start by calling a function in the same
+//! object, which ELF says with a symbol type of its own, `STT_GNU_IFUNC`. Neither COFF nor Mach-O
+//! has the type, and an ordinary second name there would reach the resolver rather than what the
+//! resolver picked.
+
+use rucc_base::hash::Set;
+use rucc_base::{Interner, Symbol};
+use rucc_ir as ir;
+use rucc_ir::{AliasKind, Datum, Dll, GlobalId, Linkage, Module, SymbolRef};
+use rucc_object::{
+    Alias, Apart, Binding, Data, Export, Holds, Object, Offer, Place, Reference, Reloc, Visibility,
+};
+use rucc_target::ObjectFormat;
+
+use crate::Error;
+
+/// Every variable a module defines, laid out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Globals {
+    /// One entry per definition, in the order the module held them. A declaration is not here,
+    /// because a file says nothing about a variable another file defines beyond the references
+    /// that name it, and those are already in the text.
+    pub vars: Vec<Variable>,
+    /// Every name a declaration wrote `weak` on and this file does not define, in the order the
+    /// module held them.
+    ///
+    /// Not a definition and not bytes of anything, which is why it is a list of names beside the
+    /// variables rather than an entry among them. What it asks for is that the link be allowed to
+    /// leave the name undefined and hand every reference a zero address, which is how a library
+    /// offers a hook a profiler may fill in: the calls are written under `if (hook)` and the test
+    /// is false when nobody filled it in. Without it the link of a file that declares one fails
+    /// on an undefined symbol, which is what zstd's four tracing hooks do.
+    ///
+    /// Every one of them is here whether or not anything in the file refers to it, which is what
+    /// keeps the listing and the object saying the same thing: both read this list and neither
+    /// works out the answer for itself. gcc writes the directive only for the ones something
+    /// refers to, so a file that declares a hook and never calls it gets one undefined weak symbol
+    /// here that gcc does not put in. A linker has nothing to do about an undefined weak symbol
+    /// nothing refers to, which is why that difference is a difference and not a bug.
+    pub weak: Vec<String>,
+    /// Every name this file refers to and does not define whose declaration said `hidden` or
+    /// `protected`, with which, the functions first and then the variables, each in the order the
+    /// module held them.
+    ///
+    /// gcc writes such a name as `GLOBAL HIDDEN UND`, and a linker gives a name the most
+    /// constraining visibility any object says it has, so a reference from a file built under
+    /// `#pragma GCC visibility push(hidden)` keeps the name in the image whatever its definition
+    /// says. That is how the kernel builds its early arm64 code, with `include/linux/hidden.h`
+    /// in front of every file and `-fpie`, and the linker is then sure that nothing it resolves
+    /// there can come from anywhere else. Only the names something refers to, as gcc does, since a
+    /// header with a thousand prototypes read under the pragma is not a thousand symbols.
+    pub unseen: Vec<(String, Visibility)>,
+    /// The text of each `asm` at file scope with an instruction in it, in the order they were
+    /// written, which goes into the listing as it is. See `rucc_ir::Module::add_file_asm`.
+    ///
+    /// A unit with one is assembled from its listing, since only the assembler knows what the
+    /// template defines, which is why the driver asks [`Globals::kept`] beside
+    /// [`crate::kept`].
+    pub file_asm: Vec<String>,
+    /// Every name this file offers to other DLLs, which is `dllexport` on a definition: the
+    /// functions first and then the variables, each in the order the module held them, which is
+    /// the order clang writes them in. COFF only, and empty on every other format, since nothing
+    /// else has anywhere to say it. See [`rucc_object::Export`].
+    pub exports: Vec<Export>,
+}
+
+impl Globals {
+    /// Adds a pointer to each variable this file reads and only declares, given as the pointer's
+    /// name and the variable's.
+    ///
+    /// Each is eight bytes holding the variable's address, in a read only section of its own that
+    /// the linker keeps one copy of, and is known by a name every object that reads the same
+    /// variable gives its own copy. The code reads the variable's address out of the pointer
+    /// rather than writing it into an instruction, which is what lets the variable turn out to be
+    /// in a DLL: the runtime then writes the address it was loaded at into the pointer. See
+    /// `rucc_codegen::elsewhere::Slot::Referred`, which decides which variables need one.
+    pub fn pointers(&mut self, list: impl IntoIterator<Item = (String, String)>) {
+        for (name, target) in list {
+            self.vars.push(Variable {
+                name,
+                size: 8,
+                align: 8,
+                place: Place::Pointer,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+                retain: false,
+                pieces: vec![Piece::Addr { symbol: target, addend: 0, bytes: 8 }],
+                redzone: 0,
+            });
+        }
+    }
+
+    /// Asks the linker to keep each variable this file reads through the pointer a DLL import
+    /// gives it, given as the variable's name, for a target in Microsoft's environment.
+    ///
+    /// Each is `/INCLUDE:` of the variable, so the link keeps its definition when it finds one in
+    /// this image, and `/ALTERNATENAME:` from the variable to the pointer, so a variable that
+    /// really is in a DLL, which an import library names only through the pointer, still leaves
+    /// nothing undefined. What it works around is `lld-link` answering the pointer for a variable
+    /// the static C runtime defines with a pointer of its own, as it should, and then leaving the
+    /// variable out as unreferenced, since the only reference is from that pointer, and writing
+    /// the image base into it. That is tamnd/rucc#2182 and llvm/llvm-project#220370, and clang
+    /// writes the same object and gets the same program.
+    pub fn keep_imported(&mut self, list: impl IntoIterator<Item = String>) {
+        for name in list {
+            let options = format!("/INCLUDE:{name} /ALTERNATENAME:{name}=__imp_{name}");
+            self.exports.push(Export { name: options, kind: Offer::Verbatim });
+        }
+    }
+
+    /// Whether anything here has to be read by the assembler, which today is an `asm` at file
+    /// scope with an instruction in it, or a variable written `retain`.
+    ///
+    /// The second is for the reason a function given a section of its own goes that way: the
+    /// listing is where the section and its flags are already said, so it is the one place the
+    /// `R` has to be written rather than two.
+    #[must_use]
+    pub fn kept(&self) -> bool {
+        !self.file_asm.is_empty() || self.vars.iter().any(|var| var.retain)
+    }
+}
+
+/// One global variable, as the pieces of its image and what the linker is told about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    /// Its name, as the C program spelled it. The underscore an Apple symbol carries is added
+    /// when it is written down, because it is a fact about the object format and not about the
+    /// variable.
+    pub name: String,
+    /// How many bytes it occupies, which the pieces add up to.
+    pub size: u64,
+    /// What it has to be aligned to, always a power of two.
+    pub align: u64,
+    /// Which section it goes in.
+    pub place: Place,
+    /// How the linker sees the name.
+    pub binding: Binding,
+    /// How far outside a shared library holding it the name reaches.
+    pub visibility: Visibility,
+    /// Whether the linker has to keep it, from `__attribute__((retain))`, which puts it in a
+    /// section of its own marked `SHF_GNU_RETAIN`. Never set for anything but ELF, which is the
+    /// only format with the flag.
+    pub retain: bool,
+    /// Its image, in order.
+    pub pieces: Vec<Piece>,
+    /// The zero bytes after the image that the symbol's size leaves out. See
+    /// `rucc_ir::Global::redzone`.
+    pub redzone: u64,
+}
+
+/// As much of an image as one directive says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Piece {
+    /// That many zero bytes, which is the tail of a partly initialized array and the whole of a
+    /// variable with no initializer.
+    Zero(u64),
+    /// Those literal bytes, which is what a string literal and anything already laid out is.
+    Bytes(Vec<u8>),
+    /// One number, in the byte order the module was built for, as many bytes wide as its type.
+    Scalar(Vec<u8>),
+    /// The address of a symbol, which is a hole this compiler leaves and the linker fills.
+    Addr {
+        /// Whose address it is, as the C program spelled it.
+        symbol: String,
+        /// What to add to that address. `&array[2]` is the address of `array` plus eight.
+        addend: i64,
+        /// How many bytes it occupies.
+        bytes: u8,
+    },
+    /// How far a symbol is from these four bytes, which is the same hole with a different
+    /// question in it. `.long target - .` in an `asm` at file scope and nothing else.
+    Away {
+        /// Whose distance it is, as the template spelled it.
+        symbol: String,
+        /// What to add to that address before the distance is taken, which is how far into the
+        /// symbol the place being measured to sits.
+        addend: i64,
+    },
+    /// How far one label is from another, which is a number the writer works out once the code is
+    /// laid out and not a hole for the linker. `.long .L1-.L0` for GNU C's `&&l1 - &&l0`.
+    Apart {
+        /// The label measured to, as the module named it.
+        to: String,
+        /// The label measured from.
+        from: String,
+        /// What to add to the distance.
+        addend: i64,
+        /// How many bytes it occupies.
+        bytes: u8,
+    },
+}
+
+impl Piece {
+    /// How many bytes it contributes to the image.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        match self {
+            Piece::Zero(bytes) => *bytes,
+            Piece::Bytes(bytes) | Piece::Scalar(bytes) => bytes.len() as u64,
+            Piece::Addr { bytes, .. } | Piece::Apart { bytes, .. } => u64::from(*bytes),
+            Piece::Away { .. } => 4,
+        }
+    }
+}
+
+impl Globals {
+    /// The image of every variable, and where in each one the linker has to write an address.
+    ///
+    /// A variable in a section that carries no image contributes its size and none of its bytes,
+    /// which is what makes a program with a large zeroed array a small file.
+    #[must_use]
+    pub fn image(&self) -> Data {
+        let mut data = Data {
+            weak: self.weak.clone(),
+            unseen: self.unseen.clone(),
+            exports: self.exports.clone(),
+            ..Data::default()
+        };
+        for var in &self.vars {
+            let mut object = Object {
+                name: var.name.clone(),
+                bytes: Vec::new(),
+                size: var.size,
+                align: var.align,
+                place: var.place.clone(),
+                binding: var.binding,
+                visibility: var.visibility,
+                relocs: Vec::new(),
+                redzone: var.redzone,
+            };
+            if matches!(
+                var.place,
+                Place::Zero
+                    | Place::Merged
+                    | Place::Thread { zero: true }
+                    | Place::Named(_, Holds::Zero)
+                    | Place::NoInit
+            ) {
+                data.objects.push(object);
+                continue;
+            }
+            for piece in &var.pieces {
+                match piece {
+                    Piece::Zero(bytes) => {
+                        object.bytes.resize(object.bytes.len() + *bytes as usize, 0);
+                    }
+                    Piece::Bytes(bytes) | Piece::Scalar(bytes) => {
+                        object.bytes.extend_from_slice(bytes);
+                    }
+                    Piece::Addr { symbol, addend, bytes } => {
+                        // The bytes are left zero rather than holding anything, because a linker
+                        // writes the whole hole from the addend and never reads what was there.
+                        object.relocs.push(Reloc {
+                            at: object.bytes.len(),
+                            symbol: symbol.clone(),
+                            kind: Reference::Address { bytes: *bytes },
+                            addend: *addend,
+                            // An image rather than an instruction, so there is nothing after the
+                            // hole for the question to be about.
+                            after: 0,
+                        });
+                        object.bytes.resize(object.bytes.len() + usize::from(*bytes), 0);
+                    }
+                    Piece::Away { symbol, addend } => {
+                        object.relocs.push(Reloc {
+                            at: object.bytes.len(),
+                            symbol: symbol.clone(),
+                            kind: Reference::Away,
+                            addend: *addend,
+                            after: 0,
+                        });
+                        object.bytes.resize(object.bytes.len() + 4, 0);
+                    }
+                    Piece::Apart { to, from, addend, bytes } => {
+                        data.apart.push(Apart {
+                            object: data.objects.len(),
+                            at: object.bytes.len(),
+                            to: to.clone(),
+                            from: from.clone(),
+                            addend: *addend,
+                            bytes: *bytes,
+                        });
+                        object.bytes.resize(object.bytes.len() + usize::from(*bytes), 0);
+                    }
+                }
+            }
+            object.bytes.resize(object.bytes.len() + var.redzone as usize, 0);
+            data.objects.push(object);
+        }
+        data
+    }
+}
+
+/// Every variable a module defines, laid out.
+///
+/// The format is an argument because one question here is the format's rather than the module's:
+/// a thread-local variable is a section flag and a symbol type on ELF and an image and a descriptor
+/// on Mach-O, and is neither on COFF, so which of them is being written decides whether there is
+/// anything to write.
+///
+/// The link is an argument for a question of the same kind. Under `-fno-pic` nothing loads the file
+/// at an address it does not already know, so a constant holding an address has nobody to write it
+/// but the static linker and is as read only as any other constant, which is gcc's answer through
+/// `reloc_rw_mask`. The kernel's `__param` and `.init.rodata` are two sections that ask it.
+///
+/// # Errors
+///
+/// [`Error::Thread`] for a thread-local variable on a format that does not spell one this way,
+/// which is a program this compiler is behind on rather than a mistake, and [`Error::Image`] for a
+/// piece of an initializer nothing here can write down. See [`Error`].
+pub fn globals(
+    module: &Module,
+    names: &Interner,
+    format: ObjectFormat,
+    pic: ir::Pic,
+) -> Result<Globals, Error> {
+    let mut out = Globals::default();
+    for id in module.globals() {
+        if module[id].is_declaration() {
+            continue;
+        }
+        out.vars.push(variable(module, names, id, format, pic)?);
+    }
+    // The other half, which is names and no bytes. A declaration is not a variable and has no
+    // image, so it is skipped above and picked up here, and only the weak ones are: an ordinary
+    // undefined name needs nothing said about it, since a reference to one is already an
+    // undefined symbol and a link that cannot resolve it is a link that should fail.
+    //
+    // The functions as well as the objects, and the functions are the ones a program actually
+    // writes: a hook a library offers is a function, and `if (hook)` around the call is the test
+    // that reads the zero address a weak reference gets. Both walks are here rather than one in
+    // each caller, for the reason the walk over the definitions above is one walk.
+    for id in module.funcs() {
+        let func = &module[id];
+        if func.is_declaration() && func.linkage == Linkage::Weak {
+            out.weak.push(names.resolve(func.name).to_owned());
+        }
+    }
+    for id in module.globals() {
+        let global = &module[id];
+        if global.is_declaration() && global.linkage == Linkage::Weak {
+            out.weak.push(names.resolve(global.name).to_owned());
+        }
+    }
+    // From the initializers of what is still defined, and not from the module's pool of
+    // relocations, which keeps the entries of an object the optimizer dropped. A `static` table
+    // that nothing reads is turned into a declaration, and the names its initializer held would
+    // otherwise come out as hidden undefined symbols that no link can resolve.
+    let mut referred: Set<Symbol> = Set::default();
+    for id in module.globals() {
+        let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+        for datum in init {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = *datum
+            {
+                referred.insert(module[reloc].symbol);
+            }
+        }
+    }
+    for id in module.funcs() {
+        let func = &module[id];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let symbol = match func[inst].extra {
+                    ir::Extra::Symbol(symbol) => Some(symbol),
+                    ir::Extra::Call(at) => func[at].callee,
+                    _ => None,
+                };
+                referred.extend(symbol);
+            }
+        }
+    }
+    let mut unseen = |name: Symbol, declared: bool, seen: ir::Visibility| {
+        if declared && seen != ir::Visibility::Default && referred.contains(&name) {
+            out.unseen.push((names.resolve(name).to_owned(), visibility(seen)));
+        }
+    };
+    for id in module.funcs() {
+        let func = &module[id];
+        unseen(func.name, func.is_declaration(), func.visibility);
+    }
+    for id in module.globals() {
+        let global = &module[id];
+        unseen(global.name, global.is_declaration(), global.visibility);
+    }
+    out.file_asm = module.file_asms().to_vec();
+    // What `dllexport` asks for, which only a COFF object has a way to say, and what a hidden
+    // definition asks for there, which is to be left out of a DLL that exports everything. A
+    // declaration is left out, because what is offered has to be here to offer: clang says
+    // nothing about one either. See `rucc_object::Offer`.
+    if format == ObjectFormat::Coff {
+        // What `#pragma comment` asks for, ahead of the names, which is where clang puts it.
+        for option in module.linker_options() {
+            out.exports.push(Export { name: option.clone(), kind: Offer::Verbatim });
+        }
+        let offer = |dll: Dll, visibility: ir::Visibility, linkage: Linkage, variable: bool| {
+            if dll == Dll::Export {
+                Some(if variable { Offer::Variable } else { Offer::Function })
+            } else if visibility == ir::Visibility::Hidden && linkage != Linkage::Internal {
+                Some(Offer::Hidden)
+            } else {
+                None
+            }
+        };
+        for id in module.funcs() {
+            let func = &module[id];
+            if func.is_declaration() {
+                continue;
+            }
+            if let Some(kind) = offer(func.dll, func.visibility, func.linkage, false) {
+                out.exports.push(Export { name: names.resolve(func.name).to_owned(), kind });
+            }
+        }
+        for id in module.globals() {
+            let global = &module[id];
+            if global.is_declaration() {
+                continue;
+            }
+            if let Some(kind) = offer(global.dll, global.visibility, global.linkage, true) {
+                out.exports.push(Export { name: names.resolve(global.name).to_owned(), kind });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every second name a module gives something, in the order it gave them.
+///
+/// One walk for the same reason the one over the globals above is one: `.set b, a` in a listing
+/// and a second symbol table entry in an object have to be saying the same thing, and the way to
+/// be sure of that is for both of them to be reading the same list.
+///
+/// # Errors
+///
+/// [`Error::IFunc`] for an ifunc on a format other than ELF, which is the only one with a symbol
+/// type for it. See [`Error`].
+pub fn aliases(
+    module: &Module,
+    names: &Interner,
+    format: ObjectFormat,
+) -> Result<Vec<Alias>, Error> {
+    let mut out = Vec::new();
+    for id in module.aliases() {
+        let alias = &module[id];
+        let name = names.resolve(alias.name).to_owned();
+        let ifunc = alias.kind == AliasKind::IFunc;
+        if ifunc && format != ObjectFormat::Elf {
+            return Err(Error::IFunc { name });
+        }
+        out.push(Alias {
+            name,
+            target: names.resolve(alias.target).to_owned(),
+            binding: binding(alias.linkage),
+            visibility: visibility(alias.visibility),
+            ifunc,
+        });
+    }
+    Ok(out)
+}
+
+/// One variable, laid out.
+fn variable(
+    module: &Module,
+    names: &Interner,
+    id: GlobalId,
+    format: ObjectFormat,
+    pic: ir::Pic,
+) -> Result<Variable, Error> {
+    let global = &module[id];
+    let name = names.resolve(global.name).to_owned();
+    if global.tls.is_some() && format == ObjectFormat::Wasm {
+        return Err(Error::Thread { name, format: format.as_str() });
+    }
+    let init = global.init.expect("a definition has an image");
+
+    let mut pieces = Vec::new();
+    // The names the image holds the addresses of, kept as symbols rather than read back off the
+    // pieces, because whether one of them is defined here is a question about this module and the
+    // pieces carry the spelling rather than the name.
+    let mut addrs = Vec::new();
+    let mut written = 0;
+    for datum in &module[init] {
+        let piece = match *datum {
+            Datum::Zero(bytes) => Piece::Zero(bytes),
+            Datum::Bytes(range) => Piece::Bytes(module[range].to_vec()),
+            Datum::Scalar { ty, value } => {
+                if ty.lanes() != 1 {
+                    let why = format!("a {ty} in an initializer");
+                    return Err(Error::Image { name, why });
+                }
+                let bytes = usize::try_from(ty.bits().div_ceil(8)).expect("a scalar this wide");
+                let mut image = module[value].bits().to_le_bytes()[..bytes].to_vec();
+                if !module.datalayout.little_endian {
+                    image.reverse();
+                }
+                Piece::Scalar(image)
+            }
+            // A distance rather than an address, which is the same symbol and addend read a
+            // different way. It is not in `addrs` below, because what that list is for is whether
+            // a read only image needs relocating when it is loaded, and a distance between two
+            // places in the same file is the same number wherever the file is loaded.
+            Datum::Away(idx) => {
+                let reloc = module[idx];
+                if reloc.size != 4 {
+                    let why = format!("a distance {} bytes wide", reloc.size);
+                    return Err(Error::Image { name, why });
+                }
+                let symbol = names.resolve(reloc.symbol).to_owned();
+                Piece::Away { symbol, addend: reloc.addend }
+            }
+            // Both ends are labels of a function in this file, so neither goes in `addrs`: the
+            // distance is the same number wherever the file is loaded.
+            Datum::Apart { to, from } => {
+                let reloc = module[to];
+                let bytes = match reloc.size {
+                    1 | 2 | 4 | 8 => reloc.size as u8,
+                    size => {
+                        let why = format!("a distance {size} bytes wide");
+                        return Err(Error::Image { name, why });
+                    }
+                };
+                let to = names.resolve(reloc.symbol).to_owned();
+                let from = names.resolve(from).to_owned();
+                Piece::Apart { to, from, addend: reloc.addend, bytes }
+            }
+            Datum::Addr(idx) => {
+                let reloc = module[idx];
+                // Four and eight are the widths a machine has a relocation for and a directive
+                // for. Anything else is a module nothing here produced and neither half of the
+                // description could write down, so it is refused rather than rounded to one.
+                let bytes = match reloc.size {
+                    4 | 8 => reloc.size as u8,
+                    size => {
+                        let why = format!("an address {size} bytes wide");
+                        return Err(Error::Image { name, why });
+                    }
+                };
+                let symbol = names.resolve(reloc.symbol).to_owned();
+                addrs.push(reloc.symbol);
+                Piece::Addr { symbol, addend: reloc.addend, bytes }
+            }
+        };
+        written += piece.size();
+        pieces.push(piece);
+    }
+    // An image shorter than the variable is the rest of an array nothing initialized, which the
+    // front end may leave off the end rather than write out as zeros it already said were there.
+    if written < global.size {
+        pieces.push(Piece::Zero(global.size - written));
+    }
+
+    // The addresses only the loader can write, which under `-fno-pic` are none of them.
+    let loaded = if pic == ir::Pic::Absolute { &[][..] } else { &addrs[..] };
+    let place = match place(module, names, id, &pieces, loaded) {
+        // A Windows image has no zeroed half of its thread-local template. Every thread gets a copy
+        // of the one `.tls` section, zeros included, which is what gcc writes there too.
+        Place::Thread { .. } if format == ObjectFormat::Coff => Place::Thread { zero: false },
+        // A thread-local one is in the template every thread copies whatever else it says, which
+        // is gcc's answer for both of the two below.
+        place @ Place::Thread { .. } => place,
+        // The two sections a board's startup code leaves alone, which only ELF has. The front end
+        // asked everything else gcc asks before it set either, so a `section` beside one is gone
+        // and the image of a `noinit` one is zeros.
+        _ if format == ObjectFormat::Elf && global.noinit => Place::NoInit,
+        _ if format == ObjectFormat::Elf && global.persistent => Place::Persistent,
+        // A literal the linker can merge with every other copy of the same string, on the one
+        // format that has a section for it. See [`Place::Strings`].
+        Place::ReadOnly if format == ObjectFormat::Elf && global.literal => {
+            match string_width(&pieces, global.align) {
+                Some(width) => Place::Strings { align: u64::from(global.align), width },
+                None => Place::ReadOnly,
+            }
+        }
+        place => place,
+    };
+    let size = global.size.max(written);
+    let binding = binding(global.linkage);
+    let visibility = visibility(global.visibility);
+    let retain = global.retain && format == ObjectFormat::Elf;
+    let align = u64::from(global.align);
+    let redzone = global.redzone;
+    Ok(Variable { name, size, align, place, binding, visibility, retain, pieces, redzone })
+}
+
+/// How wide a character is in an image that is one string and nothing after it, and nothing for
+/// an image that is not one.
+///
+/// A wide literal is aligned to its character, so a literal aligned to two or four is tried at
+/// that width first. Anything else, or one that is not a string at that width, is tried a byte at
+/// a time.
+fn string_width(pieces: &[Piece], align: u32) -> Option<u64> {
+    let [Piece::Bytes(bytes)] = pieces else { return None };
+    [align, 1]
+        .into_iter()
+        .filter(|width| matches!(width, 1 | 2 | 4))
+        .find(|&width| one_string(bytes, width as usize))
+        .map(u64::from)
+}
+
+/// Whether bytes are one string of characters that wide and nothing after it, which is a run of
+/// characters whose first zero is its last one. A linker merging strings reads up to the first
+/// zero, so one with a zero inside it would be two strings to the linker and half of it would be
+/// lost.
+fn one_string(bytes: &[u8], width: usize) -> bool {
+    !bytes.is_empty()
+        && bytes.len() % width == 0
+        && bytes.chunks(width).position(|unit| unit.iter().all(|&byte| byte == 0))
+            == Some(bytes.len() / width - 1)
+}
+
+/// What the linker is told about a name, from the linkage the module gave it.
+///
+/// Three of the five, because that is how many an object file can say. Which of the two weak ones
+/// a symbol had is a fact the optimizer needs and the linker does not, and a common one is a
+/// definition every other file may also make, which is a section rather than a binding.
+const fn binding(linkage: Linkage) -> Binding {
+    match linkage {
+        Linkage::Internal => Binding::Local,
+        Linkage::Weak | Linkage::LinkOnce => Binding::Weak,
+        Linkage::External | Linkage::Common => Binding::Global,
+    }
+}
+
+/// What the dynamic linker is told about a name, from the visibility the module gave it.
+///
+/// All three, because ELF says all three, and the two enumerations are the same three answers
+/// written once in a crate that is not allowed to know what an object file is and once in one
+/// that is.
+const fn visibility(visibility: ir::Visibility) -> Visibility {
+    match visibility {
+        ir::Visibility::Default => Visibility::Default,
+        ir::Visibility::Hidden => Visibility::Hidden,
+        ir::Visibility::Protected => Visibility::Protected,
+    }
+}
+
+/// Which section a variable goes in.
+///
+/// The program's answer when it gave one, and otherwise worked out from what the variable is. A
+/// tentative definition is asked of the linker rather than put anywhere, since the whole of what
+/// it says is that the variable exists and that some other file may say so too.
+///
+/// Being constant is not on its own enough to put a variable in a section nothing may ever write.
+/// An image holding the address of something is an image the loader has to write, because an
+/// address is not a number a link knows when everything it links may be moved. So the question
+/// asked of a constant variable is whether its image holds an address, and one that does goes in
+/// the section that is writable for exactly as long as the loader needs it to be.
+///
+/// A variable with no image at all is not zero filled, it is empty, and the two differ. An `asm`
+/// at file scope writes one whenever it puts a label at the end of what it just wrote, and what
+/// that label means is the address after those bytes, so it belongs in the section those bytes
+/// went into. Sending it to the section of zeros instead would move it away from the run it was
+/// written to mark the end of, and the distance a program reads off it would be a different
+/// distance.
+fn place(
+    module: &Module,
+    names: &Interner,
+    id: GlobalId,
+    pieces: &[Piece],
+    addrs: &[Symbol],
+) -> Place {
+    let global = &module[id];
+    // First, because a thread-local variable has to be in one of the two sections a thread gets a
+    // copy of whatever else is true of it. It is never merged, since what `.comm` asks the linker
+    // for is one piece of zeroed space and this wants one per thread, and it is never read only,
+    // since the copy is made by writing it.
+    let zero = !global.nobss && !pieces.is_empty() && all_zero(pieces);
+    if global.tls.is_some() {
+        return Place::Thread { zero };
+    }
+    // Before the tentative definition, because gcc never offers one the program put in a section
+    // to the linker to merge, and before the zeros, because what a linker script walking the
+    // section finds has to be there as bytes unless the section's own name says it holds none.
+    // The flags come from the same two questions asked below of a variable in no section.
+    if let Some(section) = global.section {
+        let name = names.resolve(section).to_owned();
+        let zero = all_zero(pieces);
+        // A shared one is written whatever its bytes are, since gcc gives the flag to any
+        // section it would make writable and names no section of zeros on COFF.
+        let read_only = global.constant && addrs.is_empty();
+        let holds = if global.shared && !read_only {
+            Holds::Shared
+        } else if zero && Holds::nobits(&name) {
+            Holds::Zero
+        } else if read_only {
+            Holds::ReadOnly
+        } else {
+            Holds::Written
+        };
+        return Place::Named(name, holds);
+    }
+    if global.linkage == Linkage::Common {
+        return Place::Merged;
+    }
+    // A constant stays out of the zeroed section even when every byte of it is zero, which is the
+    // rule gcc keeps in bss_initializer_p: what the program promised never to write belongs with
+    // the rest of what it reads only, where a stray store faults. A variable the program gave an
+    // initializer under `-fno-zero-initialized-in-bss` stays out as well, which is the same rule.
+    if !global.constant && zero {
+        return Place::Zero;
+    }
+    if global.constant {
+        return match addrs {
+            [] => Place::ReadOnly,
+            _ => Place::RelocReadOnly {
+                local: addrs.iter().all(|&symbol| resolved_here(module, symbol)),
+            },
+        };
+    }
+    Place::Written
+}
+
+/// Whether every byte of an image is zero, which is gcc's `initializer_zerop`.
+///
+/// A number or a string the program wrote as zero counts as much as the zeros after the end of a
+/// partly written array, so `int x = 0;` and `char s[4] = "";` go in `.bss` as gcc puts them there.
+/// A floating zero with its sign bit set is not zero to gcc either, and its bytes say so.
+fn all_zero(pieces: &[Piece]) -> bool {
+    pieces.iter().all(|piece| match piece {
+        Piece::Zero(_) => true,
+        Piece::Bytes(bytes) | Piece::Scalar(bytes) => bytes.iter().all(|&byte| byte == 0),
+        _ => false,
+    })
+}
+
+/// Whether that name is one this file both defines and keeps to itself.
+///
+/// Both halves matter. A name this file does not define is one the link resolves from somewhere
+/// else, and a name this file exports is one another object may define instead, so neither is an
+/// address the first pages of the relocated segment can be laid out around.
+fn resolved_here(module: &Module, symbol: Symbol) -> bool {
+    match module.lookup(symbol) {
+        Some(SymbolRef::Func(id)) => {
+            module[id].linkage == Linkage::Internal && !module[id].is_declaration()
+        }
+        Some(SymbolRef::Global(id)) => {
+            module[id].linkage == Linkage::Internal && !module[id].is_declaration()
+        }
+        Some(SymbolRef::Alias(id)) => module[id].linkage == Linkage::Internal,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rucc_ir::{Alias as IrAlias, Global, Imm, Reloc as IrReloc, TlsModel, Type};
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
+    /// A module for the one target every case here is written for.
+    fn module(names: &mut Interner) -> Module {
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        Module::new(names.intern("t.c"), &target)
+    }
+
+    /// A four byte variable with that image.
+    fn defined(module: &mut Module, names: &mut Interner, name: &str, data: &[Datum]) -> GlobalId {
+        let list = module.push_data(data);
+        let mut global = Global::new(names.intern(name), 4, 4);
+        global.init = Some(list);
+        module.add_global(global)
+    }
+
+    #[test]
+    fn a_declaration_is_not_a_variable_this_file_defines() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        module.add_global(Global::new(names.intern("x"), 4, 4));
+        defined(&mut module, &mut names, "y", &[Datum::Zero(4)]);
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of two globals")
+            .vars;
+        assert_eq!(vars.iter().map(|var| var.name.as_str()).collect::<Vec<_>>(), ["y"]);
+    }
+
+    /// A variable's visibility comes through the layout and out the other side of the image.
+    ///
+    /// Two hops rather than one, because a variable is laid out here and then turned into an
+    /// object for the writer a hundred lines further up, and a field that survives the first and
+    /// not the second is a field the object file never hears about.
+    #[test]
+    fn the_visibility_a_variable_asked_for_reaches_the_image() {
+        for (asked, wanted) in [
+            (ir::Visibility::Default, Visibility::Default),
+            (ir::Visibility::Hidden, Visibility::Hidden),
+            (ir::Visibility::Protected, Visibility::Protected),
+        ] {
+            let mut names = Interner::new();
+            let mut module = module(&mut names);
+            let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+            module[id].visibility = asked;
+            let out = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+                .expect("a module of one global");
+            assert_eq!(out.vars[0].visibility, wanted, "{asked:?}");
+            assert_eq!(out.image().objects[0].visibility, wanted, "{asked:?} through the image");
+        }
+    }
+
+    #[test]
+    fn a_number_in_an_image_is_the_bytes_the_machine_reads_it_as() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(258, Type::int(32)));
+        defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(32), value }]);
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
+        assert_eq!(vars[0].pieces, [Piece::Scalar(vec![2, 1, 0, 0])]);
+        // The low byte first, which is what this machine reads and is a fact about the module
+        // rather than about the variable.
+        assert_eq!(vars[0].pieces[0].size(), 4);
+    }
+
+    #[test]
+    fn a_literal_goes_where_the_linker_merges_strings_when_it_is_one_string() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut literal = |module: &mut Module, name: &str, bytes: &[u8], align: u32| {
+            let range = module.push_bytes(bytes);
+            let id = defined(module, &mut names, name, &[Datum::Bytes(range)]);
+            module[id].size = bytes.len() as u64;
+            module[id].align = align;
+            module[id].constant = true;
+            module[id].literal = true;
+        };
+        literal(&mut module, "hi", b"hi\0", 1);
+        literal(&mut module, "two", b"a\0b\0", 1);
+        literal(&mut module, "wide", &[b'a', 0, 0, 0, 0, 0, 0, 0], 1);
+        literal(&mut module, "u", &[b'h', 0, b'i', 0, 0, 0], 2);
+        literal(&mut module, "U", &[b'a', 0, 0, 0, 0, 0, 0, 0], 4);
+        literal(&mut module, "u_two", &[b'a', 0, 0, 0, b'b', 0, 0, 0], 2);
+        let places = |format| -> Vec<Place> {
+            let vars =
+                globals(&module, &names, format, ir::Pic::Executable).expect("six literals").vars;
+            vars.into_iter().map(|var| var.place).collect()
+        };
+        assert_eq!(
+            places(ObjectFormat::Elf),
+            [
+                Place::Strings { align: 1, width: 1 },
+                Place::ReadOnly,
+                Place::ReadOnly,
+                Place::Strings { align: 2, width: 2 },
+                Place::Strings { align: 4, width: 4 },
+                Place::ReadOnly,
+            ]
+        );
+        assert_eq!(places(ObjectFormat::MachO), vec![Place::ReadOnly; 6]);
+    }
+
+    #[test]
+    fn what_a_variable_is_decides_which_section_it_goes_in() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+        let scalar = Datum::Scalar { ty: Type::int(32), value };
+
+        let zeroed = defined(&mut module, &mut names, "zeroed", &[Datum::Zero(4)]);
+        let written = defined(&mut module, &mut names, "written", &[scalar]);
+        let read_only = defined(&mut module, &mut names, "read_only", &[scalar]);
+        module[read_only].constant = true;
+        let named = defined(&mut module, &mut names, "named", &[scalar]);
+        module[named].section = Some(names.intern(".init_array"));
+        let merged = defined(&mut module, &mut names, "merged", &[Datum::Zero(4)]);
+        module[merged].linkage = Linkage::Common;
+
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of five globals")
+            .vars;
+        let places: Vec<&Place> = vars.iter().map(|var| &var.place).collect();
+        assert_eq!(
+            places,
+            [
+                &Place::Zero,
+                &Place::Written,
+                &Place::ReadOnly,
+                &Place::Named(".init_array".to_owned(), Holds::Written),
+                &Place::Merged,
+            ]
+        );
+        let _ = (zeroed, written);
+    }
+
+    /// A constant holding an address goes where the loader may write it once, not in `.rodata`.
+    ///
+    /// Three of them, because the question has three answers. One whose address is of something
+    /// this file defines and keeps to itself is local, one whose address is of a name this file
+    /// only declares is not, and one that mixes the two is not either, since it takes only one
+    /// name the link resolves from elsewhere to spoil it. The fourth is the constant with no
+    /// address in it at all, which is the case that has to keep going where it went before.
+    #[test]
+    fn a_constant_holding_an_address_goes_where_the_loader_may_write_it_once() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+
+        let mine = defined(&mut module, &mut names, "mine", &[Datum::Zero(4)]);
+        module[mine].linkage = Linkage::Internal;
+        let theirs = module.add_global(Global::new(names.intern("theirs"), 4, 4));
+
+        let to_mine = module.add_reloc(IrReloc { symbol: module[mine].name, addend: 0, size: 8 });
+        let to_theirs =
+            module.add_reloc(IrReloc { symbol: module[theirs].name, addend: 0, size: 8 });
+
+        let plain = defined(
+            &mut module,
+            &mut names,
+            "plain",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[plain].constant = true;
+        let local = defined(&mut module, &mut names, "local", &[Datum::Addr(to_mine)]);
+        module[local].constant = true;
+        module[local].size = 8;
+        let far = defined(&mut module, &mut names, "far", &[Datum::Addr(to_theirs)]);
+        module[far].constant = true;
+        module[far].size = 8;
+        let both = defined(
+            &mut module,
+            &mut names,
+            "both",
+            &[Datum::Addr(to_mine), Datum::Addr(to_theirs)],
+        );
+        module[both].constant = true;
+        module[both].size = 16;
+
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of five globals")
+            .vars;
+        let places: Vec<(&str, &Place)> =
+            vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
+        assert_eq!(
+            places,
+            [
+                ("mine", &Place::Zero),
+                ("plain", &Place::ReadOnly),
+                ("local", &Place::RelocReadOnly { local: true }),
+                ("far", &Place::RelocReadOnly { local: false }),
+                ("both", &Place::RelocReadOnly { local: false }),
+            ]
+        );
+        let absolute = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Absolute)
+            .expect("a module of five globals")
+            .vars;
+        let places: Vec<&Place> = absolute.iter().map(|var| &var.place).collect();
+        let read_only = &Place::ReadOnly;
+        assert_eq!(places, [&Place::Zero, read_only, read_only, read_only, read_only]);
+    }
+
+    /// A variable in a section the program named keeps its bytes and gets the flags gcc gives it.
+    ///
+    /// Zeros are bytes in the section unless its name is one that means zeros, since a linker
+    /// script walking a table finds what is in the file and not what `.bss` would have held. A
+    /// constant is read only unless it holds an address, and anything else is writable.
+    #[test]
+    fn a_variable_in_a_named_section_is_there_with_the_flags_its_contents_ask_for() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(7, Type::int(32)));
+        let seven = [Datum::Scalar { ty: Type::int(32), value }];
+        let mine = names.intern(".mine");
+
+        let zeros = defined(&mut module, &mut names, "zeros", &[Datum::Zero(4)]);
+        module[zeros].section = Some(mine);
+        let fixed = defined(&mut module, &mut names, "fixed", &seven);
+        module[fixed].constant = true;
+        module[fixed].section = Some(mine);
+        let to = module.add_reloc(IrReloc { symbol: module[zeros].name, addend: 0, size: 8 });
+        let table = defined(&mut module, &mut names, "table", &[Datum::Addr(to)]);
+        module[table].constant = true;
+        module[table].size = 8;
+        module[table].section = Some(names.intern(".initcall"));
+        let page = defined(&mut module, &mut names, "page", &[Datum::Zero(4)]);
+        module[page].section = Some(names.intern(".bss..page_aligned"));
+        let filled = defined(&mut module, &mut names, "filled", &seven);
+        module[filled].section = Some(names.intern(".bss.filled"));
+        let merged = defined(&mut module, &mut names, "merged", &[Datum::Zero(4)]);
+        module[merged].linkage = Linkage::Common;
+        module[merged].section = Some(mine);
+
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of six globals")
+            .vars;
+        let places: Vec<(&str, &Place)> =
+            vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
+        let named = |name: &str, holds| Place::Named(name.to_owned(), holds);
+        assert_eq!(
+            places,
+            [
+                ("zeros", &named(".mine", Holds::Written)),
+                ("fixed", &named(".mine", Holds::ReadOnly)),
+                ("table", &named(".initcall", Holds::Written)),
+                ("page", &named(".bss..page_aligned", Holds::Zero)),
+                ("filled", &named(".bss.filled", Holds::Written)),
+                ("merged", &named(".mine", Holds::Written)),
+            ]
+        );
+        // Under `-fno-pic` the table is as read only as the constant beside it, since the static
+        // linker writes the address and nothing writes it after.
+        let absolute = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Absolute)
+            .expect("a module of six globals")
+            .vars;
+        assert_eq!(absolute[2].place, named(".initcall", Holds::ReadOnly));
+        assert_eq!(absolute[0].place, named(".mine", Holds::Written));
+        let data = Globals { vars, ..Globals::default() }.image();
+        assert_eq!(data.objects[0].bytes, [0; 4], "zeros in a named section are bytes");
+        assert!(data.objects[3].bytes.is_empty(), "zeros in .bss..page_aligned are not");
+    }
+
+    #[test]
+    fn the_rest_of_an_image_the_front_end_left_off_is_zeros() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(7, Type::int(8)));
+        let id =
+            defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(8), value }]);
+        module[id].size = 4;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
+        assert_eq!(vars[0].pieces, [Piece::Scalar(vec![7]), Piece::Zero(3)]);
+        assert_eq!(vars[0].size, 4);
+    }
+
+    #[test]
+    fn a_variable_holding_an_address_is_a_hole_and_a_name_for_the_linker() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 16, size: 8 });
+        let id = defined(&mut module, &mut names, "p", &[Datum::Addr(reloc)]);
+        module[id].size = 8;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
+        assert_eq!(vars[0].pieces, [Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 }]);
+
+        let data = Globals { vars, ..Globals::default() }.image();
+        assert_eq!(data.objects[0].bytes, vec![0; 8]);
+        assert_eq!(
+            data.objects[0].relocs,
+            [Reloc {
+                at: 0,
+                symbol: "y".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 16,
+                after: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_variable_holding_a_distance_is_a_hole_the_linker_measures_from_where_it_is() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 1, size: 4 });
+        let id = defined(&mut module, &mut names, "d", &[Datum::Away(reloc)]);
+        module[id].size = 4;
+        // Read only rather than relocated at load time, which is the point of writing a table of
+        // distances: what is in the four bytes is the same number wherever the file is loaded.
+        module[id].constant = true;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
+        assert_eq!(vars[0].pieces, [Piece::Away { symbol: "y".to_owned(), addend: 1 }]);
+        assert_eq!(vars[0].place, Place::ReadOnly);
+
+        let data = Globals { vars, ..Globals::default() }.image();
+        assert_eq!(data.objects[0].bytes, vec![0; 4]);
+        assert_eq!(
+            data.objects[0].relocs,
+            [Reloc { at: 0, symbol: "y".to_owned(), kind: Reference::Away, addend: 1, after: 0 }]
+        );
+    }
+
+    #[test]
+    fn a_distance_of_a_width_no_relocation_writes_is_refused_by_the_width_it_asked_for() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 0, size: 8 });
+        let id = defined(&mut module, &mut names, "d", &[Datum::Away(reloc)]);
+        module[id].size = 8;
+        let failed = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect_err("a distance that wide");
+        assert_eq!(
+            failed,
+            Error::Image { name: "d".to_owned(), why: "a distance 8 bytes wide".to_owned() }
+        );
+    }
+
+    #[test]
+    fn a_variable_in_a_section_that_carries_no_image_carries_its_size_and_nothing_else() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4096)]);
+        module[id].size = 4096;
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .image();
+        assert_eq!(data.objects[0].place, Place::Zero);
+        assert_eq!(data.objects[0].size, 4096);
+        // The point of the section: a program with a large zeroed array is a small file.
+        assert!(data.objects[0].bytes.is_empty());
+    }
+
+    #[test]
+    fn a_constant_of_nothing_but_zeros_is_read_only_and_not_zeroed_space() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(64)]);
+        module[id].size = 64;
+        module[id].constant = true;
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .image();
+        assert_eq!(data.objects[0].place, Place::ReadOnly);
+        assert_eq!(data.objects[0].bytes, vec![0; 64]);
+    }
+
+    #[test]
+    fn the_linkage_a_variable_had_decides_how_the_linker_sees_the_name() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        for (index, (linkage, binding)) in [
+            (Linkage::External, Binding::Global),
+            (Linkage::Internal, Binding::Local),
+            (Linkage::Weak, Binding::Weak),
+            (Linkage::LinkOnce, Binding::Weak),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("x{index}");
+            let id = defined(&mut module, &mut names, &name, &[Datum::Zero(4)]);
+            module[id].linkage = linkage;
+            let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+                .expect("a module of globals")
+                .vars;
+            assert_eq!(vars[index].binding, binding, "{linkage:?}");
+        }
+    }
+
+    #[test]
+    fn the_linkage_an_alias_had_decides_how_the_linker_sees_the_second_name() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let target = names.intern("a");
+        for (index, (linkage, binding)) in [
+            (Linkage::External, Binding::Global),
+            (Linkage::Internal, Binding::Local),
+            (Linkage::Weak, Binding::Weak),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut alias = IrAlias::new(names.intern(&format!("b{index}")), target);
+            alias.linkage = linkage;
+            module.add_alias(alias);
+            let written = aliases(&module, &names, ObjectFormat::Elf).expect("a module of aliases");
+            assert_eq!(written[index].binding, binding, "{linkage:?}");
+            assert_eq!(written[index].target, "a", "{linkage:?}");
+        }
+    }
+
+    /// A different job from a second name for something, and the wrong answer would be an alias
+    /// pointing at the resolver rather than at what the resolver picks. ELF has a symbol type for
+    /// it and gets one marked as an ifunc; the formats without the type refuse it.
+    #[test]
+    fn an_ifunc_is_marked_on_elf_and_refused_where_there_is_no_type_for_it() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut memcpy = IrAlias::new(names.intern("memcpy"), names.intern("pick_memcpy"));
+        memcpy.kind = AliasKind::IFunc;
+        module.add_alias(memcpy);
+        let written = aliases(&module, &names, ObjectFormat::Elf).expect("an ifunc on ELF");
+        assert_eq!(
+            (written[0].name.as_str(), written[0].target.as_str()),
+            ("memcpy", "pick_memcpy")
+        );
+        assert!(written[0].ifunc);
+        for format in [ObjectFormat::Coff, ObjectFormat::MachO] {
+            let error = aliases(&module, &names, format).expect_err("no ifunc type");
+            assert_eq!(error, Error::IFunc { name: "memcpy".to_owned() }, "{format:?}");
+        }
+    }
+
+    /// The two sections a thread gets a copy of, told apart the way `.data` and `.bss` are.
+    #[test]
+    fn a_thread_local_variable_goes_in_the_section_a_thread_gets_a_copy_of() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+        let written = defined(
+            &mut module,
+            &mut names,
+            "counted",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[written].tls = Some(TlsModel::GlobalDynamic);
+        let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
+        module[zeroed].tls = Some(TlsModel::GlobalDynamic);
+
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("two thread-locals")
+            .vars;
+        assert_eq!(vars[0].place, Place::Thread { zero: false }, ".tdata");
+        assert_eq!(vars[1].place, Place::Thread { zero: true }, ".tbss");
+    }
+
+    /// Being read only loses to being thread-local, because the copy is made by writing it.
+    #[test]
+    fn a_constant_thread_local_is_still_in_the_section_a_thread_gets_a_copy_of() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(1, Type::int(32)));
+        let id =
+            defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(32), value }]);
+        module[id].tls = Some(TlsModel::GlobalDynamic);
+        module[id].constant = true;
+
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a thread-local")
+            .vars;
+        assert_eq!(vars[0].place, Place::Thread { zero: false });
+    }
+
+    /// The image of a thread-local whose image is all zeros costs the file nothing, the same as
+    /// `.bss` does, and the one that is not all zeros carries its bytes.
+    #[test]
+    fn the_image_of_a_thread_local_is_carried_only_when_it_is_not_all_zeros() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let value = module.add_imm(Imm::int(258, Type::int(32)));
+        let written = defined(
+            &mut module,
+            &mut names,
+            "counted",
+            &[Datum::Scalar { ty: Type::int(32), value }],
+        );
+        module[written].tls = Some(TlsModel::GlobalDynamic);
+        let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
+        module[zeroed].tls = Some(TlsModel::GlobalDynamic);
+
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("two thread-locals")
+            .image();
+        assert_eq!(data.objects[0].bytes, [2, 1, 0, 0]);
+        assert_eq!(data.objects[0].size, 4);
+        assert!(data.objects[1].bytes.is_empty(), "a zeroed one carries its size and no bytes");
+        assert_eq!(data.objects[1].size, 4);
+    }
+
+    /// WebAssembly has no thread-local storage this writes, so the variable is refused by name.
+    #[test]
+    fn a_thread_local_variable_is_refused_on_a_format_that_does_not_spell_one_this_way() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+        module[id].tls = Some(TlsModel::GlobalDynamic);
+        let format = ObjectFormat::Wasm;
+        let error = globals(&module, &names, format, ir::Pic::Executable)
+            .expect_err("a thread-local variable");
+        assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
+    }
+
+    /// Windows copies one `.tls` section per thread and has no zeroed half, so a zeroed one is
+    /// written out as zeros.
+    #[test]
+    fn a_zeroed_thread_local_on_windows_is_written_out() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+        module[id].tls = Some(TlsModel::GlobalDynamic);
+        let vars = globals(&module, &names, ObjectFormat::Coff, ir::Pic::Executable)
+            .expect("a thread-local variable");
+        let data = vars.image();
+        assert_eq!(data.objects[0].place, Place::Thread { zero: false });
+        assert_eq!(data.objects[0].bytes, [0, 0, 0, 0]);
+    }
+}
