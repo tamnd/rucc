@@ -11718,4 +11718,3 @@ nop
         assert_eq!(kinds[..2], [Reference::Call, Reference::Call]);
     }
 }
-
