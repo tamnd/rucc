@@ -239,9 +239,14 @@ impl Pass for RedundantLoad {
                         continue;
                     };
                     let segment = func[inst].flags.intersection(Flags::SEG_FS.union(Flags::SEG_GS));
-                    let key = walk
-                        .settled(inst)
-                        .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty, segment));
+                    let key = walk.settled(inst).map(|mem| {
+                        (
+                            mem,
+                            Place::of(func, func[func[inst].args][0]).past(func, &forward),
+                            ty,
+                            segment,
+                        )
+                    });
                     // Whether the walk went on through a copy, after which the write it names is
                     // about the copy's source and not about the bytes the load reads.
                     let mut moved = false;
@@ -528,6 +533,37 @@ impl Place {
             }
         }
         Self::Past(base, offset)
+    }
+    /// The same place with the address it was found from put in terms of what an earlier load
+    /// was forwarded to.
+    ///
+    /// A field read through a pointer this pass has just found again is an address built on a
+    /// load that is about to go, so its key names that load and not the value that took its
+    /// place. `fp->f_fs` read in `buf_read_file` and again in the `block_map` inlined into it
+    /// is `f->f_fsdata` read twice and the field past each, and the second field only matches
+    /// the first once the second `f->f_fsdata` is the first one. The forwarded value is equal
+    /// to the load and is above it, so the place is the same bytes.
+    fn past(self, func: &Func, forward: &Map<Value, Value>) -> Self {
+        let mut place = self;
+        for _ in 0..8 {
+            let (from, by) = match place {
+                Self::At(Origin::Unknown(base), by) | Self::Past(base, by) => (base, by),
+                _ => break,
+            };
+            let Some(&to) = forward.get(&from) else { break };
+            let Some(next) = Self::of(func, to).shifted(by) else { break };
+            place = next;
+        }
+        place
+    }
+
+    /// The same place so many bytes further on, when that is still a number.
+    fn shifted(self, by: i64) -> Option<Self> {
+        Some(match self {
+            Self::At(from, at) => Self::At(from, at.checked_add(by)?),
+            Self::Indexed(from, step, at) => Self::Indexed(from, step, at.checked_add(by)?),
+            Self::Past(base, at) => Self::Past(base, at.checked_add(by)?),
+        })
     }
 }
 
@@ -1033,6 +1069,35 @@ block2:
         let func = one(&module);
         off(func);
         assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_field_read_through_a_pointer_read_again_is_read_once() {
+        // `fp->f_fs` in `buf_read_file` and again in the `block_map` inlined into it, which is
+        // `f->f_fsdata` read twice and a field past each. The second field is only the same
+        // place as the first once the second pointer is known to be the first one.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 8
+    %2 = ptr_add.nuw %0, %1
+    %3 = load %2, align 4
+    %4 = ptr_add.nuw %3, %1
+    %5 = load.i32 %4, align 4
+    %6 = iconst.i32 8
+    %7 = ptr_add.nuw %0, %6
+    %8 = load %7, align 4
+    %9 = ptr_add.nuw %8, %6
+    %10 = load.i32 %9, align 4
+    %11 = add %5, %10
+    return %11
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 2);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 2);
     }
 
     #[test]
