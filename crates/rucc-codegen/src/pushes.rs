@@ -81,10 +81,15 @@ pub fn arguments(
 /// what each call passed in it, and says whether it did.
 ///
 /// `size` is how many bytes the prologue takes off the stack pointer and `outgoing` is how many of
-/// those are the area. When the two are the same and no instruction reads the area any longer, the
-/// `subl $8, %esp` of the prologue and the `addl $8, %esp` of each epilogue are six bytes that do
-/// nothing, and gcc has neither at -Os. Each address counted from the stack pointer is then that
-/// many bytes nearer to it.
+/// those are the area. When the size is the area rounded up to the call alignment and no
+/// instruction reads the frame any longer, the `subl $8, %esp` of the prologue and the
+/// `addl $8, %esp` of each epilogue are six bytes that do nothing, and gcc has neither at -Os. Each
+/// address counted from the stack pointer is then that many bytes nearer to it.
+///
+/// The bytes above the area are the pad that keeps the stack pointer on the call alignment, and
+/// nothing is in them. The `readsects` call in NetBSD's `bootxx` passes 24 bytes and its frame is
+/// 32. Without the frame, the pushes are padded to the call alignment as each call is, so the
+/// stack pointer is on it at the call as before.
 ///
 /// The function is left alone when the stack pointer is written by anything but the prologue, an
 /// epilogue, a push, a pop, a call and the `back` of [`Pushed`], or read other than as the base of
@@ -102,7 +107,7 @@ pub fn unframed(
     conv: &CallRegs,
     names: &mut Interner,
 ) -> bool {
-    if size == 0 || size != outgoing || size % conv.stack_align != 0 {
+    if size == 0 || size != outgoing.next_multiple_of(conv.stack_align) {
         return false;
     }
     let Ok(bytes) = i32::try_from(size) else { return false };
@@ -1022,11 +1027,20 @@ mod tests {
 
     /// `printf("%d", x)` in a frame of `size` bytes whose bottom `outgoing` are the area, with the
     /// prologue's `subl` in front, the epilogue's `addl` behind and a read of the word at `read` in
-    /// front of the stores, and the unwind rows of the two. Pushed and then unframed, one
+    /// front of the stores, and the unwind rows of the two. An area of 12 bytes also stores `%ecx`
+    /// in the third word. Pushed and then unframed with calls aligned to `align` bytes, one
     /// instruction to a line from the opcode on, and the offsets the rows are left with.
-    fn framed(size: i64, outgoing: u32, read: i32) -> (bool, Vec<String>, Vec<i32>) {
+    fn framed(size: i64, outgoing: u32, read: i32, align: u32) -> (bool, Vec<String>, Vec<i32>) {
         let mut names = Interner::new();
-        let (mut func, call) = printf(&mut names, |_, _, _| {});
+        let (mut func, call) = printf(&mut names, |func, block, names| {
+            // A third word, so the area is not a multiple of a 16-byte alignment.
+            if outgoing > 8 {
+                func.build(block, op(names, "mov_mr_32"))
+                    .uses(Reg::physical(ECX), GPR)
+                    .mem(Mem::at(sp()).plus(8))
+                    .finish();
+            }
+        });
         let block = func.blocks().next().expect("a block");
         let first = func.insts(block).next().expect("a store");
         let ret = func.insts(block).last().expect("the return");
@@ -1045,10 +1059,10 @@ mod tests {
         let back = func.build_loose(add).def(esp, GPR).uses(esp, GPR).imm(size).finish();
         func.insert_before(ret, back);
         func.cfi.push((back, CfiOp::DefCfaOffset(4)));
-        let pushed = arguments(&mut func, &[(call, 8)], &FRAME, &MACHINE, words(), &mut names);
+        let conv = SYSV.aligned_to(align);
+        let pushed = arguments(&mut func, &[(call, outgoing)], &FRAME, &MACHINE, conv, &mut names);
         let size = u32::try_from(size).expect("a size");
-        let gone =
-            unframed(&mut func, size, outgoing, &pushed, &FRAME, &MACHINE, words(), &mut names);
+        let gone = unframed(&mut func, size, outgoing, &pushed, &FRAME, &MACHINE, conv, &mut names);
         let lines = rucc_mir::print_func(&func, &names, &REGS)
             .lines()
             .filter_map(|line| line.find("x64.").map(|at| line[at..].to_owned()))
@@ -1067,7 +1081,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_was_only_the_outgoing_area_goes_once_the_arguments_are_pushed() {
-        let (gone, lines, rows) = framed(8, 8, 16);
+        let (gone, lines, rows) = framed(8, 8, 16, 4);
         assert!(gone, "{lines:#?}");
         // The two pushes and the way back, each eight bytes nearer, and no row for the frame.
         assert_eq!(rows, [4, 8, 12], "{lines:#?}");
@@ -1078,15 +1092,29 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_was_the_outgoing_area_and_its_pad_goes_once_the_arguments_are_pushed() {
+        let (gone, lines, _) = framed(16, 12, 16, 16);
+        assert!(gone, "{lines:#?}");
+        assert!(!lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_frame_larger_than_the_outgoing_area_and_its_pad_stays() {
+        let (gone, lines, _) = framed(32, 12, 32, 16);
+        assert!(!gone, "{lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
+    }
+
+    #[test]
     fn a_frame_with_more_than_the_outgoing_area_in_it_stays() {
-        let (gone, lines, _) = framed(12, 8, 8);
+        let (gone, lines, _) = framed(12, 8, 8, 4);
         assert!(!gone, "{lines:#?}");
         assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
     }
 
     #[test]
     fn a_frame_whose_area_is_still_read_stays() {
-        let (gone, lines, _) = framed(8, 8, 4);
+        let (gone, lines, _) = framed(8, 8, 4, 4);
         assert!(!gone, "{lines:#?}");
         assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
     }
