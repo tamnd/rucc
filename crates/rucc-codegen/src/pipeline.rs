@@ -1537,6 +1537,10 @@ pub fn compile_recording(
         bits::sized(&mut func, machine.bits, names, gpr, machine.conv.word);
     }
     let allocating = Instant::now();
+    // At `-Os` a load in a loop is as many bytes as one outside it, so the allocator is shown
+    // every block and edge as running once and its cost is a count of the loads, stores and moves
+    // in the text. See [`flatten`].
+    let weights = if flags.goal == Goal::Size { flatten(&mut func) } else { Vec::new() };
     let (mut allocation, used) = rucc_regalloc::run_first(
         &mut func,
         &tried,
@@ -1546,6 +1550,7 @@ pub fn compile_recording(
         allocator,
         if i386 { Some(&copy) } else { None },
     );
+    unflatten(&mut func, weights);
     recording.spent.allocation += allocating.elapsed();
     recording.pressure.record(&called, Cost::of(&allocation));
 
@@ -2167,6 +2172,43 @@ fn commuting(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) {
             *known.entry(opcode).or_insert_with(|| shapes.commutes(names.resolve(opcode.name())));
         if commutes {
             func[inst].flags = func[inst].flags.with(mir::Flags::COMMUTES);
+        }
+    }
+}
+
+/// How often each block and each of its edges ran, as [`flatten`] found them.
+type Weights = Vec<(mir::Block, mir::Weight, Vec<mir::Weight>)>;
+
+/// Sets every block and edge of the function to run once, and gives back what they were.
+///
+/// The allocator weighs a load or a store by how often its block runs, which is the right
+/// measure when the goal is speed. When the goal is size every instruction costs its bytes
+/// wherever it is. A pointer read in every block of `buf_read_file` in the NetBSD boot code
+/// went to the stack because a value read in a loop of the inlined `block_map` weighed more,
+/// and each of its loads outside the loop was four bytes that the loop did not save. With the
+/// weights flat, `bootxx_ffsv2`, `bootxx_lfsv1` and `bootxx_ext2fs` fit in their 7680 bytes.
+fn flatten(func: &mut mir::Func) -> Weights {
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    blocks
+        .into_iter()
+        .map(|block| {
+            let was = func[block].weight;
+            let calls = func[block].succs.iter().map(|call| call.weight).collect();
+            func.set_weight(block, mir::Weight::ONCE);
+            for call in func.succs_mut(block) {
+                call.weight = mir::Weight::ONCE;
+            }
+            (block, was, calls)
+        })
+        .collect()
+}
+
+/// Puts back the weights [`flatten`] took, for the block layout that reads them after.
+fn unflatten(func: &mut mir::Func, weights: Weights) {
+    for (block, was, calls) in weights {
+        func.set_weight(block, was);
+        for (call, weight) in func.succs_mut(block).iter_mut().zip(calls) {
+            call.weight = weight;
         }
     }
 }
@@ -3859,5 +3901,26 @@ mod tests {
         // Not a target this crate has a back end for, and saying so is the whole point.
         let info = TargetInfo::new(triple("wasm32-unknown-unknown"));
         assert!(Machine::for_target(&info).is_none());
+    }
+
+    #[test]
+    fn a_size_build_allocates_with_every_block_once_and_lays_out_with_the_weights_it_had() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let made = [func.create_block(), func.create_block(), func.create_block()];
+        func.set_weight(made[1], mir::Weight::parts(90_000));
+        func.set_weight(made[2], mir::Weight::parts(1_000));
+        *func.succs_mut(made[0]) = vec![
+            mir::BlockCall::to(made[1]).taken(mir::Weight::parts(9)),
+            mir::BlockCall::to(made[2]).taken(mir::Weight::parts(1)),
+        ];
+        let weights = flatten(&mut func);
+        assert!(made.iter().all(|&block| func[block].weight == mir::Weight::ONCE));
+        assert!(func[made[0]].succs.iter().all(|call| call.weight == mir::Weight::ONCE));
+        unflatten(&mut func, weights);
+        assert_eq!(func[made[1]].weight, mir::Weight::parts(90_000));
+        assert_eq!(func[made[2]].weight, mir::Weight::parts(1_000));
+        let taken: Vec<mir::Weight> = func[made[0]].succs.iter().map(|call| call.weight).collect();
+        assert_eq!(taken, [mir::Weight::parts(9), mir::Weight::parts(1)]);
     }
 }
