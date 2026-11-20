@@ -1,0 +1,3399 @@
+//! Folding an address computation into the memory operand of whatever reads it.
+//!
+//! Design: `spec/10-backend.md` section 10.9, and `spec/optimizer/37-machine-level-optimization.md`
+//! section 37.4.
+//!
+//! The selector matches one instruction at a time and offers it its operands' operands, which is
+//! two levels of term and is exactly what an address needs to become a `lea`: `a + i * 4` is an
+//! add at the root with a multiply under it. Put that same address under a load and everything
+//! moves down a level, the multiply is at level two, and no plan the selector has reaches it. So
+//! an array read comes out of selection as two instructions, the `lea` that works the address out
+//! and the `mov` that reads through it, and the second one's addressing mode holds nothing but a
+//! base.
+//!
+//! Which is a pair a peephole can see. When an instruction reads the register a `lea` wrote as the
+//! base of its memory operand, the two addresses compose: the reader's displacement is a constant
+//! added to an address the `lea` already worked out, so adding the two displacements together gives
+//! the address the reader wanted in the mode the `lea` was using.
+//!
+//! The question is asked of the readers together rather than one at a time, which is what section
+//! 37.4 says the pass is really for. One address read at several offsets is what a structure
+//! written field by field comes out as, and what a loop the unroller took apart comes out as, and
+//! in neither of those does any one reader own the address. If every reader can take it then
+//! nothing reads the `lea` any more and it goes, and the arithmetic moved into addressing modes
+//! that were doing an addition anyway. If one reader cannot, folding into the rest buys nothing:
+//! the `lea` stays where it is for the one that refused, the address is worked out twice rather
+//! than once, and the registers it reads are now live across every reader as well. So it is all of
+//! them or none of them, and that is a property of the set rather than of a pair.
+//!
+//! # What it will not do
+//!
+//! A set with a reader in it that cannot take the address. Each of the refusals below is one
+//! reader's, and any one of them turns down the whole set it belongs to.
+//!
+//! An address relative to a symbol, with more than one reader. A reader that reads through a
+//! register has room in it for a register and a displacement, and an address made of registers and
+//! a displacement goes into that room whoever takes it. A symbol does not: the reader has to name
+//! the symbol, which is a whole address word rather than a register number, so each reader that
+//! takes one grows by the difference and several readers pay it several times while the `lea` is
+//! saved once. Taking those as well loses 2643 bytes over the corpus at -O2 and gains 386, and the
+//! loss is almost all soft float and bit counting expansions, which read one global thirty or
+//! forty times each. One reader keeps the old answer, since there the address word is written once
+//! either way and what goes is the whole `lea`.
+//!
+//! Two indexes. An address and the reader that takes it each having an index means the composed
+//! address wants two scaled registers and this machine, like every machine, has one. Nothing looks
+//! for a way to put them together because there is not one. One index between the two is a
+//! different answer and is folded, whichever of them it came from, since the composed address then
+//! wants exactly the one place the machine has. That is the shape of an array inside something
+//! whose own address had to be worked out, `s.items[i]` on a local and `a[i][j]` on a row, where
+//! the `lea` is a base and a displacement and the reader is what scales the subscript.
+//!
+//! A symbol, where the reader has an index. An address relative to a symbol has the symbol in the
+//! place a base register would go, so what the composed address would be is a symbol and a scaled
+//! register with nothing to be relative to. The one reader rule below still takes those when the
+//! reader is reading a flat address.
+//!
+//! # The sum of two registers
+//!
+//! `p[i]` on a `char` is an address with an index and no scale, and the selector writes that as
+//! the addition it is rather than as a `lea`, since the rules that make a `lea` are the ones with a
+//! multiply in them. So a byte array read came out as a copy, an add and a load through the result,
+//! which is the pair above with the address written as arithmetic. An add of two registers at the
+//! width of an address is read here as the address a base, an index and a scale of one make, and it
+//! goes into its readers under exactly the rules a `lea` does. The flags the add writes are nothing
+//! to lose, since this runs straight after selection and the selector never reads the flags of an
+//! addition, it compares.
+//!
+//! The stack pointer cannot be an index on this machine, so a sum with it in the second place has
+//! the two swapped, and a sum of two registers neither of which can be an index is left alone.
+//!
+//! A displacement that does not fit. The two are added as `i64` and the answer has to be an `i32`,
+//! which is what the field holds. It is not a case that comes up in a program anybody wrote, and
+//! the check is there because the alternative to checking is wrapping.
+//!
+//! A reader in another block. Folding moves the work from where the `lea` is to where the reader
+//! is, and across a block boundary that can mean moving it into a loop. The same rule and the same
+//! reason as `crate::lower::Lowering::foldable`, which is the selector's version of this question.
+//!
+//! A register that something writes between the address and the last of its readers. Machine IR is
+//! in SSA form until the allocator has run, so a virtual register cannot be, but a physical one
+//! can: the frame pointer and the stack pointer are already physical here, and a call in between
+//! writes every register it is allowed to. Rather than ask which registers are the exceptions, the
+//! walk below drops a candidate the moment anything writes a register its address reads. The last
+//! reader rather than the first is what makes this the set's question too, since a write after the
+//! first reader and before the second is a write the one at a time version would never have seen.
+//!
+//! # A constant added to the base
+//!
+//! `p + 32` is an address of a base and a displacement, and when a load reads it in the same IR
+//! instruction the selector writes the two as one, `32(%rdi)`. When what reads it is another
+//! address the selector writes it as the addition it is, `addq $32`, since the rules that make a
+//! `lea` are the ones with a multiply in them. That is the flexible array at the end of a
+//! structure, `h->nodes[i]`, where the field's offset goes on first and the scaled subscript goes
+//! on after, and it came out as a `lea` of the offset and a load through the base it wrote and the
+//! index, where gcc writes `32(%rbx,%rcx,8)`. An addition of a constant at the width of an address
+//! is read here as that base and displacement and is handed to its readers under the rules a `lea`
+//! is.
+//!
+//! Only on a machine with room for a displacement beside an index. AArch64 adds a base to a
+//! constant or to a register and not to both, and its displacements have ranges a load and a store
+//! each have their own of, so there the addition stays what it is.
+//!
+//! # A constant added to the index
+//!
+//! `p[i + 3]` is an index of `i + 3`, and what selection gives the address is the register an
+//! `add $3` wrote. [`offsets`] runs first and has the address read `i` with the three times the
+//! scale in its displacement, which is `12(%rdi,%rsi,4)` for an `int` and what gcc writes, and the
+//! add goes when the address was the only thing reading it. A `lea` that took the constant hands it
+//! on to its readers the same way it would hand on any displacement.
+//!
+//! # The addresses into the frame
+//!
+//! A local's place in the frame and an argument's place in the caller's area is a distance from the
+//! stack pointer, and there is no frame until the allocator has finished, so [`crate::lower`]
+//! leaves those instructions with a zero in the displacement and [`crate::finish`] writes the
+//! number in later against a list of which instruction is which.
+//!
+//! This used to refuse them for that reason, and refusing was expensive: it is the shape of every
+//! access to a local that has to go through its address, and of every argument that arrives in the
+//! caller's area. What it takes to fold one is that the entry moves. The instruction the list names
+//! goes away and the ones that took the
+//! address arrive, so [`Pending`] rewrites the list as the fold is applied, and `finish` adds the
+//! frame's offset to the displacement rather than assigning it, because the reader brought a
+//! displacement of its own and the field it is reading is some way past where the object starts.
+//! tamnd/rucc#784.
+//!
+//! What they do not get is the whole of the set rule above. An address into the frame is off the
+//! stack pointer and a memory operand based on the stack pointer needs an index byte on this
+//! machine whether or not anything is indexed, so a reader that takes one grows by more than a
+//! reader that takes an address in an ordinary register does. Past three of them the bytes the
+//! readers put on are more than the whole `lea` was, which is the same arithmetic as the symbol
+//! above and comes out at a different number. `FRAME_READERS` below has the measurement.
+//!
+//! # Where it runs
+//!
+//! After selection and before the allocator, which is the one window where both instructions
+//! exist and the registers are still virtual. Running it after allocation would work on the
+//! arithmetic and would be reading a register file where the reader's base may have been reused
+//! for something else in between.
+
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
+use rucc_mir as mir;
+use rucc_target::{FrameInsts, MachineInsts, RegClass, Role};
+
+use crate::changes::{Changes, Plan, Reads};
+use crate::elsewhere::Elsewhere;
+
+/// The addresses [`crate::finish`] has still to write a displacement into.
+///
+/// Three lists, because the frame holds three kinds of place this pass runs before the layout of:
+/// a local's address is an offset into this function's own objects, a stack argument's is an offset
+/// into the caller's area, and a variable length array's is an offset above wherever the stack
+/// pointer ended up. What they have in common is the shape, a `lea` off the stack pointer with the
+/// displacement left at zero, and what this type is for is that folding one of those away has to
+/// move the entry rather than lose it.
+///
+/// This used to be a set of instructions the pass refused to touch, and refusing was expensive.
+/// Every access to a local through its address was a `lea` and then a memory instruction reading
+/// through the register it wrote, which is one instruction more than it needs, on the shape any
+/// function whose locals have their address taken is full of. tamnd/rucc#784.
+#[derive(Debug)]
+pub struct Pending<'a> {
+    /// Which instruction carries the address of which of this function's stack objects.
+    pub addresses: &'a mut Vec<(mir::Inst, usize)>,
+    /// Which instruction reads which of the arguments the caller passed on the stack.
+    pub arguments: &'a mut Vec<(mir::Inst, u32)>,
+    /// Which instructions carry the address of a local whose size the program worked out.
+    ///
+    /// There is no number beside one of these, because where a variable length array starts is not
+    /// a place the frame layout hands back: the bytes are already off the stack pointer by the time
+    /// the address is taken, so what gets written in is how much of the bottom of the frame the
+    /// arguments of a call keep, which is the same for all of them.
+    pub dynamic: &'a mut Vec<mir::Inst>,
+}
+
+impl Pending<'_> {
+    /// Moves an entry from an address that has gone to the instructions that took it.
+    ///
+    /// One entry becomes as many as there were readers, because an address every reader has room
+    /// for is handed to all of them, and each of those now carries a displacement of its own that
+    /// the frame layout has still to be added to.
+    ///
+    /// No readers at all takes the entry off the list, which is what a caller that joined a run
+    /// into one instruction wants when the instruction it kept is already waiting on the same
+    /// entry. Handing it the same offset twice would put the local at twice its distance.
+    ///
+    /// An address on any of the lists reads the stack pointer and nothing else, so it never reads a
+    /// register another one of them wrote, which is what makes it impossible for a reader to end up
+    /// on a list twice and be given two offsets.
+    pub(crate) fn moved(&mut self, from: mir::Inst, into: &[mir::Inst]) {
+        move_entries(self.addresses, from, into);
+        move_entries(self.arguments, from, into);
+        if let Some(at) = self.dynamic.iter().position(|&inst| inst == from) {
+            self.dynamic.splice(at..=at, into.iter().copied());
+        }
+    }
+
+    /// Makes every move a pass has made at once, as [`Pending::moved`] would have one at a time.
+    ///
+    /// A move whose readers were moved on again later follows them to where they ended up, so the
+    /// lists come out as the moves made one at a time would have left them. It is one walk over the
+    /// lists rather than a search of them for each move, which on a function with a lot of locals
+    /// is a walk over every local per fold.
+    pub(crate) fn moved_all(&mut self, moves: &Map<mir::Inst, Vec<mir::Inst>>) {
+        if moves.is_empty() {
+            return;
+        }
+        let mut into = Vec::new();
+        for (inst, what) in std::mem::take(self.addresses) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.addresses.extend(into.iter().map(|&at| (at, what)));
+        }
+        for (inst, what) in std::mem::take(self.arguments) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.arguments.extend(into.iter().map(|&at| (at, what)));
+        }
+        for inst in std::mem::take(self.dynamic) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.dynamic.extend_from_slice(&into);
+        }
+    }
+
+    /// Whether these two instructions are waiting on the same thing.
+    ///
+    /// Asked by a pass that has found two addressing modes that read alike and is about to treat
+    /// them as the same place. Reading alike is not enough on its own once the frame is involved:
+    /// the address of a local is a displacement this list has still to add an offset to, and two
+    /// locals whose displacements are both zero so far are the same three registers and the same
+    /// number and are two different places. What tells them apart is which entry each instruction
+    /// is waiting on, which is this.
+    pub(crate) fn alike(&self, one: mir::Inst, other: mir::Inst) -> bool {
+        let address = |inst| self.addresses.iter().find(|&&(at, _)| at == inst).map(|&(_, of)| of);
+        let argument = |inst| self.arguments.iter().find(|&&(at, _)| at == inst).map(|&(_, of)| of);
+        let dynamic = |inst| self.dynamic.contains(&inst);
+        address(one) == address(other)
+            && argument(one) == argument(other)
+            && dynamic(one) == dynamic(other)
+    }
+
+    /// Every instruction on one of the lists, which is how many readers each may go to.
+    ///
+    /// A set rather than a question about one instruction, because the pass asks it of every `lea`
+    /// in the function and a function with a lot of locals has a long list to walk each time.
+    fn held(&self) -> Set<mir::Inst> {
+        let named = self.addresses.iter().map(|&(at, _)| at);
+        let listed = named.chain(self.arguments.iter().map(|&(at, _)| at));
+        listed.chain(self.dynamic.iter().copied()).collect()
+    }
+}
+
+/// How many readers an address into the frame may be handed to.
+///
+/// There is a limit at all for the same reason a symbol has one, in the list above. An address into
+/// the frame is off the stack pointer, and a memory operand whose base is the stack pointer needs
+/// an index byte on this machine whether or not anything is indexed, so every reader that takes one
+/// grows by that byte and by the displacement while the `lea` is saved once. Reading through a
+/// register the `lea` wrote is three or four bytes and reading the same place off the stack pointer
+/// is five or eight, against the five or eight the `lea` itself costs, so the readers are ahead of
+/// it while there are few of them and behind it once there are enough.
+///
+/// Three is where they turn, measured. Over the 1838 corpus programs that come out of both
+/// compilers at `-O2`, one reader is 757 bytes better than folding none of them, two is 806, three
+/// is 868, four is 848 and five is 520. Handing them to every reader with room, which is what every
+/// other address gets, is 528 bytes worse than folding none: 97 programs larger by 1117 bytes
+/// against 100 smaller by 589. Up to three, only two programs anywhere in the corpus are larger at
+/// all, by two bytes each.
+///
+/// 690 of the 868 are the ten `long-double` programs, which is the shape this is about at its
+/// plainest. A `long double` argument arrives in the caller's area and the `fld` that reads it is
+/// its only reader, so the address goes and the read costs nothing more than it did.
+const FRAME_READERS: usize = 3;
+
+/// Where an entry on an instruction ends up once every move in `moves` has been made.
+fn follow(moves: &Map<mir::Inst, Vec<mir::Inst>>, inst: mir::Inst, into: &mut Vec<mir::Inst>) {
+    match moves.get(&inst) {
+        Some(took) => took.iter().for_each(|&next| follow(moves, next, into)),
+        None => into.push(inst),
+    }
+}
+
+/// The half of [`Pending::moved`] that does not care what the entry says.
+fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: &[mir::Inst]) {
+    let Some(at) = list.iter().position(|&(inst, _)| inst == from) else { return };
+    let (_, what) = list[at];
+    list.splice(at..=at, into.iter().map(|&inst| (inst, what)));
+}
+
+/// Folds every address computation that one memory operand reads, and gives back how many.
+///
+/// `pending` is the addresses [`crate::finish`] has still to write a displacement into, and folding
+/// one moves its entry to the instruction that took it. The displacement composed in by the fold
+/// stays where it is and the frame's offset is added to it later, which is why that write is an
+/// addition rather than an assignment.
+///
+/// `absolute` is whether the address of a name is a number a register can go beside, which it is
+/// under the kernel code model and in i386 code that is not position independent. Elsewhere a name
+/// is reached from the instruction pointer and a reader's index has nowhere to go.
+///
+/// `size` is whether the build asked for small code. On i386 outside position independent code the
+/// address of a name read at several offsets then goes into every reader when that is fewer bytes,
+/// which `fewer_bytes` works out, where otherwise one reader is the most it goes into.
+///
+/// Run after lowering and before allocation. Running it twice at that point can find more than
+/// running it once in principle: folding a `lea` into a second `lea` leaves that second one foldable
+/// in turn, and the walk below takes those in the one pass since it goes forwards, but it does not
+/// take the other order, where the second `lea` has a reader of its own and goes before the first
+/// one's set is complete, and that is a set a second run would find whole.
+///
+/// Measured, it finds nothing. Running this to a fixed point is the same instruction count over the
+/// corpus at every level and one instruction more over the SQLite amalgamation, which is the
+/// allocator taking a different tie break somewhere rather than a fold. So the pipeline runs it once
+/// and this note is here so the next person to notice the same thing does not have to build it to
+/// find out.
+///
+/// The second run in the pipeline is a different thing. On i386 at `-Os` and `-Oz` this runs again
+/// after [`crate::combine::stores`] and [`crate::combine::loads`]. They turn a load, an arithmetic
+/// instruction and a store of a name into one instruction that reads and writes memory, as
+/// `addb $1, (%eax)`, and the address of the name in `%eax` then has a reader the first run did not
+/// see.
+pub fn addresses(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+    absolute: bool,
+    size: bool,
+) -> usize {
+    folds(func, insts, machine, names, pending, absolute, false, size)
+}
+
+/// Folds the address of a name into the one memory operand that reads it, where the address of a
+/// name is a number, and gives back how many.
+///
+/// The second run [`addresses`] says finds nothing does find these. `types[i].f` is a `lea` of
+/// `types`, a multiply and an addition of the two, and the load reads the addition. The first run
+/// folds the addition into the load, `8(%ecx,%eax,1)`, but the `lea` had already been read by the
+/// addition and left the table by then, so it stays: `leal types, %ecx` in front of the load where
+/// gcc writes `movl types+8(%eax), %ecx`. A second run of the whole fold also hands frame
+/// addresses and sums on to readers further along, which moves the allocation around: ipc/sem.c
+/// came out 12 instructions longer that way, and most of what the other files gained was the
+/// allocator picking differently rather than a fold. So this run only takes names.
+pub fn names(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+    size: bool,
+) -> usize {
+    folds(func, insts, machine, names, pending, true, true, size)
+}
+
+/// The fold of [`addresses`] and of [`names`], the second when `named` is set.
+#[allow(clippy::too_many_arguments)]
+fn folds(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+    absolute: bool,
+    named: bool,
+    size: bool,
+) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
+    let step = mir::Opcode::new(names.join(insts.prefix, insts.add));
+    let number = mir::Opcode::new(names.join(insts.prefix, insts.imm));
+    // Only x86 has an address with no register in it. i386 counts addresses in 32 bits, so a
+    // number above `i32::MAX` is still one address there, and x86-64 sign extends the field.
+    let i386 = std::ptr::eq(machine, &rucc_target::x86::MACHINE);
+    let numbers = i386 || std::ptr::eq(machine, &rucc_target::x86_64::MACHINE);
+    // A name read at several offsets is priced rather than turned down, see [`fewer_bytes`].
+    let priced = size && i386 && absolute;
+    let mut reads = Reads::of(func);
+    let mut held = pending.held();
+    // The moves are kept here and made once at the end, since nothing reads the lists before then
+    // but the question `held` answers.
+    let mut moves = Map::default();
+    let mut folded = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
+        // A register leaves the table the moment the set can no longer be all of them: anything
+        // writes what the address reads, or a reader turns up that cannot take it.
+        let mut open: Map<mir::Reg, Open> = Map::default();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            // A constant added to a constant is one constant, which the walk then offers to the
+            // readers of the sum. `((__seg_fs struct pcpu *)0)->pc_prvspace` is a zero, an
+            // `add $4` and a load, and only the sum is an address.
+            if numbers && func[inst].opcode == step {
+                if let Some((from, sum)) = summed_numbers(func, &open, inst, number, i386) {
+                    let def = func[func[inst].operands][0];
+                    let plan = Plan {
+                        opcode: number,
+                        operands: vec![mir::Operand::write(def.reg, def.class)],
+                        imm: Some(sum),
+                        amode: None,
+                        symbol: None,
+                    };
+                    let mut set = Changes::new();
+                    set.rewrite(inst, plan);
+                    set.remove(from);
+                    if set.commit(func, &mut reads, names, machine).is_ok() {
+                        open.retain(|_, held| held.from != from);
+                    }
+                }
+            }
+            let ready = offer(func, &mut open, inst, absolute).filter(|ready| {
+                ready.wanted == 1 || fits_every_reader(ready.address) || fewer_bytes(func, ready)
+            });
+            if let Some(ready) = ready {
+                // The set is the whole of what this fold is: every reader takes the address and
+                // the address computation goes, and a set that is missing either half is one that
+                // works the address out twice. So it is proposed together and the target is asked
+                // about all of it at once.
+                let mut set = Changes::new();
+                for folding in &ready.folds {
+                    let plan = Plan {
+                        operands: folding.operands.clone(),
+                        amode: Some(folding.amode),
+                        ..Plan::of(func, folding.into)
+                    };
+                    set.rewrite(folding.into, plan);
+                }
+                set.remove(ready.from);
+                if set.commit(func, &mut reads, names, machine).is_ok() {
+                    folded += ready.folds.len();
+                    let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
+                    if held.remove(&ready.from) {
+                        held.extend(took.iter().copied());
+                        moves.insert(ready.from, took.clone());
+                    }
+                    // Anything still open that was going to fold into the instruction just removed
+                    // is holding a plan for an instruction that is not there any more. That is a
+                    // chain whose middle went first, and the outer address waits for the next run
+                    // of the pass rather than being written into a gap.
+                    //
+                    // An address that has just taken another one into itself is the same problem
+                    // read from the other end. It is still there, but it is not the address it was:
+                    // the registers it names have changed, and so have the two things that decided
+                    // what its own set was allowed to be, which are whether it is relative to a
+                    // symbol and whether the frame still owes it an offset. Every plan its readers
+                    // have agreed to so far was worked out against the address it used to be, and a
+                    // plan naming a register whose `lea` has just gone is exactly the gap this is
+                    // here to keep shut. So the whole entry goes and the chain waits.
+                    open.retain(|_, held| {
+                        !took.contains(&held.from)
+                            && held.folds.iter().all(|fold| fold.into != ready.from)
+                    });
+                }
+            }
+            for written in written(func, inst) {
+                open.retain(|reg, held| *reg != written && !touches(func, held, written));
+            }
+            if func[inst].opcode == lea {
+                let room = if held.contains(&inst) { FRAME_READERS } else { usize::MAX };
+                let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+                if named && !named_alone(address) {
+                    continue;
+                }
+                match folding_def(func, &reads, inst) {
+                    Some((reg, wanted))
+                        if wanted <= room
+                            && (wanted == 1
+                                || fits_every_reader(address)
+                                || priced && named_alone(address)) =>
+                    {
+                        open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                    }
+                    _ => {}
+                }
+            } else if named {
+            } else if func[inst].opcode == sum && machine.scales(1) {
+                let Some(address) = summed(func, inst) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                }
+            } else if func[inst].opcode == step && machine.index_and_disp {
+                let Some(address) = stepped(func, inst) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                }
+            } else if func[inst].opcode == number && numbers {
+                let Some(address) = numbered(func, inst, i386) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                }
+            }
+        }
+    }
+    pending.moved_all(&moves);
+    folded
+}
+
+/// Moves a constant added to an address's index into the address's displacement, and gives back
+/// how many.
+///
+/// `p[i + 3]` on an `int` is an index of `i + 3` scaled by four, and the optimizer leaves it that
+/// way because in the IR it is one value multiplied by one number. Selection then writes the add
+/// on its own and the address takes what it wrote as the index, so the read comes out as an
+/// `addq $3` and a load, where the address could have been `12(%rdi,%rsi,4)` and the add need not
+/// be there at all. This is the rewrite from one to the other: the address reads what the add
+/// read, and its displacement grows by the constant times the scale.
+///
+/// Only when the address is the one read of what the add wrote, since otherwise the add stays for
+/// its other readers and nothing is saved, and only in the block the add is in, for the reason
+/// [`addresses`] has for staying in one. An address with no index is left to the selector, which
+/// already writes `p + 3` as a base and a displacement, and one with nowhere to put a displacement,
+/// a jump table or a place in this function, is left as it is. A displacement that would not fit
+/// in its field leaves the pair alone too.
+///
+/// Run before [`addresses`], so a `lea` that has taken the constant in is what gets handed on to
+/// its readers.
+pub fn offsets(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+) -> usize {
+    let add = mir::Opcode::new(names.join(insts.prefix, insts.add));
+    let sub = mir::Opcode::new(names.join(insts.prefix, insts.sub));
+    let mut reads = Reads::of(func);
+    let mut moved = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        // Each register an addition of a constant has written so far in this block, with the
+        // instruction that wrote it, the operand it added to and the constant it added.
+        let mut added: Map<mir::Reg, (mir::Inst, mir::Reg, i64)> = Map::default();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let opcode = func[inst].opcode;
+            if opcode == add || opcode == sub {
+                if let Some((reg, from, value)) = constant_added(func, inst, opcode == sub) {
+                    added.insert(reg, (inst, from, value));
+                }
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            let amode = func[mem];
+            let Some(at) = amode.index else { continue };
+            if amode.table.is_some() || amode.block.is_some() {
+                continue;
+            }
+            let Some(index) = func[func[inst].operands].get(usize::from(at)).map(|op| op.reg)
+            else {
+                continue;
+            };
+            let Some(&(sum, from, value)) = added.get(&index) else { continue };
+            if reads.count(index) != 1 {
+                continue;
+            }
+            let disp = value
+                .checked_mul(i64::from(amode.scale))
+                .and_then(|scaled| scaled.checked_add(i64::from(amode.disp)))
+                .and_then(|disp| i32::try_from(disp).ok());
+            let Some(disp) = disp else { continue };
+            let mut plan = Plan::of(func, inst);
+            plan.operands[usize::from(at)].reg = from;
+            plan.amode = Some(mir::Amode { disp, ..amode });
+            let mut set = Changes::new();
+            set.rewrite(inst, plan);
+            set.remove(sum);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                added.remove(&index);
+                moved += 1;
+            }
+        }
+    }
+    moved
+}
+
+/// The register an addition of a constant writes, the one it adds to and the constant, with the
+/// constant negated for a subtraction.
+///
+/// `None` unless both registers are virtual, since a virtual register is written once and that is
+/// what makes the one it adds to still hold the same value wherever the address is.
+fn constant_added(
+    func: &mir::Func,
+    inst: mir::Inst,
+    negate: bool,
+) -> Option<(mir::Reg, mir::Reg, i64)> {
+    let [written, from] = &func[func[inst].operands] else { return None };
+    if !written.reg.is_virtual() || !from.reg.is_virtual() || func[inst].mem.is_some() {
+        return None;
+    }
+    let value = func[func[inst].imm?].0;
+    let value = if negate { value.checked_neg()? } else { value };
+    Some((written.reg, from.reg, value))
+}
+
+/// An address computation whose readers are still being counted.
+struct Open {
+    /// The address instruction, which goes once every one of its readers has taken it.
+    from: mir::Inst,
+    /// The address it works out, with its registers numbered as that instruction's operands.
+    ///
+    /// A `lea`'s own memory operand, or for a sum the base and the index it adds.
+    address: mir::Amode,
+    /// How many reads of the register it wrote there are in the whole function.
+    wanted: usize,
+    /// The folds agreed to so far, which are applied together or not at all.
+    folds: Vec<Folding>,
+}
+
+/// Offers an instruction the addresses that are open, and gives back the set that is now complete.
+///
+/// Every open register this instruction reads either takes the address into its own memory operand
+/// or ends the chance for the whole set. Reading it any other way is what makes it a reader nothing
+/// can fold into, and one of those is enough, so the register is dropped rather than the read being
+/// passed over. Reading it twice in the one instruction counts as that too, since only one of the
+/// two reads is the memory operand and the other would be left naming a register nothing writes.
+fn offer(
+    func: &mir::Func,
+    open: &mut Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    absolute: bool,
+) -> Option<Open> {
+    let folding = candidate(func, open, inst, absolute);
+    let takes = |reg: mir::Reg| folding.as_ref().is_some_and(|fold| fold.base == reg);
+    let refused: Vec<mir::Reg> = open
+        .keys()
+        .copied()
+        .filter(|&reg| {
+            let times = times_read(func, inst, reg);
+            times > 0 && !(times == 1 && takes(reg))
+        })
+        .collect();
+    for reg in refused {
+        open.remove(&reg);
+    }
+    let folding = folding?;
+    let base = folding.base;
+    let held = open.get_mut(&base)?;
+    held.folds.push(folding);
+    if held.folds.len() < held.wanted {
+        return None;
+    }
+    open.remove(&base)
+}
+
+/// The address a sum of two registers is, as a base and an index at a scale of one.
+///
+/// The operands are the register written and then the two added, so the address names the second
+/// and the third. `None` when neither of the two can be an index, which on this machine is the
+/// stack pointer, the only register [`candidate`] could be handed that the encoding has no room
+/// for as one.
+fn summed(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
+    let operands = &func[func[inst].operands];
+    let [_, left, right] = operands else { return None };
+    let (base, index) = if right.reg.is_virtual() {
+        (1, 2)
+    } else if left.reg.is_virtual() {
+        (2, 1)
+    } else {
+        return None;
+    };
+    Some(mir::Amode { base: Some(base), index: Some(index), ..mir::Amode::NOTHING })
+}
+
+/// The address an addition of a constant to a register is, as a base and a displacement.
+///
+/// The operands are the register written and then the one added to, so the address names the
+/// second. `None` when the constant does not fit in a displacement, which a selected addition of
+/// one always does, and when the instruction carries an address of its own.
+fn stepped(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
+    let [_, _] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let disp = i32::try_from(func[func[inst].imm?].0).ok()?;
+    Some(mir::Amode { base: Some(1), disp, ..mir::Amode::NOTHING })
+}
+
+/// The address a constant is, as a displacement with no register.
+///
+/// `*(volatile int *)0x1000` and the per-CPU reads of the BSD kernels on i386 are a constant moved
+/// into a register and a load through it. The FreeBSD `PCPU_GET` is `movl %fs:%1` against `"m"`
+/// at the offset of the field, and it came out as `movl $8, %eax` and `movl %fs:(%eax), %eax`,
+/// where gcc writes `movl %fs:8, %eax`. As an address the constant is the displacement, and the
+/// load reads no register for it.
+///
+/// The operand is the register written, and the instruction carries no address of its own. `None`
+/// when the constant does not fit in the field. On i386 the field is the whole address, so any
+/// 32-bit number fits, and `wraps` says that.
+fn numbered(func: &mir::Func, inst: mir::Inst, wraps: bool) -> Option<mir::Amode> {
+    let [_] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let value = func[func[inst].imm?].0;
+    let disp = match i32::try_from(value) {
+        Ok(disp) => disp,
+        Err(_) if wraps => i32::from_ne_bytes(u32::try_from(value).ok()?.to_ne_bytes()),
+        Err(_) => return None,
+    };
+    Some(mir::Amode { disp, ..mir::Amode::NOTHING })
+}
+
+/// The constant move an addition of a constant reads, and the sum, when the addition is the one
+/// reader of the move. Only a move of a `number`, since a step that is open holds an immediate as
+/// well and is not a constant. The sum is counted in 32 bits on i386, where `wraps` is set, since an
+/// address there is 32 bits.
+fn summed_numbers(
+    func: &mir::Func,
+    open: &Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    number: mir::Opcode,
+    wraps: bool,
+) -> Option<(mir::Inst, i64)> {
+    let [_, read] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let held = open.get(&read.reg)?;
+    if func[held.from].opcode != number || held.wanted != 1 || !held.folds.is_empty() {
+        return None;
+    }
+    let number = func[func[held.from].imm?].0;
+    let step = func[func[inst].imm?].0;
+    let sum = if wraps {
+        let low = |value: i64| i32::from_ne_bytes((value as u32).to_ne_bytes());
+        i64::from(low(number).wrapping_add(low(step)))
+    } else {
+        number.checked_add(step)?
+    };
+    Some((held.from, sum))
+}
+
+/// Whether an address is one every reader can carry in the room it already has, which is what
+/// makes handing it to more than one of them free.
+///
+/// A reader that reads an address through a register has room in it for a register and for a
+/// displacement, and an address made of registers and a displacement fits in exactly that room
+/// however many readers take it. An address relative to a symbol does not. The reader was naming a
+/// register and now has to name the symbol, which is a whole address word rather than a register
+/// number, so each reader that takes it grows by the difference and several readers pay it several
+/// times over while the `lea` is only saved once.
+///
+/// The measurement is what settled the size of that: folding symbol relative addresses into every
+/// reader as well loses 2643 bytes over the corpus at -O2 against 386 gained, and the 2643 is
+/// almost all soft float and bit counting expansions, which read one global thirty or forty times
+/// each and are the longest runs of straight line code in the corpus.
+///
+/// One reader is a different question and keeps the old answer, since there the address word is
+/// written once either way and what goes is the whole `lea`.
+fn fits_every_reader(address: mir::Amode) -> bool {
+    address.symbol.is_none()
+}
+
+/// Whether handing the address of a name to every one of its readers is fewer bytes than the
+/// `movl $name` they read it through, on i386 outside position independent code.
+///
+/// `fits_every_reader` gives the reason a name is not handed to several readers at `-O2`: each
+/// reader then carries the address word. What it costs is the word less the displacement the
+/// reader had, which is nothing for a reader whose displacement was a word already. FreeBSD's
+/// `boot2` reads the members of its superblock past the first 128 bytes, `movl $fs, %eax` and then
+/// `0xbc(%eax)` and `0xb8(%eax)`, and gcc writes `fs+0xbc` and `fs+0xb8` and has no move. So the
+/// set is taken when the words the readers grow by come to no more than the five bytes of the move,
+/// which is when a register goes and the code is no longer.
+fn fewer_bytes(func: &mir::Func, ready: &Open) -> bool {
+    /// The bytes of `movl $name, %reg`.
+    const MOVE: usize = 5;
+    /// The bytes of the address word a reader carries once it names the symbol.
+    const WORD: usize = 4;
+    let field = |disp: i32| match disp {
+        0 => 0,
+        _ if i8::try_from(disp).is_ok() => 1,
+        _ => WORD,
+    };
+    let had: usize = ready
+        .folds
+        .iter()
+        .map(|fold| func[fold.into].mem.map_or(0, |mem| field(func[mem].disp)))
+        .sum();
+    WORD * ready.folds.len() <= MOVE + had
+}
+
+/// How many of an instruction's operands read that register.
+fn times_read(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> usize {
+    func[func[inst].operands]
+        .iter()
+        .filter(|operand| operand.role == Role::Use && operand.reg == reg)
+        .count()
+}
+
+/// The one virtual register an instruction writes, and how many reads of it there are, when it
+/// writes exactly one and something reads it.
+///
+/// A `lea` is only worth folding when the instructions folding it are the whole of what reads the
+/// register, since folding does not delete the `lea` for anybody else and doing the address twice
+/// is not a saving. The count is what says when the set is complete, and it is taken over the whole
+/// function rather than over the block, so a read anywhere else is a set that never completes and
+/// an address that stays where it is.
+///
+/// A register nothing reads is left alone rather than folded into nothing, since an address whose
+/// answer is never wanted is dead code and belongs to the pass that removes dead code.
+fn folding_def(func: &mir::Func, reads: &Reads, inst: mir::Inst) -> Option<(mir::Reg, usize)> {
+    let operands = &func[func[inst].operands];
+    let mut defs = operands.iter().filter(|operand| operand.role != Role::Use);
+    let def = defs.next()?;
+    if defs.next().is_some() || !def.reg.is_virtual() {
+        return None;
+    }
+    let wanted = reads.count(def.reg);
+    (wanted > 0).then_some((def.reg, wanted))
+}
+
+/// The registers an instruction writes.
+fn written(func: &mir::Func, inst: mir::Inst) -> Vec<mir::Reg> {
+    func[func[inst].operands]
+        .iter()
+        .filter(|operand| operand.role != Role::Use)
+        .map(|operand| operand.reg)
+        .collect()
+}
+
+/// Whether an address computation reads that register, which is what makes writing it the end of
+/// the chance to fold it.
+fn touches(func: &mir::Func, held: &Open, reg: mir::Reg) -> bool {
+    let amode = held.address;
+    let operands = &func[func[held.from].operands];
+    [amode.base, amode.index]
+        .into_iter()
+        .flatten()
+        .filter_map(|at| operands.get(usize::from(at)))
+        .any(|operand| operand.reg == reg)
+}
+
+/// The register an instruction's memory operand reads as its base, when the rest of that operand
+/// leaves the composed address somewhere to go.
+///
+/// A symbol of the reader's own means the two addresses do not compose, and this is where that is
+/// turned down, because the reader is then the half of the pair with no room left in it. An index
+/// of the reader's own is not turned down here, since whether there is room for it depends on the
+/// address as well, which is [`candidate`]'s question and not this one's.
+fn base_reg(func: &mir::Func, inst: mir::Inst) -> Option<mir::Reg> {
+    let amode = func[func[inst].mem?];
+    if amode.symbol.is_some() || amode.reach != mir::Reach::Itself {
+        return None;
+    }
+    Some(func[func[inst].operands].get(usize::from(amode.base?))?.reg)
+}
+
+/// Whether an address is the address of a name and nothing more: no register, no segment, and
+/// reached the ordinary way. Those are the ones the kernel code model can write as a number.
+fn named_alone(address: mir::Amode) -> bool {
+    address.symbol.is_some()
+        && address.reach == mir::Reach::Itself
+        && address.base.is_none()
+        && address.index.is_none()
+        && address.segment.is_none()
+        && address.block.is_none()
+        && address.table.is_none()
+}
+
+/// Writes the sum of a register and the address of a name as one `lea` of the name off that
+/// register, where the address of a name is a number, and gives back how many.
+///
+/// `caches[t][i]` for a static `struct kc *caches[4][14]` is the name, plus `t` times a row, plus
+/// `i` times eight. Selection writes the name and the row as a sum and the load reads the sum as
+/// its base with `i` as its index, so the sum cannot go into the load, which already has an index,
+/// and the name cannot go into the sum, which is not a memory operand. It came out as `movq
+/// $caches, %rax` and an `addq` in front of `(%rax,%rcx,8)` where gcc writes
+/// `caches(,%rax,8)` with the row and `i` added together first, and the kernel's `kmalloc_caches`
+/// is read that way in every `__kmalloc` there is.
+///
+/// As a `lea` the sum is an address with a base and a symbol, which a reader with an index can
+/// take whole, since the symbol is a displacement and the base and the index are both left: see
+/// `candidate`. Only for a name nothing else reads, in the block it is in, and only before
+/// [`addresses`], which is what hands the `lea` on to its reader. A sum nothing can take it into
+/// is still no longer than it was, one `lea` in place of a `mov` and an `add`.
+pub fn absolute_sums(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
+    let mut reads = Reads::of(func);
+    let mut joined = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        // The address of a name that one instruction reads, by the register it is in.
+        let mut named: Map<mir::Reg, (mir::Inst, mir::Amode)> = Map::default();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let opcode = func[inst].opcode;
+            let added = if opcode == lea {
+                let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+                if named_alone(address) {
+                    if let Some((reg, 1)) = folding_def(func, &reads, inst) {
+                        named.insert(reg, (inst, address));
+                    }
+                    continue;
+                }
+                added(func, inst, address)
+            } else if opcode == sum && func[inst].mem.is_none() {
+                match &func[func[inst].operands] {
+                    [written, left, right] => Some((*written, *left, *right, 0)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let Some((written, left, right, disp)) = added else { continue };
+            let (other, &(from, address)) = match (named.get(&left.reg), named.get(&right.reg)) {
+                (_, Some(name)) => (left, name),
+                (Some(name), None) => (right, name),
+                (None, None) => continue,
+            };
+            if !written.reg.is_virtual() || !other.reg.is_virtual() || left.reg == right.reg {
+                continue;
+            }
+            let Some(disp) = i32::try_from(i64::from(address.disp) + disp).ok() else { continue };
+            let plan = Plan {
+                opcode: lea,
+                // A sum is tied to its left operand and a `lea` is tied to nothing.
+                operands: vec![
+                    mir::Operand::write(written.reg, written.class),
+                    mir::Operand::read(other.reg, other.class),
+                ],
+                imm: None,
+                amode: Some(mir::Amode {
+                    base: Some(1),
+                    disp,
+                    reach: mir::Reach::Absolute,
+                    ..address
+                }),
+                symbol: None,
+            };
+            let mut set = Changes::new();
+            set.rewrite(inst, plan);
+            set.remove(from);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                joined += 1;
+            }
+        }
+    }
+    joined
+}
+
+/// What a `lea` adds when it is two registers and a displacement and nothing else: the register it
+/// writes, the two it adds and the displacement. Which is how selection writes the sum of two
+/// pointers' worth of registers, and what becomes an `add` once the allocator has a register to
+/// give it.
+fn added(
+    func: &mir::Func,
+    inst: mir::Inst,
+    address: mir::Amode,
+) -> Option<(mir::Operand, mir::Operand, mir::Operand, i64)> {
+    let plain = mir::Amode {
+        base: address.base,
+        index: address.index,
+        disp: address.disp,
+        ..mir::Amode::NOTHING
+    };
+    if address != plain {
+        return None;
+    }
+    let operands = &func[func[inst].operands];
+    let [written, ..] = operands else { return None };
+    let base = *operands.get(usize::from(address.base?))?;
+    let index = *operands.get(usize::from(address.index?))?;
+    Some((*written, base, index, i64::from(address.disp)))
+}
+
+/// Takes out every read of an argument the caller passed on the stack whose answer nothing reads,
+/// and gives back how many.
+///
+/// The lowering reads every argument that arrived on the stack in the entry block, whether or not
+/// the function wants it. A `u64` on i386 is two of them, and one whose high word was known not to
+/// matter, `b & 0xff`, still had it read into a register at the top of the function and left there.
+/// So did a callback that ignores its fourth argument under `-mregparm=3`. A load has no effect
+/// past the register it writes, and a word of the caller's argument area is always there to read,
+/// so one that writes a register nothing reads can go.
+///
+/// The entry comes off the list as well, through `Pending::moved` with no readers, since the
+/// frame layout would otherwise write an offset into an instruction that is not there.
+pub fn unread_arguments(func: &mut mir::Func, pending: &mut Pending<'_>) -> usize {
+    let reads = Reads::of(func);
+    let mut gone = Vec::new();
+    for &(inst, _) in pending.arguments.iter() {
+        if func.block_of(inst).is_none() {
+            continue;
+        }
+        let operands = &func[func[inst].operands];
+        let unread = operands.iter().all(|operand| {
+            operand.role == Role::Use || (operand.reg.is_virtual() && reads.count(operand.reg) == 0)
+        });
+        if unread && operands.iter().any(|operand| operand.role != Role::Use) {
+            gone.push(inst);
+        }
+    }
+    for &inst in &gone {
+        func.remove_inst(inst);
+        pending.moved(inst, &[]);
+    }
+    gone.len()
+}
+
+/// Marks what is left of the addresses of names as numbers, under the kernel code model, and gives
+/// back how many.
+///
+/// Run after [`addresses`] and after the loads and stores have taken what they can, so a name
+/// that is read or written directly is still read from the instruction pointer, `movl x(%rip)`,
+/// which is what gcc writes for the kernel too. What is left is a `lea` whose answer is wanted as a
+/// value, and that becomes `movq $sym, %rax` with `R_X86_64_32S`, where the small model would
+/// write `leaq sym(%rip), %rax`. The two are the same length and the same speed. The reason to
+/// write the first is that it is gcc's output, and that a kernel link checks every address of this
+/// kind fits in the top 2 GiB, which is the promise the model makes. tamnd/rucc#2275.
+///
+/// Only the names `wanted` says yes to. The kernel model wants every name. Position dependent
+/// code under the small model wants the functions another object may define, see
+/// [`Elsewhere::numbered`].
+pub fn absolute(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    names: &mut Interner,
+    wanted: impl Fn(Symbol) -> bool,
+) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let mut marked = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode != lea {
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            if named_alone(func[mem]) && func[mem].symbol.is_some_and(&wanted) {
+                func[mem].reach = mir::Reach::Absolute;
+                marked += 1;
+            }
+        }
+    }
+    marked
+}
+
+/// Gives each load and store that reads through the address of a name a `lea` of its own, under
+/// the kernel code model, and gives back how many it wrote.
+///
+/// [`addresses`] hands the address of a name to its readers only when there is one of them, for
+/// the size reason `fits_every_reader` gives, and a `lea` it leaves behind becomes `movq $sym` in
+/// [`absolute`]. Under the kernel model that is not only a different instruction from gcc's, it is a
+/// different address when the code runs somewhere other than where it was linked. gcc reads and
+/// writes a name from the instruction pointer every time, and the kernel's early boot code depends
+/// on that: `__startup_64` runs at the physical address before the page tables map the kernel at
+/// its link address, and in 6.12 it reads `ptrs_per_p4d` twice with no `RIP_REL_REF` around it.
+/// Through `movq $ptrs_per_p4d` that is a read of an address that is not mapped yet, and the machine
+/// stops before it prints anything.
+///
+/// So each reader gets a copy of the `lea` in front of it, which [`addresses`] then folds as the
+/// one reader the copy has, and the first `lea` goes when nothing else reads it. A reader that the
+/// fold turns down keeps its copy, which is the `movq $sym` it had before. Run before
+/// [`addresses`].
+pub fn spread(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let mut named: Map<mir::Reg, (mir::Inst, mir::Operand)> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != lea {
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            if let [def] = func[func[inst].operands] {
+                if def.role != Role::Use && def.reg.is_virtual() && named_alone(func[mem]) {
+                    named.insert(def.reg, (inst, def));
+                }
+            }
+        }
+    }
+    if named.is_empty() {
+        return 0;
+    }
+    let reads = Reads::of(func);
+    let mut taken: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let Some(reg) = base_reg(func, inst) else { continue };
+            let Some(&(from, def)) = named.get(&reg) else { continue };
+            if times_read(func, inst, reg) != 1 {
+                continue;
+            }
+            let copy = func.new_vreg(def.class);
+            let operands = func.push_operands(&[mir::Operand { reg: copy, ..def }]);
+            let mem = func[from].mem.map(|mem| func[mem]).map(|amode| func.add_amode(amode));
+            let data = mir::InstData { operands, mem, ..func[from] };
+            let span = func.span(inst);
+            let made = func.create_inst(data, span);
+            func.insert_before(inst, made);
+            let list = func[inst].operands;
+            for operand in &mut func[list] {
+                if operand.role == Role::Use && operand.reg == reg {
+                    operand.reg = copy;
+                }
+            }
+            *taken.entry(reg).or_insert(0) += 1;
+        }
+    }
+    let mut wrote = 0;
+    for (reg, count) in taken {
+        wrote += count;
+        if count == reads.count(reg) {
+            func.remove_inst(named[&reg].0);
+        }
+    }
+    wrote
+}
+
+/// Writes the address of a name straight into each store of it on i386, or on x86-64 under the
+/// kernel code model when `wide` is set, and gives back how many addresses that took.
+///
+/// Outside position independent code the address of a name on i386 is a number the linker fills
+/// in, and a store can carry it as its immediate. gcc writes `s->ops = &md_ops` as one
+/// `movl $md_ops, 4(%eax)`, where the selector writes a `leal md_ops, %ecx` and a store of `%ecx`.
+/// With the kernel's flags that is 268 instructions fewer in drivers/md/md.c.
+///
+/// All the readers or none of them, as with [`pages`]: a reader that is not a store keeps the
+/// `lea`, and then the stores that took the name save nothing and are four bytes longer each. A
+/// reader is a store of the whole word whose address does not read the register too. Run last
+/// among the folds before allocation, after [`addresses`] has handed what it could to the loads
+/// and stores, so a name that is read or written directly is still read that way.
+///
+/// The kernel code model promises every name is in the top 2 GiB, so on x86-64 the store's
+/// immediate is the name sign extended, `movq $md_ops, 8(%rax)` with `R_X86_64_32S`, which is what
+/// gcc writes for the kernel. There it runs before [`absolute`], which would otherwise have made
+/// the `lea` a `movq $md_ops` of its own.
+pub fn named_stores(
+    func: &mut mir::Func,
+    names: &mut Interner,
+    machine: &MachineInsts,
+    wide: bool,
+) -> usize {
+    let width = if wide { 64 } else { 32 };
+    let lea = mir::Opcode::new(names.intern(&format!("x64.lea_{width}")));
+    let store = mir::Opcode::new(names.intern(&format!("x64.mov_mr_{width}")));
+    let carry = mir::Opcode::new(names.intern(&format!("x64.mov_mi_{width}")));
+    let mut leas = Vec::new();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode == lea && func[inst].mem.is_some_and(|mem| named_alone(func[mem]))
+            {
+                leas.push(inst);
+            }
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    *writes.entry(operand.reg).or_default() += 1;
+                }
+            }
+        }
+    }
+    let carried = carried(func);
+    let mut cache = Reads::of(func);
+    let mut folded = 0;
+    for inst in leas {
+        let Some(&written) = func[func[inst].operands].first() else { continue };
+        if writes.get(&written.reg) != Some(&1) || carried.contains(&written.reg) {
+            continue;
+        }
+        let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
+            continue;
+        };
+        // On x86-64 the store is encoded here rather than by an assembler, and an instruction
+        // has room for one name, so a store whose own address names something keeps the `lea`.
+        let plain = |reader: mir::Inst| {
+            !wide
+                || func[reader].mem.is_some_and(|mem| {
+                    let amode = func[mem];
+                    amode.symbol.is_none() && amode.table.is_none() && amode.block.is_none()
+                })
+        };
+        let stores = readers.iter().all(|&(reader, at)| {
+            func[reader].opcode == store
+                && at == 0
+                && func[reader].symbol.is_none()
+                && plain(reader)
+                && readers.iter().filter(|&&(other, _)| other == reader).count() == 1
+        });
+        if !stores {
+            continue;
+        }
+        let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+        let mut set = Changes::new();
+        for &(reader, _) in readers {
+            let mut plan = Plan::of(func, reader);
+            let Some(amode) = plan.amode else { continue };
+            plan.opcode = carry;
+            plan.operands.remove(0);
+            plan.amode = Some(mir::Amode {
+                base: amode.base.map(|at| at - 1),
+                index: amode.index.map(|at| at - 1),
+                ..amode
+            });
+            plan.imm = Some(i64::from(address.disp));
+            plan.symbol = address.symbol;
+            set.rewrite(reader, plan);
+        }
+        set.remove(inst);
+        if set.commit(func, &mut cache, names, machine).is_ok() {
+            folded += 1;
+        }
+    }
+    folded
+}
+
+/// How many stores of a zero a run needs before they read it from a register. See [`zeros`].
+const ZEROS: usize = 2;
+
+/// How many instructions may sit between two stores of a zero that are still one run.
+const ZERO_GAP: usize = 8;
+
+/// Writes a zero from a register into each store of one in a run of them on x86-64, and gives back
+/// how many stores that took.
+///
+/// `movq $0, 8(%rsp)` is nine bytes and `movq %rax, 8(%rsp)` is five, and a structure the program
+/// clears a field at a time is a run of the first kind. The zero costs a `movl $0` in front of the
+/// run, which `crate::shorten` turns into a two byte `xor` where the flags are dead, so two stores
+/// are already six bytes shorter. Over the kernel objects rucc is measured on that is 1267 stores
+/// in runs of four or more, where gcc writes `rep stos` for the middle of a large clear, which is
+/// shorter still and slower to start.
+///
+/// A call or anything this machine does not describe ends a run, since a zero kept across a call
+/// is a callee saved register, and so does a gap of more than `ZERO_GAP` instructions, so the
+/// register is live only where it is used. Before allocation, while the zero is a register of its
+/// own.
+pub fn zeros(
+    func: &mut mir::Func,
+    names: &mut Interner,
+    machine: &MachineInsts,
+    class: RegClass,
+) -> usize {
+    let widths =
+        [("mov_mi_64", "mov_mr_64"), ("mov_mi_32", "mov_mr_32"), ("mov_mi_16", "mov_mr_16")];
+    let pairs = widths.map(|(from, into)| {
+        let from = mir::Opcode::new(names.join(machine.prefix, from));
+        (from, mir::Opcode::new(names.join(machine.prefix, into)))
+    });
+    let make = mir::Opcode::new(names.join(machine.prefix, "mov_ri_32"));
+    let mut cache = Reads::of(func);
+    let mut taken = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        let mut runs: Vec<Vec<(mir::Inst, mir::Opcode)>> = vec![Vec::new()];
+        let mut since = 0;
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let data = &func[inst];
+            let name = names.resolve(data.opcode.name());
+            let into = pairs.iter().find(|&&(from, _)| from == data.opcode).map(|&(_, into)| into);
+            let zero = data.imm.is_some_and(|at| func[at].0 == 0) && data.symbol.is_none();
+            let open = runs.last().is_some_and(|run| !run.is_empty());
+            match into {
+                Some(into) if zero => {
+                    if since > ZERO_GAP && open {
+                        runs.push(Vec::new());
+                    }
+                    if let Some(run) = runs.last_mut() {
+                        run.push((inst, into));
+                    }
+                    since = 0;
+                }
+                _ if machine.calls(name) || !machine.has(name) => {
+                    if open {
+                        runs.push(Vec::new());
+                    }
+                }
+                _ => since += 1,
+            }
+        }
+        for run in runs.into_iter().filter(|run| run.len() >= ZEROS) {
+            let reg = func.new_vreg(class);
+            let mut set = Changes::new();
+            for &(inst, into) in &run {
+                let mut plan = Plan::of(func, inst);
+                let Some(amode) = plan.amode else { continue };
+                plan.opcode = into;
+                plan.operands.insert(0, mir::Operand::read(reg, class));
+                plan.amode = Some(mir::Amode {
+                    base: amode.base.map(|at| at + 1),
+                    index: amode.index.map(|at| at + 1),
+                    ..amode
+                });
+                plan.imm = None;
+                set.rewrite(inst, plan);
+            }
+            let first = run[0].0;
+            if set.commit(func, &mut cache, names, machine).is_ok() {
+                let span = func.span(first);
+                let write = mir::Operand::write(reg, class);
+                let made = func.build_loose(make).operand(write).imm(0).at(span).finish();
+                func.insert_before(first, made);
+                taken += run.len();
+            }
+        }
+    }
+    taken
+}
+
+/// Rewrites each jump table under the kernel code model into the shape gcc writes there, and gives
+/// back how many.
+///
+/// The lowering writes the position independent shape, a `leaq` of the table, a `movslq` of the
+/// cell, an `addq` of the two and a `jmp` through the sum, and the cells are distances from the
+/// table. objtool finds a table by the relocation on an instruction in front of the jump and then
+/// reads the table's own relocations as eight byte addresses one after the other, and the kernels
+/// this compiler is graded on stop there: a table of four byte distances is one it reports it cannot
+/// find. So under this model the three instructions become one load of the cell,
+/// `movq table(,%index,8), %reg`, whose displacement is `R_X86_64_32S` against the table, and each
+/// cell is the block's address in eight bytes with `R_X86_64_64`. That is the load and the jump gcc
+/// writes as `jmp *table(,%index,8)`, and it is one register and two instructions shorter than
+/// what it replaces. tamnd/rucc-kernel#4.
+///
+/// A table whose instructions are not the ones the lowering wrote is left the way it is, which is
+/// right everywhere and only a warning from objtool.
+pub fn tables(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+    let mut rewritten = 0;
+    for index in 0..func.tables.len() {
+        let jump = func.tables[index].jump;
+        let Ok(table) = u32::try_from(index) else { break };
+        if absolute_table(func, jump, table, insts, names).is_some() {
+            func.tables[index].absolute = true;
+            rewritten += 1;
+        }
+    }
+    rewritten
+}
+
+/// The AArch64 loads and stores that can take the low twelve bits of a symbol's address, each with
+/// how many bytes it reads or writes, which is what the twelve bits are scaled by.
+const LOW_BITS: [(&str, u32); 23] = [
+    ("ldr_8", 1),
+    ("ldr_16", 2),
+    ("ldr_32", 4),
+    ("ldr_64", 8),
+    ("ldrs_8_32", 1),
+    ("ldrs_8_64", 1),
+    ("ldrs_16_32", 2),
+    ("ldrs_16_64", 2),
+    ("ldrs_32_64", 4),
+    ("ldr_bit", 1),
+    ("str_bit", 1),
+    ("str_8", 1),
+    ("str_16", 2),
+    ("str_32", 4),
+    ("str_64", 8),
+    ("ldr_f16", 2),
+    ("ldr_f32", 4),
+    ("ldr_f64", 8),
+    ("ldr_f128", 16),
+    ("str_f16", 2),
+    ("str_f32", 4),
+    ("str_f64", 8),
+    ("str_f128", 16),
+];
+
+/// Puts the low twelve bits of a variable's address into the loads and stores that read through
+/// it on AArch64, and gives back how many addresses that took.
+///
+/// The address of a variable is `adrp` for its page and an `add` of the low twelve bits, and a load
+/// through it is a third instruction. A load can carry the low bits itself, which is what gcc
+/// writes, so the `add` goes and the page goes straight to the load:
+///
+/// ```text
+///   adrp x0, g                       adrp x0, g
+///   add  x0, x0, :lo12:g       ->    ldr  w0, [x0, :lo12:g]
+///   ldr  w0, [x0]
+/// ```
+///
+/// All the readers or none of them, for the reason [`addresses`] gives: one reader that cannot
+/// take it keeps the `add`, and then the others save nothing. A reader is one of `LOW_BITS` that
+/// reads the address as its base and nothing else, with no index beside it.
+///
+/// The load scales the twelve bits by the size it reads, so the variable has to be aligned to that
+/// size and the reader's offset into it a multiple of it, or the link cannot write the field. And
+/// `adrp` answers for the page of the one address it was given, so each reader has to land on that
+/// page. A reader at the same offset as every other one is written with the offset on both, as
+/// gcc writes `adrp x0, g+8` and `[x0, :lo12:g+8]`. Readers at different offsets share the page of
+/// the variable itself when they are all inside its alignment, which no page boundary can split.
+pub fn pages(func: &mut mir::Func, names: &mut Interner, elsewhere: &Elsewhere) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let address = opcode(names, "addr_64");
+    let page = opcode(names, "page_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut addresses = Vec::new();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode == address {
+                addresses.push(inst);
+            }
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    *writes.entry(operand.reg).or_default() += 1;
+                }
+            }
+        }
+    }
+    let carried = carried(func);
+    let mut folded = 0;
+    for inst in addresses {
+        let Some(symbol) = func[inst].symbol else { continue };
+        let Some(&written) = func[func[inst].operands].first() else { continue };
+        let Some(align) = elsewhere.aligned(symbol) else { continue };
+        // A register written anywhere else may be read as something other than this address,
+        // and one an edge carries is read as the address by the block it goes to.
+        if writes.get(&written.reg) != Some(&1) || carried.contains(&written.reg) {
+            continue;
+        }
+        let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
+            continue;
+        };
+        let Some(offsets) = readers
+            .iter()
+            .map(|&(reader, at)| low_bits(func, &sizes, readers, reader, at, align))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let first = offsets[0].0;
+        let room = i64::from(align.min(4096));
+        let addend = if offsets.iter().all(|&(disp, _)| disp == first) {
+            first
+        } else if offsets
+            .iter()
+            .all(|&(disp, size)| disp >= 0 && i64::from(disp) + i64::from(size) <= room)
+        {
+            0
+        } else {
+            continue;
+        };
+        let span = func.span(inst);
+        let mem = mir::Mem { disp: addend, ..mir::Mem::of(symbol) };
+        let made =
+            func.build_loose(page).at(span).def(written.reg, written.class).mem(mem).finish();
+        func.insert_before(inst, made);
+        func.remove_inst(inst);
+        for &(reader, _) in readers {
+            let Some(mem) = func[reader].mem else { continue };
+            func[mem].symbol = Some(symbol);
+        }
+        folded += 1;
+    }
+    folded
+}
+
+/// The registers the edges of the function carry, each of which the block at the other end reads
+/// as one of its parameters. No instruction's operands show those reads, so a fold that takes the
+/// instruction writing one of these away has to know about them.
+fn carried(func: &mir::Func) -> Set<mir::Reg> {
+    func.blocks()
+        .flat_map(|block| func[block].succs.iter().flat_map(|call| call.args.iter().copied()))
+        .collect()
+}
+
+/// The offset into the variable and the size of one reader of its address, when the reader can
+/// take the low twelve bits of it. See [`pages`].
+fn low_bits(
+    func: &mir::Func,
+    sizes: &Map<mir::Opcode, u32>,
+    readers: &[(mir::Inst, usize)],
+    reader: mir::Inst,
+    at: usize,
+    align: u32,
+) -> Option<(i32, u32)> {
+    let size = *sizes.get(&func[reader].opcode)?;
+    let amode = func[func[reader].mem?];
+    let alone = readers.iter().filter(|&&(other, _)| other == reader).count() == 1;
+    let plain = amode.index.is_none()
+        && amode.symbol.is_none()
+        && amode.block.is_none()
+        && amode.table.is_none()
+        && amode.segment.is_none();
+    let fits = align >= size && amode.disp % i32::try_from(size).ok()? == 0;
+    (alone && plain && fits && amode.base.map(usize::from) == Some(at))
+        .then_some((amode.disp, size))
+}
+
+/// Puts the shift and the widening of an index into the loads and stores that read it on AArch64,
+/// and gives back how many indexes that took.
+///
+/// `arr[i]` with an `int` subscript is the subscript widened to 64 bits, shifted by the size of
+/// the element and added to the address, and after [`addresses`] has put the addition in the
+/// access the other two are still instructions of their own. The access can do both, which is
+/// what gcc writes:
+///
+/// ```text
+///   sxtw x0, w0
+///   lsl  x0, x0, #3            ->    ldr x0, [x1, w0, sxtw #3]
+///   ldr  x0, [x1, x0]
+/// ```
+///
+/// The shift has to be the size of the access, since that is the only one the machine has room
+/// for, and either half goes on its own when the other is not there. As with [`pages`] it is all
+/// the readers of the index or none of them, and each one that goes has to be read by nothing
+/// else, or it stays for whatever else reads it and nothing is saved.
+pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let shift = opcode(names, "lsl_ri_64");
+    let signed = opcode(names, "sxtw_64");
+    let unsigned = opcode(names, "uxtw_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
+    let mut indexed: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    writes.entry(operand.reg).or_default().push(inst);
+                }
+            }
+            if let Some(reg) = plain_index(func, &sizes, inst) {
+                indexed.entry(reg).or_default().push(inst);
+            }
+        }
+    }
+    // The one instruction that writes a register, and the one register it reads, when the
+    // register is virtual and that instruction is the one of `opcode`. What it reads is written
+    // once too, or by no instruction at all, which is a block parameter and is as fixed as the
+    // value of one instruction until the allocator has run.
+    let only = |func: &mir::Func, reg: mir::Reg, opcode: mir::Opcode| {
+        let [inst] = writes.get(&reg)?.as_slice() else { return None };
+        if !reg.is_virtual() || func[*inst].opcode != opcode {
+            return None;
+        }
+        let [_, from] = &func[func[*inst].operands] else { return None };
+        if writes.get(&from.reg).map_or(0, Vec::len) > 1 {
+            return None;
+        }
+        from.reg.is_virtual().then_some((*inst, *from))
+    };
+    let carried = carried(func);
+    let mut folded = 0;
+    for (reg, readers) in indexed {
+        // Every read of the index is one of these accesses, once each and all of one size.
+        if reads.get(&reg).map_or(0, Vec::len) != readers.len() || carried.contains(&reg) {
+            continue;
+        }
+        let size = sizes[&func[readers[0]].opcode];
+        if readers.iter().any(|&reader| sizes[&func[reader].opcode] != size) {
+            continue;
+        }
+        let mut gone = Vec::new();
+        let mut index = None;
+        let mut scale = 1;
+        let mut widen = None;
+        let mut wide = reg;
+        let shifted = if size > 1 { only(func, reg, shift) } else { None };
+        if let Some((inst, from)) = shifted {
+            if func[inst].imm.is_some_and(|imm| func[imm].0 == i64::from(size.trailing_zeros())) {
+                gone.push(inst);
+                index = Some(from);
+                scale = u8::try_from(size).unwrap_or(1);
+                wide = from.reg;
+            }
+        }
+        // The widening goes only if nothing but the shift, or the accesses when there is none,
+        // reads what it wrote. Otherwise the shift alone moves in and reads the wide value.
+        let read_by = if gone.is_empty() { readers.len() } else { 1 };
+        for (opcode, how) in [(signed, mir::Widen::Signed), (unsigned, mir::Widen::Unsigned)] {
+            if let Some((inst, from)) = only(func, wide, opcode) {
+                if reads.get(&wide).map_or(0, Vec::len) == read_by && !carried.contains(&wide) {
+                    gone.push(inst);
+                    index = Some(from);
+                    widen = Some(how);
+                }
+            }
+        }
+        let Some(from) = index else { continue };
+        for &reader in &readers {
+            let Some(mem) = func[reader].mem else { continue };
+            let Some(at) = func[mem].index else { continue };
+            let operands = func[reader].operands;
+            let operand = &mut func[operands][usize::from(at)];
+            operand.reg = from.reg;
+            operand.class = from.class;
+            func[mem].scale = scale;
+            func[mem].widen = widen;
+        }
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+        folded += 1;
+    }
+    folded
+}
+
+/// Takes a shifted addition on AArch64 apart again where the shift is one the loads and stores
+/// reading the sum can do themselves, and gives back how many it took apart.
+///
+/// The selector writes `a + (i << 3)` as one `add` with the shift in it, which is right for a sum
+/// that is a value. A sum that is only ever an address is better off inside the access, and
+/// [`addresses`] and [`indexes`] put it there from the two instructions it used to be:
+///
+/// ```text
+///   add x0, x0, x1, lsl #3     ->    lsl x2, x1, #3     ->    ldr x0, [x0, x1, lsl #3]
+///   ldr x0, [x0]                     add x0, x0, x2
+///                                    ldr x0, [x0]
+/// ```
+///
+/// So it is every reader or none of them, each a load or store as wide as the shift scales, which
+/// reads the sum once and as nothing but its base. Run before [`addresses`].
+pub fn unshifted(func: &mut mir::Func, names: &mut Interner) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let shifted = opcode(names, "add_lsl_64");
+    let shift = opcode(names, "lsl_ri_64");
+    let add = opcode(names, "add_rr_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut sums = Vec::new();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                }
+            }
+            if func[inst].opcode == shifted {
+                sums.push(inst);
+            }
+        }
+    }
+    let mut split = 0;
+    for inst in sums {
+        let Some(k) = func[inst].imm.map(|imm| func[imm].0) else { continue };
+        let &[sum, base, index] = &func[func[inst].operands][..] else { continue };
+        let Some(readers) = reads.get(&sum.reg) else { continue };
+        let address = |&(reader, at): &(mir::Inst, usize)| {
+            let size = sizes.get(&func[reader].opcode)?;
+            let amode = func[func[reader].mem?];
+            let once = readers.iter().filter(|&&(other, _)| other == reader).count() == 1;
+            let plain = amode.index.is_none()
+                && amode.disp == 0
+                && amode.symbol.is_none()
+                && amode.block.is_none()
+                && amode.table.is_none()
+                && amode.segment.is_none();
+            let scaled = (0..8).contains(&k) && 1 << k == *size;
+            (once && plain && scaled && amode.base.map(usize::from) == Some(at)).then_some(())
+        };
+        if !sum.reg.is_virtual() || !readers.iter().all(|reader| address(reader).is_some()) {
+            continue;
+        }
+        let span = func.span(inst);
+        let moved = func.new_vreg(index.class);
+        let made = func
+            .build_loose(shift)
+            .at(span)
+            .def(moved, index.class)
+            .uses(index.reg, index.class)
+            .imm(k)
+            .finish();
+        func.insert_before(inst, made);
+        let made = func
+            .build_loose(add)
+            .at(span)
+            .def(sum.reg, sum.class)
+            .uses(base.reg, base.class)
+            .uses(moved, index.class)
+            .finish();
+        func.insert_before(inst, made);
+        func.remove_inst(inst);
+        split += 1;
+    }
+    split
+}
+
+/// The index register of a load or store whose address is a base and an index and nothing else,
+/// which is the shape [`indexes`] can add a shift and a widening to.
+fn plain_index(
+    func: &mir::Func,
+    sizes: &Map<mir::Opcode, u32>,
+    inst: mir::Inst,
+) -> Option<mir::Reg> {
+    sizes.get(&func[inst].opcode)?;
+    let amode = func[func[inst].mem?];
+    let plain = amode.base.is_some()
+        && amode.scale == 1
+        && amode.disp == 0
+        && amode.widen.is_none()
+        && amode.symbol.is_none()
+        && amode.block.is_none()
+        && amode.table.is_none()
+        && amode.segment.is_none();
+    let at = usize::from(amode.index?);
+    let reg = func[func[inst].operands].get(at)?.reg;
+    let once = func[func[inst].operands].iter().filter(|operand| operand.reg == reg).count() == 1;
+    (plain && once).then_some(reg)
+}
+
+/// The one table's rewrite, or nothing when its instructions are not the four it expects.
+fn absolute_table(
+    func: &mut mir::Func,
+    jump: mir::Inst,
+    table: u32,
+    insts: &FrameInsts,
+    names: &mut Interner,
+) -> Option<()> {
+    let block = func.block_of(jump)?;
+    let before: Vec<mir::Inst> = func.insts(block).take_while(|&inst| inst != jump).collect();
+    let written = |func: &mir::Func, reg: mir::Reg| {
+        before.iter().rev().copied().find(|&inst| {
+            func[func[inst].operands].iter().any(|op| op.reg == reg && op.role != Role::Use)
+        })
+    };
+    let to = *func[func[jump].operands].first()?;
+    let add = written(func, to.reg)?;
+    let &[_, offset, base] = &func[func[add].operands][..] else { return None };
+    let load = written(func, offset.reg)?;
+    let near = written(func, base.reg)?;
+    let address = func[func[near].mem?];
+    let cell = func[func[load].mem?];
+    let operands = &func[func[load].operands];
+    let index = *operands.get(usize::from(cell.index?))?;
+    let read = operands.get(usize::from(cell.base?))?.reg;
+    if address.table != Some(table) || read != base.reg || cell.scale != 4 || cell.disp != 0 {
+        return None;
+    }
+    let moves = insts.moves(to.class)?;
+    let opcode = mir::Opcode::new(names.join(insts.prefix, moves.load));
+    let span = func.span(load);
+    let mem = mir::Mem {
+        index: Some(index),
+        scale: 8,
+        reach: mir::Reach::Absolute,
+        ..mir::Mem::table(table)
+    };
+    let made = func.build_loose(opcode).at(span).def(to.reg, to.class).mem(mem).finish();
+    func.insert_before(jump, made);
+    for gone in [near, load, add] {
+        func.remove_inst(gone);
+    }
+    Some(())
+}
+
+/// A fold that has been checked and not yet done.
+///
+/// Everything the rewrite needs is worked out here rather than after the decision, so that the
+/// decision is the last thing that can go either way and the rewrite itself is three assignments
+/// that cannot fail.
+struct Folding {
+    /// The reader this rewrites, which is not always the instruction being looked at, since the
+    /// set is applied when its last reader arrives rather than as each one agrees.
+    into: mir::Inst,
+    /// The register the address instruction wrote, which is what ties this to its set.
+    base: mir::Reg,
+    /// What the reader's operands become.
+    operands: Vec<mir::Operand>,
+    /// What the reader's addressing mode becomes.
+    amode: mir::Amode,
+}
+
+/// The `lea` whose address this instruction should read directly, and what reading it directly
+/// makes of the instruction.
+///
+/// The operand vector is rebuilt rather than edited because the registers a memory operand names
+/// come last in it, base and then index, which is the invariant [`mir::InstBuilder::mem`] keeps and
+/// the printer and the allocator both read. Dropping the ones the reader's own address named and
+/// putting the composed address's on the end keeps it, and the indices in the new addressing mode
+/// are worked out from the length rather than carried over.
+///
+/// Under the kernel code model a name's own address is a number the machine sign extends, so an
+/// address that is a name and nothing else does have room for the reader's index: `tab[i]` becomes
+/// `tab(,%rdi,8)` with `R_X86_64_32S`, which is what gcc writes for the kernel. That is `absolute`,
+/// and the composed address is marked as reaching the name that way. tamnd/rucc#2275.
+fn candidate(
+    func: &mir::Func,
+    open: &Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    absolute: bool,
+) -> Option<Folding> {
+    let base = base_reg(func, inst)?;
+    let held = open.get(&base)?;
+    let (from, address) = (held.from, held.address);
+    let reading = func[func[inst].mem?];
+    let taken = &func[func[from].operands];
+    let reader = &func[func[inst].operands];
+    // The machine scales one register and the two addresses between them can want two, so this is
+    // where the second one is turned down. Whichever side the index came from decides what it is
+    // multiplied by, so the operand and the scale are carried together.
+    let mut reach = address.reach;
+    let scaled = match (address.index, reading.index) {
+        (Some(_), Some(_)) => return None,
+        // Nor an address that is a place in this function, which is reached from the instruction
+        // pointer the way a symbol is and has no room for a register either.
+        (None, Some(_)) if address.table.is_some() => return None,
+        (None, Some(_)) if absolute && named_alone(address) => {
+            reach = mir::Reach::Absolute;
+            reading.index.and_then(|at| reader.get(usize::from(at))).map(|op| (*op, reading.scale))
+        }
+        // Counted from the global offset table in a register rather than from the instruction
+        // pointer, which is i386 position independent code, and then there is room for the index
+        // beside the base: `arr@GOTOFF(%ebx,%eax,4)` is what gcc writes for `arr[i]`. A name that
+        // is a number and a register added to it is the same, see [`absolute_sums`].
+        (None, Some(at))
+            if matches!(address.reach, mir::Reach::GotOff | mir::Reach::Absolute)
+                && address.base.is_some() =>
+        {
+            Some((*reader.get(usize::from(at))?, reading.scale))
+        }
+        (None, Some(_)) if address.symbol.is_some() || address.block.is_some() => return None,
+        (Some(at), None) => Some((*taken.get(usize::from(at))?, address.scale)),
+        (None, Some(at)) => Some((*reader.get(usize::from(at))?, reading.scale)),
+        (None, None) => None,
+    };
+    // The composed address is the `lea`'s with the reader's displacement added and whichever index
+    // there is, and the only thing that can go wrong is the width of the field the displacement
+    // goes in. [`offer`] is what checks that nothing else in the reader names the base.
+    let disp = i64::from(address.disp) + i64::from(reading.disp);
+    // The segment is the reader's, since a `lea` works out an offset and never reads through one.
+    // Two different ones would be two address spaces, which no single address is.
+    let segment = match (reading.segment, address.segment) {
+        (Some(one), Some(other)) if one != other => return None,
+        (one, other) => one.or(other),
+    };
+    let mut amode = mir::Amode {
+        disp: i32::try_from(disp).ok()?,
+        base: None,
+        index: None,
+        scale: scaled.map_or(1, |(_, scale)| scale),
+        reach,
+        segment,
+        ..address
+    };
+
+    let named = 1 + usize::from(reading.index.is_some());
+    let keeping = reader.len().checked_sub(named)?;
+    // The invariant read out loud, because dropping the wrong operands here would build an address
+    // out of whatever the reader was carrying for its own reasons.
+    if usize::from(reading.base?) != keeping {
+        return None;
+    }
+    let mut operands = reader.get(..keeping)?.to_vec();
+    if let Some(at) = address.base {
+        operands.push(*taken.get(usize::from(at))?);
+        amode.base = Some(u8::try_from(operands.len() - 1).ok()?);
+    }
+    if let Some((operand, _)) = scaled {
+        operands.push(operand);
+        let at = Some(u8::try_from(operands.len() - 1).ok()?);
+        // An index at a scale of one with no base beside it is a base, which needs no index byte
+        // and is a byte shorter: `types+8(%eax)` rather than `types+8(,%eax,1)`, as gcc writes it.
+        if amode.base.is_none() && amode.scale == 1 && amode.widen.is_none() {
+            amode.base = at;
+        } else {
+            amode.index = at;
+        }
+    }
+    Some(Folding { into: inst, base, operands, amode })
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_target::CodeModel;
+    use rucc_target::x86_64::{FRAME, GPR, MACHINE, RDI, RSP};
+
+    use super::*;
+
+    /// A function with one block, and the names it was built with.
+    fn empty() -> (Interner, mir::Func, mir::Block) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        (names, func, block)
+    }
+
+    /// The pass, run over a function with nothing owed a frame offset, which is most of these.
+    ///
+    /// The lists are still there because the pass rewrites them, and a test that is about what it
+    /// wrote in them builds its own rather than calling this.
+    fn folds(func: &mut mir::Func, names: &mut Interner) -> usize {
+        folds_under(func, names, CodeModel::Small)
+    }
+
+    /// The same under a code model of the test's choosing.
+    fn folds_under(func: &mut mir::Func, names: &mut Interner, model: CodeModel) -> usize {
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
+        addresses(
+            func,
+            &FRAME,
+            &MACHINE,
+            names,
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
+            model == CodeModel::Kernel,
+            false,
+        )
+    }
+
+    /// A block storing a zero at each of those widths through one pointer, with a call after the
+    /// store at each place `calls` says.
+    fn cleared(widths: &[u32], calls: &[usize]) -> (Interner, mir::Func, mir::Block) {
+        let (mut names, mut func, block) = empty();
+        let call = op(&mut names, "call");
+        let to = func.new_vreg(GPR);
+        for (at, &width) in widths.iter().enumerate() {
+            let store = op(&mut names, &format!("mov_mi_{width}"));
+            let disp = i32::try_from(at * 8).expect("a small displacement");
+            let mem = mir::Mem { disp, ..mir::Mem::at(mir::Operand::read(to, GPR)) };
+            func.build(block, store).mem(mem).imm(0).finish();
+            if calls.contains(&at) {
+                func.build(block, call).symbol(names.intern("g")).finish();
+            }
+        }
+        (names, func, block)
+    }
+
+    #[test]
+    fn a_run_of_zeros_is_stored_from_one_register() {
+        let (mut names, mut func, block) = cleared(&[64, 32, 16], &[]);
+        assert_eq!(zeros(&mut func, &mut names, &MACHINE, GPR), 3);
+        let shape = shape(&func, &names, block);
+        let opcodes: Vec<&str> = shape.iter().map(|(opcode, _)| opcode.as_str()).collect();
+        assert_eq!(opcodes, ["x64.mov_ri_32", "x64.mov_mr_64", "x64.mov_mr_32", "x64.mov_mr_16"]);
+        let zero = func.insts(block).next().expect("the zero");
+        let reg = func[func[zero].operands][0].reg;
+        for inst in func.insts(block).skip(1) {
+            assert_eq!(func[func[inst].operands][0].reg, reg);
+            assert_eq!(func[func[inst].mem.expect("an address")].base, Some(1));
+        }
+    }
+
+    #[test]
+    fn one_zero_alone_keeps_its_immediate() {
+        let (mut names, mut func, _) = cleared(&[64], &[]);
+        assert_eq!(zeros(&mut func, &mut names, &MACHINE, GPR), 0);
+    }
+
+    #[test]
+    fn a_call_ends_a_run() {
+        let (mut names, mut func, _) = cleared(&[64, 64], &[0]);
+        assert_eq!(zeros(&mut func, &mut names, &MACHINE, GPR), 0);
+    }
+
+    /// The opcode of that name on this target.
+    fn op(names: &mut Interner, name: &str) -> mir::Opcode {
+        mir::Opcode::new(names.intern(&format!("{}{name}", FRAME.prefix)))
+    }
+
+    /// What every instruction in a block came to, as opcodes and addressing modes.
+    fn shape(func: &mir::Func, names: &Interner, block: mir::Block) -> Vec<(String, mir::Amode)> {
+        func.insts(block)
+            .map(|inst| {
+                let amode = func[inst].mem.map_or(mir::Amode::NOTHING, |mem| func[mem]);
+                (names.resolve(func[inst].opcode.name()).to_owned(), amode)
+            })
+            .collect()
+    }
+
+    /// The registers a memory operand names, in the order the addressing mode names them.
+    fn address_regs(func: &mir::Func, inst: mir::Inst) -> Vec<mir::Reg> {
+        let amode = func[func[inst].mem.expect("a memory operand")];
+        let operands = &func[func[inst].operands];
+        [amode.base, amode.index]
+            .into_iter()
+            .flatten()
+            .map(|at| operands[usize::from(at)].reg)
+            .collect()
+    }
+
+    /// An array read as selection leaves it: a `lea` that scales the index and adds the base, and
+    /// a `mov` that reads through the register it wrote.
+    #[test]
+    fn an_address_a_load_reads_once_becomes_the_load_s_own_addressing_mode() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
+        assert_eq!(left[0].0, format!("{}mov_rm_32", FRAME.prefix));
+        assert_eq!(left[0].1.scale, 4);
+        assert_eq!(left[0].1.disp, 0);
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index], "the load reads the wrong pair");
+    }
+
+    /// The two displacements are added, which is the whole of what composing them takes when one
+    /// of the two addresses has room for an index and the other has none.
+    #[test]
+    fn the_displacements_of_the_two_addresses_are_added() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(8))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.disp, 24, "the field is at the sum of the two offsets or nowhere");
+    }
+
+    /// A store keeps the value it writes, which is the operand the address does not name, and the
+    /// rebuilt operand vector has to hold on to it.
+    #[test]
+    fn a_store_keeps_the_value_it_is_storing() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        func.build(block, store)
+            .uses(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let inst = func.insts(block).next().expect("the store is still there");
+        let regs: Vec<mir::Reg> = func[func[inst].operands].iter().map(|op| op.reg).collect();
+        assert_eq!(regs, vec![value, array, index], "the value the store writes went missing");
+        assert_eq!(func[func[inst].mem.expect("a memory operand")].scale, 8);
+    }
+
+    /// One address at three offsets, which is what a structure written field by field comes out
+    /// as. Every reader can carry the whole of it in its own mode, so all three take it and the
+    /// `lea` has nothing left reading it. This is the case section 37.4 says the pass is for.
+    #[test]
+    fn an_address_every_reader_can_take_is_folded_into_all_of_them() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        for offset in [0, 12, 28] {
+            func.build(block, store)
+                .uses(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(folds(&mut func, &mut names), 3);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 3, "the address is still worked out on its own: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![16, 28, 44], "each store is at its own offset from the address");
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            assert_eq!(address_regs(&func, inst), vec![array]);
+        }
+    }
+
+    /// Three readers of an indexed address and the middle one has an index of its own, which is the
+    /// pairing there is no room for. Folding into the other two would leave the `lea` where it is
+    /// for the third, so the address would be worked out twice rather than once and the two folds
+    /// would have bought nothing but a longer live range for what it reads. All or nothing over the
+    /// set means none of them.
+    #[test]
+    fn an_address_one_reader_cannot_take_is_folded_into_none_of_them() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8)
+                    .plus(16),
+            )
+            .finish();
+        for at in 0..3 {
+            let value = func.new_vreg(GPR);
+            let mem = mir::Mem::at(mir::Operand::read(address, GPR));
+            let mem = if at == 1 { mem.indexed(mir::Operand::read(index, GPR), 4) } else { mem };
+            func.build(block, load).def(value, GPR).mem(mem).finish();
+        }
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// An address whose own set completes after one of its readers has already collected a plan of
+    /// its own, which is `int *q = &tmp[i]; *q = 0; ... tmp[j] = 39; ... return *q;` and is the
+    /// shape that miscompiled.
+    ///
+    /// The outer `lea` writes where the array starts, two inner `lea`s scale a subscript onto it,
+    /// and each inner one has readers of its own. The first reader of the first inner `lea` agrees
+    /// to a plan naming the outer register, since that is what the address it is taking reads at
+    /// the time. Then the second inner `lea` arrives, the outer set is complete, both inner ones
+    /// take the outer address into themselves and the outer `lea` goes. The agreed plan now names a
+    /// register nothing writes, and committing it would put that register in a load.
+    ///
+    /// So the entry goes when the address under it is rewritten. What is left works every address
+    /// out from something that is written, which is the whole of what this checks.
+    #[test]
+    fn a_plan_against_an_address_that_has_since_moved_is_not_committed() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let outer = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(outer, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)))
+            .finish();
+
+        let mut inner = Vec::new();
+        let mut given = vec![array];
+        for _ in 0..2 {
+            let index = func.new_vreg(GPR);
+            let address = func.new_vreg(GPR);
+            given.push(index);
+            func.build(block, lea)
+                .def(address, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(outer, GPR))
+                        .indexed(mir::Operand::read(index, GPR), 4),
+                )
+                .finish();
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+                .finish();
+            inner.push(address);
+        }
+        // The second reader of the first inner address, which is what makes its set complete after
+        // that address has already been rewritten.
+        let value = func.new_vreg(GPR);
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(inner[0], GPR)).plus(4))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 3);
+
+        // Every register an address is left naming either comes into the block or is written in
+        // it, and the one that is gone is the outer `lea`'s, which is the register the stale plan
+        // named.
+        let written: Vec<mir::Reg> =
+            func.insts(block).flat_map(|inst| written(&func, inst)).collect();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for reg in address_regs(&func, inst) {
+                assert!(
+                    given.contains(&reg) || written.contains(&reg),
+                    "an address reads {reg:?} and nothing writes it"
+                );
+            }
+        }
+        assert!(!written.contains(&outer), "the outer address is still there");
+    }
+
+    /// An indexed address with two readers, which both of them can take. The index goes into the
+    /// room the reader already has for one, the same as the base does, so this is the ordinary
+    /// case rather than a special one.
+    #[test]
+    fn an_indexed_address_every_reader_can_take_is_folded_into_all_of_them() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+        for offset in [0, 8] {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(folds(&mut func, &mut names), 2);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 2, "the address is gone and both loads carry it: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![0, 8], "each load is at its own offset from the address");
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            assert_eq!(address_regs(&func, inst), vec![array, index]);
+        }
+    }
+
+    /// A symbol relative address with two readers, which both of them could take and which is left
+    /// alone anyway. Each reader would have to name the symbol where it names a register now, and
+    /// a symbol is a whole address word, so two readers write that word twice to save one `lea`
+    /// that wrote it once. The corpus says that is a loss well before the reader count gets large.
+    #[test]
+    fn a_symbol_address_with_more_than_one_reader_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let cell = names.intern("cell");
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(cell)).finish();
+        for offset in [0, 8] {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(offset))
+                .finish();
+        }
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A static array indexed, which is a `lea` of the name and a load that adds the index to it.
+    /// The small model reaches the name from the instruction pointer and has no room for the
+    /// index, so the two stay apart. The kernel model writes the name as a number and the index
+    /// goes beside it, `tab+8(,%rdi,8)`, which is what gcc writes for the kernel.
+    #[test]
+    fn a_name_takes_the_reader_s_index_under_the_kernel_model_and_not_otherwise() {
+        let build = |names: &mut Interner| {
+            let (_, mut func, block) = empty();
+            let address = func.new_vreg(GPR);
+            let index = func.new_vreg(GPR);
+            let value = func.new_vreg(GPR);
+            let lea = op(names, FRAME.lea);
+            let load = op(names, "mov_rm_64");
+            let tab = names.intern("tab");
+            func.build(block, lea).def(address, GPR).mem(mir::Mem::of(tab)).finish();
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(address, GPR))
+                        .indexed(mir::Operand::read(index, GPR), 8)
+                        .plus(8),
+                )
+                .finish();
+            (func, block, index)
+        };
+        let mut names = Interner::new();
+        let (mut small, _, _) = build(&mut names);
+        assert_eq!(folds_under(&mut small, &mut names, CodeModel::Small), 0);
+
+        let (mut kernel, block, index) = build(&mut names);
+        assert_eq!(folds_under(&mut kernel, &mut names, CodeModel::Kernel), 1);
+        let shape = shape(&kernel, &names, block);
+        let [(_, amode)] = &shape[..] else { panic!("one instruction left: {shape:?}") };
+        assert_eq!(amode.reach, mir::Reach::Absolute);
+        assert_eq!((amode.base, amode.scale, amode.disp), (None, 8, 8));
+        assert_eq!(names.resolve(amode.symbol.expect("the name")), "tab");
+        let load = kernel.insts(block).next().expect("the load");
+        assert_eq!(address_regs(&kernel, load), [index]);
+    }
+
+    /// What is left of the address of a name is marked as a number under the kernel model, and
+    /// nothing with a register or a slot in it is.
+    #[test]
+    fn only_the_address_of_a_name_alone_is_marked_as_a_number() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_64");
+        let here = names.intern("here");
+        let away = names.intern("away");
+        let base = func.new_vreg(GPR);
+        for mem in [
+            mir::Mem::of(here).plus(4),
+            mir::Mem::got(away),
+            mir::Mem::at(mir::Operand::read(base, GPR)).plus(8),
+        ] {
+            let to = func.new_vreg(GPR);
+            func.build(block, lea).def(to, GPR).mem(mem).finish();
+        }
+        let to = func.new_vreg(GPR);
+        func.build(block, load).def(to, GPR).mem(mir::Mem::of(here)).finish();
+
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 1);
+        let reaches: Vec<mir::Reach> =
+            shape(&func, &names, block).into_iter().map(|(_, amode)| amode.reach).collect();
+        assert_eq!(
+            reaches,
+            [mir::Reach::Absolute, mir::Reach::Table, mir::Reach::Itself, mir::Reach::Itself]
+        );
+    }
+
+    /// Two loads of one name under the kernel model, the way `__startup_64` reads `ptrs_per_p4d`.
+    /// Each load reads the name from the instruction pointer and the shared `lea` goes, so nothing
+    /// is left for [`absolute`] to write as `movq $sym`.
+    #[test]
+    fn each_read_of_a_name_takes_the_name_under_the_kernel_model() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let count = names.intern("count");
+        let address = func.new_vreg(GPR);
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(count)).finish();
+        for _ in 0..2 {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+                .finish();
+        }
+
+        assert_eq!(spread(&mut func, &FRAME, &mut names), 2);
+        assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 2);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 0);
+        let shape = shape(&func, &names, block);
+        assert_eq!(shape.len(), 2, "{shape:?}");
+        for (opcode, amode) in shape {
+            assert!(opcode.ends_with("mov_rm_32"), "{opcode}");
+            assert_eq!(amode.reach, mir::Reach::Itself);
+            assert_eq!(amode.base, None);
+            assert_eq!(names.resolve(amode.symbol.expect("the name")), "count");
+        }
+    }
+
+    /// The address wanted as a value as well keeps its `lea`, and only the load takes the name.
+    #[test]
+    fn an_address_wanted_as_a_value_keeps_its_lea_beside_the_reads() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let store = op(&mut names, "mov_mr_64");
+        let count = names.intern("count");
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(count)).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, store)
+            .uses(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(mir::Reg::physical(RDI), GPR)))
+            .finish();
+
+        assert_eq!(spread(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 1);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 1);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// Two readers and one of them is in another block, which is the same refusal as the single
+    /// reader case and is caught by a different half of the pass. The count of reads is taken over
+    /// the whole function, so a set that leaves one out never becomes complete.
+    #[test]
+    fn an_address_read_outside_the_block_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        for at in [block, next] {
+            let value = func.new_vreg(GPR);
+            func.build(at, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+                .finish();
+        }
+        *func.succs_mut(block) = vec![mir::BlockCall::to(next)];
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A register the address reads, written between the first reader and the second. This is the
+    /// one refusal the set adds that the pair version had no way to need, since a write after the
+    /// only reader is a write nobody was ever going to fold across.
+    #[test]
+    fn a_write_between_one_reader_and_the_next_ends_the_chance_for_the_set() {
+        let (mut names, mut func, block) = empty();
+        let array = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let put = op(&mut names, "mov_ri_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(first, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, put).def(array, GPR).imm(7).finish();
+        func.build(block, load)
+            .def(second, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(4))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 4);
+    }
+
+    /// A reader that is not reading it as an address at all. There is nowhere in an ordinary
+    /// operand to put a base and an index and a displacement, so that read is one no fold can take
+    /// and it turns down the set the way any other refusal does.
+    #[test]
+    fn an_address_something_reads_as_a_plain_operand_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, add).def(sum, GPR).uses(address, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// The one instruction reading the address twice, once as the value it stores and once as the
+    /// place it stores to. Only one of those two reads is the memory operand, so folding would
+    /// leave the other one naming a register nothing writes any more.
+    #[test]
+    fn an_address_the_one_instruction_reads_twice_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, store)
+            .uses(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A chain whose middle has a reader of its own, so the inner address is complete while the
+    /// outer one is still waiting for its second reader. Folding the inner one away takes with it
+    /// the instruction the outer one's plan was written for, and the outer one waits rather than
+    /// being written into a gap. The second run is where it lands, which is the whole of what
+    /// waiting costs.
+    #[test]
+    fn a_chain_whose_middle_goes_first_leaves_the_outer_address_for_the_next_run() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let outer = func.new_vreg(GPR);
+        let inner = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(outer, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, lea)
+            .def(inner, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(outer, GPR)).plus(4))
+            .finish();
+        func.build(block, load)
+            .def(first, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(inner, GPR)))
+            .finish();
+        func.build(block, load)
+            .def(second, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(outer, GPR)).plus(8))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block).len(), 3, "the inner address is still there");
+
+        assert_eq!(folds(&mut func, &mut names), 2);
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 2, "the outer address is still there: {left:?}");
+        let disps: Vec<i32> = left.iter().map(|(_, amode)| amode.disp).collect();
+        assert_eq!(disps, vec![20, 24], "the two loads are at the two composed offsets");
+    }
+
+    /// Both of them having an index is the one shape that does not compose, since the answer would
+    /// want two scaled registers.
+    #[test]
+    fn an_index_on_each_side_is_left_alone() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let row = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(row, GPR), 8)
+                    .plus(16),
+            )
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// The reader having the only index there is between the two, which is `s.items[i]` on a local:
+    /// the `lea` works out where the object starts and the reader scales the subscript. The index
+    /// stays where it is and the base and the displacement arrive from the address.
+    #[test]
+    fn the_reader_s_own_index_is_kept_when_the_address_has_none() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4)
+                    .plus(8),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
+        assert_eq!(left[0].1.disp, 24, "the field is at the sum of the two offsets or nowhere");
+        assert_eq!(
+            left[0].1.scale, 4,
+            "the scale is the reader's, since the index is the reader's"
+        );
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index], "the load reads the wrong pair");
+    }
+
+    /// A store whose own address is indexed, which is the same composition with an operand in front
+    /// of the address that the rebuilt vector has to hold on to.
+    #[test]
+    fn a_store_with_an_index_of_its_own_keeps_the_value_it_is_storing() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let store = op(&mut names, "mov_mr_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(4))
+            .finish();
+        func.build(block, store)
+            .uses(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 2),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let inst = func.insts(block).next().expect("the store is still there");
+        let regs: Vec<mir::Reg> = func[func[inst].operands].iter().map(|op| op.reg).collect();
+        assert_eq!(regs, vec![value, array, index], "the value the store writes went missing");
+        let amode = func[func[inst].mem.expect("a memory operand")];
+        assert_eq!((amode.scale, amode.disp), (2, 4));
+    }
+
+    /// An address relative to a symbol, read by an instruction with an index of its own. The symbol
+    /// is in the place the base would go, so the composed address would be a symbol and a scaled
+    /// register with nothing to be relative to, and there is no such address.
+    #[test]
+    fn a_symbol_is_not_composed_with_a_reader_s_index() {
+        let (mut names, mut func, block) = empty();
+        let index = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(names.intern("table"))).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(address, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// The two displacements add up to more than the field holds, so the pair stays a pair. The
+    /// program that does this is one nobody wrote, and the point of the test is that the answer is
+    /// a refusal rather than a wrap.
+    #[test]
+    fn two_displacements_that_do_not_fit_together_are_not_put_together() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(i32::MAX))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(1))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A physical register the address reads, written between the two. Machine IR is in SSA form
+    /// here so a virtual register cannot be, and this is why the walk asks anyway.
+    #[test]
+    fn a_register_the_address_reads_being_written_in_between_ends_the_chance() {
+        let (mut names, mut func, block) = empty();
+        let array = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let put = op(&mut names, "mov_ri_64");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, put).def(array, GPR).imm(7).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A reader in another block. Folding would move the address to wherever that block is, and
+    /// this pass has no way to know whether that is somewhere it runs more often.
+    #[test]
+    fn a_reader_in_another_block_is_not_one_this_folds_into() {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        *func.succs_mut(block) = vec![mir::BlockCall::to(next)];
+        func.build(next, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+    }
+
+    /// A chain of two, which is what an address of a field of an element of an array comes out as.
+    /// The walk goes forwards, so the second `lea` is folded into the load and then the first is
+    /// folded into what is left of the second, both in the one pass.
+    #[test]
+    fn a_chain_of_two_addresses_is_folded_the_whole_way_in_one_pass() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let element = func.new_vreg(GPR);
+        let field = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea)
+            .def(element, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        func.build(block, lea)
+            .def(field, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(element, GPR)).plus(4))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(field, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 2);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "one of the two addresses is still its own instruction");
+        assert_eq!(left[0].1.scale, 8);
+        assert_eq!(left[0].1.disp, 4);
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index]);
+    }
+
+    /// An address of a global, which the `lea` holds as a symbol rather than as a register. It
+    /// composes the same way and the reader ends up naming the symbol itself, which is one
+    /// instruction rather than two for every read of a global with a constant subscript.
+    #[test]
+    fn an_address_of_a_global_folds_into_the_reader_symbol_and_all() {
+        let (mut names, mut func, block) = empty();
+        let global = names.intern("counters");
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(global)).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(12))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.symbol, Some(global));
+        assert_eq!(left[0].1.disp, 12);
+    }
+
+    /// An address into the frame, which reads as an address of nothing until `finish` writes the
+    /// distance in. It folds like any other and the entry moves to the instruction that took it, so
+    /// the distance is still written into something that runs, and into the reader's own
+    /// displacement rather than over it.
+    #[test]
+    fn an_address_whose_displacement_is_still_to_be_written_folds_and_takes_its_entry_with_it() {
+        let (mut names, mut func, block) = empty();
+        let sp = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let local = func
+            .build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(sp, GPR)))
+            .finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(8))
+            .finish();
+
+        let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
+        let mut pending =
+            Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
+        assert_eq!(
+            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false, false),
+            1
+        );
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
+        assert_eq!(left[0].1.disp, 8, "the field's offset is what finish adds the frame's to");
+        let reader = func.insts(block).next().expect("the load is still there");
+        assert_eq!(locals, vec![(reader, 3)], "the offset is owed to whoever took the address");
+    }
+
+    /// One address into the frame read at that many offsets, which is a structure written field by
+    /// field. Gives back how many folded, which instructions are in the block afterwards, and what
+    /// the caller is still owed an offset into.
+    fn a_frame_address(readers: u32) -> (usize, Vec<mir::Inst>, Vec<(mir::Inst, u32)>) {
+        let (mut names, mut func, block) = empty();
+        let sp = mir::Reg::physical(RDI);
+        let address = func.new_vreg(GPR);
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let local = func
+            .build(block, lea)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(sp, GPR)))
+            .finish();
+        for at in 0..readers {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(address, GPR))
+                        .plus(i32::try_from(at).unwrap_or(0) * 4),
+                )
+                .finish();
+        }
+
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
+        let mut pending =
+            Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
+        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false, false);
+        assert!(locals.is_empty(), "an argument is owed off the other list");
+        (folded, func.insts(block).collect(), arguments)
+    }
+
+    /// One entry on the list becomes one per reader, since each of them now carries a displacement
+    /// the frame's offset has to be added to and there is no instruction left to add it to instead.
+    #[test]
+    fn an_address_into_the_frame_that_three_readers_take_is_owed_to_all_of_them() {
+        let (folded, left, owed) = a_frame_address(3);
+        assert_eq!(folded, 3);
+        assert_eq!(left.len(), 3, "the address is not its own instruction any more");
+        assert_eq!(owed, vec![(left[0], 7), (left[1], 7), (left[2], 7)]);
+    }
+
+    /// And the reader after that is one too many, so none of them takes it. What each of them would
+    /// put on is more than what the whole address instruction costs, which is [`FRAME_READERS`].
+    #[test]
+    fn an_address_into_the_frame_a_fourth_reader_wants_is_left_where_it_is() {
+        let (folded, left, owed) = a_frame_address(4);
+        assert_eq!(folded, 0);
+        assert_eq!(left.len(), 5, "the address and its four readers");
+        assert_eq!(owed, vec![(left[0], 7)], "the offset is still owed to the address itself");
+    }
+
+    /// An instruction that is not the target's address instruction, writing a register a load
+    /// reads. A load through the result of a load is two loads and folding one into the other
+    /// would read the wrong memory, so the opcode is checked rather than the shape.
+    #[test]
+    fn only_the_target_s_address_instruction_is_one_this_folds() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let load = op(&mut names, "mov_rm_64");
+        let read = op(&mut names, "mov_rm_32");
+        func.build(block, load)
+            .def(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(array, GPR)).plus(16))
+            .finish();
+        func.build(block, read)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A byte array read as selection leaves it, the sum of two registers and a load three bytes
+    /// past it, and the register the sum wrote.
+    fn a_sum_and_a_load(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        added: [mir::Reg; 2],
+    ) -> mir::Reg {
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let sum = op(names, FRAME.sum);
+        let load = op(names, "mov_rm_8");
+        func.build(block, sum).def(address, GPR).uses(added[0], GPR).uses(added[1], GPR).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)).plus(3))
+            .finish();
+        address
+    }
+
+    /// `p[i + 3]` on a `char`, where there is no scale for a rule to make a `lea` out of.
+    #[test]
+    fn a_sum_of_two_registers_is_a_base_and_an_index_to_the_one_reading_through_it() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        a_sum_and_a_load(&mut func, &mut names, block, [array, index]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the sum is still there: {left:?}");
+        assert_eq!(left[0].0, format!("{}mov_rm_8", FRAME.prefix));
+        assert_eq!((left[0].1.scale, left[0].1.disp), (1, 3));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index]);
+    }
+
+    /// The stack pointer has no encoding as an index, so a sum with it second reads it as the base.
+    #[test]
+    fn a_sum_with_the_stack_pointer_second_has_it_as_the_base() {
+        let (mut names, mut func, block) = empty();
+        let index = func.new_vreg(GPR);
+        let sp = mir::Reg::physical(RSP);
+        a_sum_and_a_load(&mut func, &mut names, block, [index, sp]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![sp, index]);
+    }
+
+    /// Two registers neither of which can be an index is a sum this leaves as a sum.
+    #[test]
+    fn a_sum_with_no_register_that_can_be_an_index_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let (sp, di) = (mir::Reg::physical(RSP), mir::Reg::physical(RDI));
+        a_sum_and_a_load(&mut func, &mut names, block, [di, sp]);
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A sum anything reads as a number rather than as an address is arithmetic the program wants,
+    /// and it stays, along with every reader that did want the address.
+    #[test]
+    fn a_sum_read_as_a_number_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let address = a_sum_and_a_load(&mut func, &mut names, block, [array, index]);
+        let copy = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(copy, GPR).uses(address, GPR).uses(index, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// `h->nodes[i]` on a flexible array of words as selection leaves it: an `addq $32` for the
+    /// offset of the array and a load that scales the subscript by eight off what it wrote.
+    fn stepped_and_indexed(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        [heap, index]: [mir::Reg; 2],
+    ) -> mir::Reg {
+        let nodes = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, FRAME.add))
+            .operand(mir::Operand::write(nodes, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(heap, GPR)
+            .imm(32)
+            .finish();
+        func.build(block, op(names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(nodes, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        nodes
+    }
+
+    #[test]
+    fn a_constant_added_to_the_base_goes_into_the_displacement_beside_the_index() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        stepped_and_indexed(&mut func, &mut names, block, [heap, index]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the add is still there: {left:?}");
+        assert_eq!((left[0].1.scale, left[0].1.disp), (8, 32));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![heap, index]);
+    }
+
+    /// The same address worked out by a `lea` that the load reads through, which is what the
+    /// selector writes when the subscript is scaled in the IR rather than in the load. The add goes
+    /// into the `lea` and the `lea` into the load, in the one run.
+    #[test]
+    fn a_constant_added_to_the_base_of_a_lea_reaches_the_load_through_it() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let nodes = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.add))
+            .operand(mir::Operand::write(nodes, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(heap, GPR)
+            .imm(32)
+            .finish();
+        func.build(block, op(&mut names, FRAME.lea))
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(nodes, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        func.build(block, op(&mut names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 2);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is still worked out on its own: {left:?}");
+        assert_eq!((left[0].1.scale, left[0].1.disp), (8, 32));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![heap, index]);
+    }
+
+    /// An add whose answer is wanted as a number as well is arithmetic the program wants, and it
+    /// stays.
+    #[test]
+    fn a_constant_added_and_read_as_a_number_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let nodes = stepped_and_indexed(&mut func, &mut names, block, [heap, index]);
+        let copy = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(copy, GPR).uses(nodes, GPR).uses(index, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A per-CPU read as selection leaves it: the offset of the field moved into a register and a
+    /// load through it in `%fs`, which is how `PCPU_GET` on i386 reaches the field.
+    fn numbered_read(
+        names: &mut Interner,
+        move_to: &str,
+        offset: i64,
+    ) -> (mir::Func, mir::Block, mir::Reg) {
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let at = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, move_to)).def(at, GPR).imm(offset).finish();
+        let mem = mir::Mem {
+            segment: Some(rucc_target::Segment::Fs),
+            ..mir::Mem::at(mir::Operand::read(at, GPR))
+        };
+        func.build(block, op(names, "mov_rm_32")).def(value, GPR).mem(mem).finish();
+        (func, block, at)
+    }
+
+    #[test]
+    fn a_constant_address_becomes_the_displacement_of_the_load() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = numbered_read(&mut names, FRAME.imm, 8);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the constant is still moved on its own: {left:?}");
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.index, amode.disp), (None, None, 8));
+        assert_eq!(amode.segment, Some(rucc_target::Segment::Fs), "the segment went");
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(func[func[inst].operands].len(), 1, "the load still reads a register");
+    }
+
+    /// `0x2000(,%eax,4)` is what gcc writes for a subscript of an array at a fixed address.
+    #[test]
+    fn a_constant_address_keeps_the_index_the_load_had() {
+        let (mut names, mut func, block) = empty();
+        let at = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.imm)).def(at, GPR).imm(0x2000).finish();
+        func.build(block, op(&mut names, "mov_rm_32"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(at, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.scale, amode.disp), (None, 4, 0x2000));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![index]);
+    }
+
+    /// A constant that something reads as a number is a number the program wants, and it stays.
+    #[test]
+    fn a_constant_address_read_as_a_number_as_well_is_left_where_it_is() {
+        let mut names = Interner::new();
+        let (mut func, block, at) = numbered_read(&mut names, FRAME.imm, 8);
+        let sum = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(sum, GPR).uses(at, GPR).uses(at, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// x86-64 sign extends the four bytes of the field, so an address above them stays in a
+    /// register.
+    #[test]
+    fn a_constant_address_too_wide_for_the_field_stays_in_its_register() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = numbered_read(&mut names, FRAME.imm, 0x1_0000_0000);
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A field of a struct at address zero is a zero, an add of the field's offset and a load,
+    /// which is one constant address.
+    #[test]
+    fn a_constant_added_to_a_constant_address_is_one_address() {
+        let (mut names, mut func, block) = empty();
+        let zero = func.new_vreg(GPR);
+        let field = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.imm)).def(zero, GPR).imm(0).finish();
+        func.build(block, op(&mut names, FRAME.add))
+            .operand(mir::Operand::write(field, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(zero, GPR)
+            .imm(4)
+            .finish();
+        let mem = mir::Mem {
+            segment: Some(rucc_target::Segment::Fs),
+            ..mir::Mem::at(mir::Operand::read(field, GPR))
+        };
+        func.build(block, op(&mut names, "mov_rm_64")).def(value, GPR).mem(mem).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the constant or the add is still there: {left:?}");
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.index, amode.disp), (None, None, 4));
+        assert_eq!(amode.segment, Some(rucc_target::Segment::Fs));
+    }
+
+    /// An add of a constant to an add of a constant is not a constant, and the register under
+    /// both stays in the address.
+    #[test]
+    fn a_constant_added_to_a_step_is_not_a_constant_address() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        for (into, from, by) in [(first, base, 8), (second, first, 4)] {
+            func.build(block, op(&mut names, FRAME.add))
+                .operand(mir::Operand::write(into, GPR).with(mir::Constraint::Reuse(1)))
+                .uses(from, GPR)
+                .imm(by)
+                .finish();
+        }
+        func.build(block, op(&mut names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(second, GPR)))
+            .finish();
+
+        folds(&mut func, &mut names);
+
+        let load = func.insts(block).last().expect("the load is still there");
+        let regs = address_regs(&func, load);
+        assert!(regs == [base] || regs == [first], "the load lost its base: {regs:?}");
+        assert!(
+            shape(&func, &names, block).iter().all(|(opcode, _)| !opcode.ends_with(FRAME.imm)),
+            "an add became a constant"
+        );
+    }
+
+    /// i386 counts addresses in 32 bits, so the local APIC at `0xfee00020` is a displacement
+    /// there, the four bytes of the field.
+    #[test]
+    fn a_constant_address_above_i32_max_is_a_displacement_on_i386() {
+        let mut names = Interner::new();
+        let (mut func, block, _) =
+            numbered_read(&mut names, rucc_target::x86::FRAME.imm, 0xfee0_0020);
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
+        let folded = addresses(
+            &mut func,
+            &rucc_target::x86::FRAME,
+            &rucc_target::x86::MACHINE,
+            &mut names,
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
+            true,
+            false,
+        );
+
+        assert_eq!(folded, 1);
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.disp, i32::from_ne_bytes(0xfee0_0020_u32.to_ne_bytes()));
+    }
+
+    /// A name read through `movl $name` at two offsets on i386, folded at `-Os`, and how many
+    /// instructions are left.
+    fn named_twice_for_size(offsets: [i32; 2], size: bool) -> (usize, usize) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let gpr = rucc_target::x86::GPR;
+        let address = func.new_vreg(gpr);
+        let lea = op(&mut names, rucc_target::x86::FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let fs = names.intern("fs");
+        func.build(block, lea).def(address, gpr).mem(mir::Mem::of(fs)).finish();
+        for offset in offsets {
+            let value = func.new_vreg(gpr);
+            func.build(block, load)
+                .def(value, gpr)
+                .mem(mir::Mem::at(mir::Operand::read(address, gpr)).plus(offset))
+                .finish();
+        }
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
+        let folded = addresses(
+            &mut func,
+            &rucc_target::x86::FRAME,
+            &rucc_target::x86::MACHINE,
+            &mut names,
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
+            true,
+            size,
+        );
+        (folded, func.insts(block).count())
+    }
+
+    /// FreeBSD's `boot2` reads two members of its superblock past the first 128 bytes, which is a
+    /// four byte displacement either way, so at `-Os` the name goes into both and the move goes.
+    #[test]
+    fn a_name_read_at_two_far_offsets_goes_into_both_readers_for_size_on_i386() {
+        assert_eq!(named_twice_for_size([0xbc, 0xb8], true), (2, 2));
+        assert_eq!(named_twice_for_size([0xbc, 0xb8], false), (0, 3));
+    }
+
+    /// Two near offsets are a byte each through the register, and six bytes more as two words than
+    /// the five of the move, so the move stays at `-Os` as well.
+    #[test]
+    fn a_name_read_at_two_near_offsets_keeps_its_move_for_size() {
+        assert_eq!(named_twice_for_size([4, 8], true), (0, 3));
+    }
+
+    /// The pass that moves a constant into the displacement, run on its own.
+    fn offsets_moved(func: &mut mir::Func, names: &mut Interner) -> usize {
+        offsets(func, &FRAME, &MACHINE, names)
+    }
+
+    /// `p[i + 3]` on an `int` as selection leaves it: an `add $3` and a load that scales what it
+    /// wrote by four.
+    fn indexed_past(
+        names: &mut Interner,
+        add: &str,
+        by: i64,
+    ) -> (mir::Func, mir::Block, [mir::Reg; 3]) {
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let past = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, add)).def(past, GPR).uses(index, GPR).imm(by).finish();
+        func.build(block, op(names, "mov_rm_32"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(past, GPR), 4),
+            )
+            .finish();
+        (func, block, [array, index, past])
+    }
+
+    #[test]
+    fn a_constant_added_to_the_index_goes_into_the_displacement() {
+        let mut names = Interner::new();
+        let (mut func, block, [array, index, _]) = indexed_past(&mut names, FRAME.add, 3);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the add is still there: {left:?}");
+        assert_eq!(left[0].1.disp, 12, "three elements of four bytes");
+        assert_eq!(left[0].1.scale, 4);
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index]);
+    }
+
+    #[test]
+    fn a_constant_taken_off_the_index_is_a_negative_displacement() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = indexed_past(&mut names, FRAME.sub, 1);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.disp, -4);
+    }
+
+    /// Something else reads the sum as well, so the add has to stay and moving the constant would
+    /// save nothing.
+    #[test]
+    fn an_index_something_else_reads_keeps_its_add() {
+        let mut names = Interner::new();
+        let (mut func, block, [_, _, past]) = indexed_past(&mut names, FRAME.add, 3);
+        let copy = func.new_vreg(GPR);
+        func.build(block, op(&mut names, "mov_rr_64")).def(copy, GPR).uses(past, GPR).finish();
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A constant whose scaled value does not fit in the field a displacement goes in.
+    #[test]
+    fn a_displacement_that_would_not_fit_leaves_the_add() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = indexed_past(&mut names, FRAME.add, 1 << 30);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+}

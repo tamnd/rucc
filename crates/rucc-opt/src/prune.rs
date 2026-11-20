@@ -1,0 +1,926 @@
+//! What the ranges prove cannot happen, taken out of the graph.
+//!
+//! Two transformations, and they are here together because section 24.4 says so: the one on
+//! switches "belongs in the same pass as the range-based branch simplification of document 21".
+//! Both ask document 10's machinery one question and act on a yes, and neither of them can do
+//! anything the other could not have set up, so one walk asking both is cheaper than two walks
+//! asking one each.
+//!
+//! # The branch the ranges decide
+//!
+//! Section 21.1's branch simplification, the third of the three forms it takes. A branch whose
+//! two arms go to the same place is a jump, and [`crate::simplify_cfg`] does that one. A branch on
+//! a constant is a jump, and that one is there too. A branch on something that is not a constant
+//! but that cannot come out any way other than one is a jump as well, and that is this one, because
+//! it is the form that needs an analysis rather than a look at the operand.
+//!
+//! ```c
+//! if (x > 10) { if (x > 5) { f(); } }
+//! ```
+//!
+//! The inner condition is not a constant and no rewrite rule can see it is settled, because what
+//! settles it is the edge the block was reached by rather than anything in the expression. The
+//! ranges see it: on the edge out of `x > 10` where the branch was taken, `x` is in
+//! `[11, INT_MAX]`, and `x > 5` over that range is always true. So the inner branch is a jump to
+//! its taken arm, and the other arm stops being reachable and goes with it.
+//!
+//! # Why this is not jump threading
+//!
+//! [`crate::thread`] asks a related question and gets a different answer. It asks whether the
+//! branch at the end of a block is settled by which edge control arrived on, and its answer is per
+//! edge: an edge whose arrival settles the branch is redirected past it, and the other edges into
+//! the same block are left alone. This asks whether the branch is settled at the block whatever
+//! edge control arrived on, and its answer is per block. Neither subsumes the other. Threading
+//! handles the case where one predecessor knows something the others do not, and pays for it with
+//! a redirected edge or a copied block. This handles the case where the fact holds on every path
+//! in, and pays nothing, but it will not fire where only one path establishes the fact.
+//!
+//! The two also read facts from different distances. Threading looks at the block control came
+//! from. The ranges walk up the dominator tree collecting what every branch above narrowed, so the
+//! `if (x > 10)` above can be any number of blocks away from the `if (x > 5)` and the answer is the
+//! same.
+//!
+//! # The case the ranges rule out
+//!
+//! Section 24.4's one middle end transformation on switches, and the reason document 24 keeps a
+//! `switch` whole through the entire middle end rather than lowering it early. A switch that
+//! survives is a single node whose operand has one range, and a case value outside that range
+//! names an arm nothing can reach.
+//!
+//! ```c
+//! switch (x & 3) { case 0: ...; case 2: ...; case 7: ...; }
+//! ```
+//!
+//! The operand is in `[0, 3]`, so `case 7` is dead. What that buys is more than the compare it
+//! removes. Document 24's lowering decides between a walk, a binary search, a bit test and a jump
+//! table by how dense the case values are, and dropping the outlier is what turns a switch that
+//! looked sparse into one that is dense enough for a table. Section 24.4 puts it this way: it "can
+//! turn a sparse switch into a dense one and change the lowering decision entirely".
+//!
+//! A switch every one of whose cases is ruled out becomes a jump to its default, which is the
+//! same thing happening to the whole node rather than to one arm of it.
+//!
+//! # The default the cases cover
+//!
+//! The mirror of the case the ranges rule out. Where the cases that are left name every value the
+//! operand can hold, nothing is left over for the default, and its edge is one nothing takes.
+//!
+//! ```c
+//! switch (x & 3) { case 0: ...; case 1: ...; case 2: ...; case 3: ...; default: ...; }
+//! ```
+//!
+//! The operand is in `[0, 3]` and all four are cases, so the default is dead code with an edge
+//! into it. The edge cannot simply go, because a `switch` always has a default, so one of the cases
+//! becomes the default instead and leaves the case list. The one picked is the place the most cases
+//! go, and every case going there leaves with it, so the switch that is left is as short as it can
+//! be. The check costs nothing: the cases that are left are all in the range and no two are the
+//! same, so they cover it exactly when there are as many of them as the range has values.
+//!
+//! What that buys depends on what the cases were. A switch whose arms do work loses a compare and
+//! the default's block. A switch [`crate::switch_conv`] made a table of has every case going to the
+//! one load, so all of them leave, the switch is a jump to the load, and the range check in front of
+//! the table goes too. That is the check gcc leaves out when it can see the default is unreachable.
+//!
+//! # The select the ranges settle where it is read
+//!
+//! The same question asked of a `select` rather than a branch, and asked where each reader is
+//! rather than where the select is. A select whose condition the ranges settle at the block that
+//! reads it is the arm it settles on there, whatever it is anywhere else.
+//!
+//! ```c
+//! static inline bool try_cmpxchg(int *p, int *old, int new)
+//! {
+//!     bool ok = cmpxchg(p, *old, new, &seen);
+//!     if (!ok) *old = seen;
+//!     return ok;
+//! }
+//! ```
+//!
+//! Every atomic loop in the kernel goes round on one of these. Inlined, the `if` is a select of
+//! `seen` and the old value and the loop branches on `ok` right behind it, so the select is made
+//! on every turn and read only on the edge where `ok` is false. On that edge the ranges say `ok` is
+//! zero and the reader takes `seen` straight, and the select, the negation and the conditional move
+//! they were go with nothing left reading them. gcc goes round on the `jne` the `cmpxchg` set.
+//!
+//!
+//! [`Ranges`] borrows the function, so nothing can be changed while it is alive. The walk
+//! therefore collects every answer, drops the oracle, and then applies them all, rather than the
+//! block at a time shape [`crate::phiopt`] uses.
+//!
+//! That is not only a borrow checker accommodation, it is also cheaper, and the reason it is
+//! sound is worth stating. An answer here is a fact that holds at a block. Applying another answer
+//! removes a branch, which removes edges, and a value's range at a block is the union over the
+//! paths that reach it, so removing a path can only narrow a range and never widen one. A fact
+//! proved before the rewrites is therefore still a fact after them. What can happen is that a
+//! block an answer was about stops being reachable, and an answer about a block nothing reaches is
+//! harmless because the block is about to be swept.
+//!
+//! # What it refuses
+//!
+//! A condition that is already a constant, because that is [`crate::simplify_cfg`]'s branch fold
+//! and two passes doing the same rewrite is two answers to check rather than one. A branch whose
+//! arms go to the same block, for the same reason.
+//!
+//! Everything else it refuses is the oracle saying it does not know, which is not a refusal so
+//! much as the answer, and it is recorded as a miss so that `-fopt-info-all` shows how often the
+//! question was asked and came back empty.
+//!
+//! # Which level
+//!
+//! `-O1` and above. Section 24.4 calls the switch half "cheap, it uses machinery that exists", and
+//! the branch half asks one question per conditional branch rather than one per value, so the
+//! query count is bounded by the number of branches rather than by the size of the function. Both
+//! halves only ever remove code, so `-Os` and `-Oz` want them as much as `-O2` does.
+//!
+//! It runs after [`crate::thread`] and [`crate::phiopt`] and before [`crate::simplify_cfg`], which
+//! is where it has to be at both ends. After, because both of those change the graph and the facts
+//! this reads are about the graph. Before, because what this leaves is a jump where a branch was
+//! and a block with one predecessor where there were two, and forwarding the first and merging the
+//! second is [`crate::simplify_cfg`]'s work rather than a second copy of it here.
+//!
+//! The blocks that stop being reachable are this pass's own problem rather than the cleanup
+//! pass's, because section 6.5 puts that obligation on whichever pass stranded them and the
+//! verifier holds every pass to it. So the walk that takes them out is called from here, and it is
+//! [`crate::simplify_cfg`]'s walk rather than a second one written next door.
+
+use rucc_base::hash::Map;
+use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, IntPred, Opcode, SwitchInfo, Value};
+
+use crate::cfg::Cfg;
+use crate::fold::constant;
+use crate::range::ops::Truth;
+use crate::range::query::Ranges;
+use crate::simplify_cfg;
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
+
+/// Recorded once for each branch the ranges settled.
+const BRANCH_DECIDED: &str =
+    "branch the value ranges settle whichever way control reached it replaced by a jump";
+
+/// Recorded once for each case value the ranges ruled out.
+const CASE_REMOVED: &str =
+    "case whose value the switched value cannot hold taken out of the switch";
+
+/// Recorded once for a switch none of whose cases can be reached.
+const SWITCH_REMOVED: &str =
+    "switch none of whose cases the switched value can reach replaced by a jump to its default";
+
+/// Recorded once for a switch whose cases cover every value the switched value can hold.
+const DEFAULT_REMOVED: &str =
+    "default no value can reach replaced by the place the most cases go to";
+
+/// Recorded once for each branch the ranges were asked about and could not settle.
+const BRANCH_UNDECIDED: &str = "branch kept, the value ranges do not settle which way it goes";
+
+/// Recorded once for each switch the ranges ruled no case out of.
+const NO_CASE_REMOVED: &str = "switch kept whole, the value ranges rule none of its cases out";
+const NO_FUEL: &str = "branch or switch kept, the pass ran out of fuel";
+
+/// Recorded once for each read of a select the ranges settle at the reader.
+const SELECT_DECIDED: &str = "select whose condition the value ranges settle where it is read \
+     replaced there by the arm it takes";
+
+/// The pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prune;
+
+impl Pass for Prune {
+    fn name(&self) -> &'static str {
+        "prune"
+    }
+
+    fn describe(&self) -> &'static str {
+        "a branch the ranges settle becomes a jump, and a case they rule out leaves its switch"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
+    fn preserves(&self) -> Preserved {
+        // Nothing. An arm that stops being reachable is an edge that stops existing, so every
+        // analysis built on the graph was built on a different graph.
+        Preserved::NONE
+    }
+
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        if func.entry().is_none() {
+            return stats;
+        }
+        let plan = answers(func, an, &mut stats);
+        if plan.branches.is_empty() && plan.switches.is_empty() && plan.reads.is_empty() {
+            return stats;
+        }
+        'apply: {
+            for (inst, select, arm) in plan.reads {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    break 'apply;
+                }
+                let swap = |value| if value == select { arm } else { value };
+                let args = func[inst].args;
+                func.rewrite(args, swap);
+                let edges: Vec<_> = func.successors(inst).map(|call| call.args).collect();
+                for edge in edges {
+                    func.rewrite(edge, swap);
+                }
+                stats.optimized(SELECT_DECIDED);
+            }
+            for (term, call) in plan.branches {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    break 'apply;
+                }
+                simplify_cfg::jump_to(func, term, call);
+                stats.optimized(BRANCH_DECIDED);
+            }
+            for (term, keep) in plan.switches {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    break 'apply;
+                }
+                let removed = shrink(func, term, &keep);
+                for _ in 0..removed {
+                    stats.optimized(CASE_REMOVED);
+                }
+                if keep.covered {
+                    stats.optimized(DEFAULT_REMOVED);
+                } else if keep.cases.is_empty() {
+                    stats.optimized(SWITCH_REMOVED);
+                }
+            }
+        }
+        // The graph was about the function as it was a moment ago, and the manager clears the
+        // cache after the pass returns, which is too late for the pass itself.
+        an.clear();
+        // Section 6.5 makes taking the stranded blocks out an obligation of whichever pass
+        // stranded them rather than a favour the cleanup pass does, and the verifier holds every
+        // pass to it under `-fverify-each`. An arm that stops being reachable is exactly that, so
+        // the walk is here, and it is [`crate::simplify_cfg`]'s walk rather than a second one
+        // written next door, because two answers about what reachable means is two compilers.
+        simplify_cfg::sweep(func, an, &mut stats);
+        stats
+    }
+}
+
+/// Every rewrite the ranges license, worked out against the function as it stands.
+#[derive(Debug, Default)]
+struct Plan {
+    /// The branches that only go one way, and the edge each of them goes by.
+    branches: Vec<(Inst, BlockCall)>,
+    /// The switches that lose a case or their default, and what each of them keeps.
+    switches: Vec<(Inst, Keep)>,
+    /// The instructions that read a select the ranges settle where they are, with the select and
+    /// the arm they read in its place.
+    reads: Vec<(Inst, Value, Value)>,
+}
+
+/// What is left of a switch the ranges say something about.
+#[derive(Debug)]
+struct Keep {
+    /// The places the surviving cases are in, in the order they were in.
+    cases: Vec<usize>,
+    /// Whether those cases are every value the switched value can hold, which leaves nothing for
+    /// the default.
+    covered: bool,
+}
+
+/// Everything the ranges license, worked out against the function as it stands.
+///
+/// One [`Ranges`] for the whole walk rather than one per block, because the oracle caches what it
+/// has worked out and a second one would start from nothing.
+fn answers(func: &Func, an: &mut Analyses, stats: &mut Stats) -> Plan {
+    let mut plan = Plan::default();
+    let cfg = an.cfg(func);
+    let mut ranges = Ranges::cached(func, an);
+    for block in func.blocks() {
+        if !cfg.reaches(block) {
+            continue;
+        }
+        let Some(term) = func.terminator(block) else { continue };
+        match func[term].opcode {
+            Opcode::BrIf => match decided(func, &mut ranges, block, term) {
+                Answer::Jump(call) => plan.branches.push((term, call)),
+                Answer::Unsettled => stats.missed(BRANCH_UNDECIDED),
+                Answer::NotAsked => (),
+            },
+            Opcode::Switch => match reachable(func, &mut ranges, block, term) {
+                Some(keeping) => plan.switches.push((term, keeping)),
+                None => stats.missed(NO_CASE_REMOVED),
+            },
+            _ => (),
+        }
+    }
+    selects(func, cfg, &mut ranges, &mut plan);
+    plan
+}
+
+/// Every read of a select whose condition the ranges settle at the block that reads it.
+///
+/// The arms are read by the select, so both are there wherever it is, and a reader is somewhere
+/// the select is. A read by a block call is a read by the branch that passes it, so it is asked
+/// at the block the branch ends.
+fn selects(func: &Func, cfg: &Cfg, ranges: &mut Ranges<'_>, plan: &mut Plan) {
+    let mut arms: Map<Value, (Value, Value, Value)> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::Select {
+                continue;
+            }
+            let (Some(&[cond, yes, no]), Some(value)) =
+                (func[func[inst].args].first_chunk(), func[inst].results().next())
+            else {
+                continue;
+            };
+            let (cond, yes, no) = flipped(func, cond, yes, no);
+            if constant(func, cond).is_none() {
+                arms.insert(value, (cond, yes, no));
+            }
+        }
+    }
+    if arms.is_empty() {
+        return;
+    }
+    for block in func.blocks() {
+        if !cfg.reaches(block) {
+            continue;
+        }
+        for inst in func.insts(block) {
+            let passed = func.successors(inst).flat_map(|call| func[call.args].to_vec());
+            let read: Vec<Value> = func[func[inst].args].iter().copied().chain(passed).collect();
+            for value in read {
+                let Some(&(cond, yes, no)) = arms.get(&value) else { continue };
+                let arm = match settled(func, ranges, block, cond) {
+                    Some(true) => yes,
+                    Some(false) => no,
+                    None => continue,
+                };
+                if !plan.reads.contains(&(inst, value, arm)) {
+                    plan.reads.push((inst, value, arm));
+                }
+            }
+        }
+    }
+}
+
+/// The select read through the `xor` with all ones that negates its condition.
+///
+/// The branch tests the condition and the select tests its negation, and the edges of the branch
+/// only say something about the value the branch tests. Reading the negation as the condition with
+/// its arms swapped asks the ranges about that value.
+fn flipped(func: &Func, cond: Value, yes: Value, no: Value) -> (Value, Value, Value) {
+    let Def::Result { inst, .. } = func[cond].def else { return (cond, yes, no) };
+    let data = &func[inst];
+    let Some(&[inner, mask]) = func[data.args].first_chunk::<2>() else { return (cond, yes, no) };
+    // Only a single bit: an `i8` that is one or zero is nonzero both ways once it is negated.
+    let ones = constant(func, mask).is_some_and(|(imm, ty)| ty.bits() == 1 && imm.signed(ty) == -1);
+    if data.opcode == Opcode::Xor && ones { (inner, no, yes) } else { (cond, yes, no) }
+}
+
+/// What came back about a conditional branch.
+///
+/// Three outcomes rather than two, because a branch this pass declines to look at and a branch it
+/// looked at and could not settle say different things under `-fopt-info-all`. The first is not a
+/// missed optimization at all, it is another pass's fold, and counting it as one would put a
+/// remark on every constant branch in the program saying the ranges failed at something they were
+/// never asked.
+enum Answer {
+    /// The one edge the branch takes.
+    Jump(BlockCall),
+    /// Asked, and the oracle does not know.
+    Unsettled,
+    /// Not this pass's question.
+    NotAsked,
+}
+
+/// The one edge a conditional branch takes, when the ranges say it only has one.
+///
+/// The first target is the one taken when the condition is one, which is what `Builder::br_if`
+/// writes and what the printer reads back, so a condition that always holds takes target zero.
+fn decided(func: &Func, ranges: &mut Ranges<'_>, block: Block, term: Inst) -> Answer {
+    let data = &func[term];
+    let Extra::Targets(targets) = data.extra else { return Answer::NotAsked };
+    let Some(&cond) = func[data.args].first() else { return Answer::NotAsked };
+    // Already a constant, or both arms in one place. Both are [`crate::simplify_cfg`]'s fold and
+    // it runs right after this one, so answering them here would be a second answer to the same
+    // question rather than an answer to one nothing else has.
+    if constant(func, cond).is_some() {
+        return Answer::NotAsked;
+    }
+    let calls = &func[targets];
+    let together =
+        |two: &[BlockCall]| two[0].block == two[1].block && func[two[0].args] == func[two[1].args];
+    if calls.len() == 2 && together(calls) {
+        return Answer::NotAsked;
+    }
+    let arm = match settled(func, ranges, block, cond) {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => return Answer::Unsettled,
+    };
+    func[targets].get(arm).copied().map_or(Answer::NotAsked, Answer::Jump)
+}
+
+/// Whether this condition can only come out one way at this block, and which way that is.
+///
+/// A comparison is asked about through [`Ranges::compare`], which is the entry point section 10.3
+/// puts the relational oracle behind, so a branch on `a < b` under a dominating `a < b` is settled
+/// even where neither value is pinned down to a range that settles it. Anything else is asked as a
+/// range: a one bit value that cannot be zero is true and one that can only be zero is false.
+///
+/// [`crate::header_copy`] asks this too, about the loop entry test it has just put in front of a
+/// loop, because by then this pass has run and the test it wants an answer about did not exist yet.
+/// Section 26.6 wanted that answer from document 10's ranges, and one function answering for both
+/// is what keeps the two passes from disagreeing about the same branch.
+pub(crate) fn settled(
+    func: &Func,
+    ranges: &mut Ranges<'_>,
+    block: Block,
+    cond: Value,
+) -> Option<bool> {
+    if let Some((pred, lhs, rhs)) = comparison(func, cond) {
+        return match ranges.compare(pred, lhs, rhs, block) {
+            Truth::Always => Some(true),
+            Truth::Never => Some(false),
+            Truth::Either => None,
+        };
+    }
+    let range = ranges.at(cond, block);
+    if range.nonzero() {
+        return Some(true);
+    }
+    (range.singleton() == Some(0)).then_some(false)
+}
+
+/// The comparison behind this value, if it is one.
+fn comparison(func: &Func, value: Value) -> Option<(IntPred, Value, Value)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::ICmp {
+        return None;
+    }
+    let Extra::IntPred(pred) = func[inst].extra else { return None };
+    let &[lhs, rhs] = func[func[inst].args].first_chunk::<2>()?;
+    Some((pred, lhs, rhs))
+}
+
+/// Which of a switch's cases the switched value can still hold, and whether the default can be
+/// reached, when either says something.
+///
+/// `None` is the switch that keeps every case and its default. An empty list of cases is the
+/// switch none of whose cases can be reached, which becomes a jump to its default.
+fn reachable(func: &Func, ranges: &mut Ranges<'_>, block: Block, term: Inst) -> Option<Keep> {
+    let Extra::Switch(at) = func[term].extra else { return None };
+    let info = func[at];
+    let arg = *func[func[term].args].first()?;
+    let range = ranges.at(arg, block);
+    let cases = &func[info.cases];
+    let keeping: Vec<usize> =
+        (0..cases.len()).filter(|&at| range.contains(cases[at].unsigned())).collect();
+    // Every case left is in the range and no two are the same, so they are all of it exactly when
+    // there are as many of them as it has values. Saturating, because the full range of a 128 bit
+    // value has one more value than a `u128` can count.
+    let values = range
+        .pairs()
+        .iter()
+        .fold(0u128, |sum, &(lo, hi)| sum.saturating_add((hi - lo).saturating_add(1)));
+    let covered = !keeping.is_empty() && values == keeping.len() as u128;
+    (keeping.len() < cases.len() || covered).then_some(Keep { cases: keeping, covered })
+}
+
+/// Rewrites a switch to what it keeps, and says how many cases the ranges ruled out.
+///
+/// A switch whose default nothing reaches takes the place the most cases go to as its default,
+/// and those cases leave. A switch left with no cases is a jump to its default, because a decision
+/// tree over nothing is the default arm and document 24's lowering would rather not be handed one.
+fn shrink(func: &mut Func, term: Inst, keep: &Keep) -> usize {
+    let Extra::Switch(at) = func[term].extra else { return 0 };
+    let info = func[at];
+    let all = func[info.targets].to_vec();
+    let values = func[info.cases].to_vec();
+    let removed = values.len() - keep.cases.len();
+    // The default is the first target and the cases follow it in the order their values are in,
+    // so the target for the case in place `at` is one past it.
+    let mut arms: Vec<(Imm, BlockCall)> =
+        keep.cases.iter().map(|&at| (values[at], all[at + 1])).collect();
+    let default = if keep.covered {
+        let most = busiest(func, &arms);
+        arms.retain(|&(_, call)| !same(func, call, most));
+        most
+    } else {
+        all[0]
+    };
+    if arms.is_empty() {
+        simplify_cfg::jump_to(func, term, default);
+        return removed;
+    }
+    let targets: Vec<BlockCall> =
+        std::iter::once(default).chain(arms.iter().map(|&(_, call)| call)).collect();
+    let cases: Vec<Imm> = arms.iter().map(|&(value, _)| value).collect();
+    let targets = func.push_block_calls(&targets);
+    let cases = func.push_imms(&cases);
+    let fresh = func.add_switch(SwitchInfo { targets, cases });
+    func[term].extra = Extra::Switch(fresh);
+    removed
+}
+
+/// The place the most of these cases go to, the first of them where two tie.
+///
+/// A place is a block and what is passed to it, because two edges into one block passing
+/// different values are two places and only one of them can be the default.
+fn busiest(func: &Func, arms: &[(Imm, BlockCall)]) -> BlockCall {
+    let mut counts: Map<(Block, &[Value]), usize> = Map::default();
+    for &(_, call) in arms {
+        *counts.entry((call.block, &func[call.args])).or_default() += 1;
+    }
+    let mut best = arms[0].1;
+    let mut most = 0;
+    for &(_, call) in arms {
+        let count = counts[&(call.block, &func[call.args])];
+        if count > most {
+            best = call;
+            most = count;
+        }
+    }
+    best
+}
+
+/// Whether two edges go to the same block with the same values.
+fn same(func: &Func, a: BlockCall, b: BlockCall) -> bool {
+    a.block == b.block && func[a.args] == func[b.args]
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_ir::{Block, Builder, Flags, Func, IntPred, Opcode, Signature, Type};
+
+    use super::Prune;
+    use crate::stats::Kind;
+    use crate::{Fuel, Pass, Stats};
+
+    /// Runs the pass with as much fuel as it wants.
+    fn prune(func: &mut Func) -> Stats {
+        Prune.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// The opcode of a block's terminator.
+    fn terminator(func: &Func, block: usize) -> Opcode {
+        let block = Block::from_usize(block);
+        func[func.terminator(block).expect("every block here has one")].opcode
+    }
+
+    /// The blocks a block's terminator names, in the order it names them.
+    fn goes_to(func: &Func, block: usize) -> Vec<usize> {
+        let block = Block::from_usize(block);
+        let term = func.terminator(block).expect("every block here has one");
+        func.successors(term).map(|call| call.block.index()).collect()
+    }
+
+    /// Two nested branches on the same value, the outer one narrowing it for the inner one.
+    ///
+    /// Block 0 branches on `x <outer> bound`, block 1 branches on `x <inner> 5`, and blocks 2 and
+    /// 3 are the inner branch's two arms. Block 4 is where the outer branch goes when it does not
+    /// hold, and it is there so that the inner block has one predecessor rather than being the
+    /// entry's only successor.
+    fn nested(outer: IntPred, bound: i128, inner: IntPred) -> Func {
+        let mut names = Interner::new();
+        let ty = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[ty]));
+        let entry = func.create_block();
+        let middle = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let away = func.create_block();
+        let x = func.append_param(entry, ty);
+        let mut build = Builder::new(&mut func, entry);
+        let edge = build.iconst(ty, bound);
+        let first = build.icmp(outer, x, edge);
+        build.br_if(first, middle, &[], away, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        let five = build.iconst(ty, 5);
+        let second = build.icmp(inner, x, five);
+        build.br_if(second, arms[0], &[], arms[1], &[]);
+        for block in [arms[0], arms[1], away] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        func
+    }
+
+    #[test]
+    fn a_branch_the_ranges_settle_becomes_a_jump_to_the_arm_they_settle_on() {
+        // `if (x > 10) { if (x > 5) ... }`. On the edge into block 1 the value is at least 11, so
+        // the second comparison holds there whatever else is true, and the arm it does not take
+        // stops being reachable.
+        let mut func = nested(IntPred::Sgt, 10, IntPred::Sgt);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::Jump);
+        assert_eq!(goes_to(&func, 1), [2]);
+        assert_eq!(stats.count(Kind::Optimized, super::BRANCH_DECIDED), 1);
+    }
+
+    #[test]
+    fn a_branch_the_ranges_settle_the_other_way_jumps_to_the_other_arm() {
+        // `if (x > 10) { if (x < 5) ... }`, where the inner comparison cannot hold. The pass has
+        // to name the second target rather than the first, and getting that backwards would build
+        // a compiler that quietly runs the wrong arm.
+        let mut func = nested(IntPred::Sgt, 10, IntPred::Slt);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::Jump);
+        assert_eq!(goes_to(&func, 1), [3]);
+    }
+
+    #[test]
+    fn a_branch_the_ranges_do_not_settle_keeps_its_two_arms() {
+        // `if (x > 10) { if (x > 20) ... }` the other way round. Being over 10 says nothing about
+        // being over 20, so both arms are still reachable and the branch stays.
+        let mut func = nested(IntPred::Sgt, 3, IntPred::Sgt);
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::BrIf);
+        assert_eq!(stats.count(Kind::Missed, super::BRANCH_UNDECIDED), 2);
+    }
+
+    #[test]
+    fn a_branch_on_a_constant_is_left_for_the_control_flow_pass() {
+        // Two passes writing the same rewrite is two answers to check, and this one is section
+        // 21.1's rather than section 10's. It is refused before the oracle is asked at all.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let mut build = Builder::new(&mut func, entry);
+        let always = build.iconst(Type::int(1), 1);
+        build.br_if(always, arms[0], &[], arms[1], &[]);
+        for block in arms {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::BrIf);
+        assert_eq!(stats.count(Kind::Missed, super::BRANCH_UNDECIDED), 0);
+    }
+
+    /// A switch on `x & mask`, with those case values and a default.
+    fn masked(mask: i128, cases: &[i128]) -> Func {
+        let places: Vec<usize> = (0..cases.len()).collect();
+        onto(mask, cases, &places)
+    }
+
+    /// A switch on `x & mask` whose case in place `i` goes to arm `places[i]`.
+    ///
+    /// Block 0 is the entry, block 1 the default, and the arms are blocks 2 onwards.
+    fn onto(mask: i128, cases: &[i128], places: &[usize]) -> Func {
+        let mut names = Interner::new();
+        let ty = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[ty]));
+        let entry = func.create_block();
+        let default = func.create_block();
+        let count = places.iter().max().map_or(0, |&last| last + 1);
+        let arms: Vec<Block> = (0..count).map(|_| func.create_block()).collect();
+        let x = func.append_param(entry, ty);
+        let mut build = Builder::new(&mut func, entry);
+        let bits = build.iconst(ty, mask);
+        let narrowed = build.binary(Opcode::And, x, bits, Flags::NONE);
+        let pairs: Vec<(i128, Block)> =
+            cases.iter().copied().zip(places.iter().map(|&at| arms[at])).collect::<Vec<_>>();
+        build.switch(narrowed, default, &pairs);
+        for block in std::iter::once(default).chain(arms) {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        func
+    }
+
+    #[test]
+    fn a_case_the_switched_value_cannot_hold_leaves_the_switch() {
+        // `switch (x & 3) { case 0: case 2: case 7: }`. The operand is in [0, 3], so the last
+        // case names an arm nothing reaches, and the two that are left are what document 24's
+        // lowering gets to decide over.
+        let mut func = masked(3, &[0, 2, 7]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
+        // The default first and the surviving cases after it, in the order they were in.
+        assert_eq!(goes_to(&func, 0), [1, 2, 3]);
+        assert_eq!(stats.count(Kind::Optimized, super::CASE_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_switch_no_case_of_which_can_be_reached_jumps_to_its_default() {
+        // Every case is outside the operand's range, so the whole node goes rather than an arm
+        // of it. What is left is the default, which is where control was always going.
+        let mut func = masked(1, &[5, 9]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Jump);
+        assert_eq!(goes_to(&func, 0), [1]);
+        assert_eq!(stats.count(Kind::Optimized, super::SWITCH_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_default_the_cases_cover_gives_way_to_the_first_case() {
+        // `switch (x & 3)` with all four values as cases. Nothing is left for the default, so the
+        // first case takes its place and leaves the case list, and three compares are left of four.
+        let mut func = masked(3, &[0, 1, 2, 3]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
+        assert_eq!(goes_to(&func, 0), [2, 3, 4, 5]);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CASE_REMOVED), 0);
+    }
+
+    #[test]
+    fn a_default_the_cases_cover_gives_way_to_the_place_most_of_them_go() {
+        // Cases 1 and 2 share an arm, so that arm is the default and both of them leave.
+        let mut func = onto(3, &[0, 1, 2, 3], &[0, 1, 1, 2]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(goes_to(&func, 0), [3, 2, 4]);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_switch_whose_cases_all_go_one_way_and_cover_the_range_is_a_jump() {
+        // What `switch_conv` leaves for a table: every case at the one load. With the default gone
+        // there is nothing to decide, and the range check in front of the table goes with it.
+        let mut func = onto(3, &[0, 1, 2, 3], &[0, 0, 0, 0]);
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Jump);
+        assert_eq!(goes_to(&func, 0), [2]);
+        assert_eq!(stats.count(Kind::Optimized, super::SWITCH_REMOVED), 0);
+    }
+
+    #[test]
+    fn a_default_is_covered_once_the_cases_outside_the_range_are_gone() {
+        // Case 9 is ruled out and the four left cover `[0, 3]`, so both happen to one switch.
+        let mut func = masked(3, &[0, 1, 9, 2, 3]);
+        let stats = prune(&mut func);
+        assert_eq!(goes_to(&func, 0), [2, 3, 5, 6]);
+        assert_eq!(stats.count(Kind::Optimized, super::CASE_REMOVED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::DEFAULT_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_default_one_value_can_still_reach_is_kept() {
+        let mut func = masked(3, &[0, 1, 3]);
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(goes_to(&func, 0), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_switch_whose_cases_the_operand_can_all_hold_is_kept_whole() {
+        let mut func = masked(7, &[0, 2, 7]);
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
+        assert_eq!(stats.count(Kind::Missed, super::NO_CASE_REMOVED), 1);
+    }
+
+    #[test]
+    fn a_branch_two_values_are_related_on_settles_without_either_being_pinned_down() {
+        // The oracle's half rather than the ranges' half, and the case section 10.3 says it is
+        // for. Nothing here says what `a` or `b` can be, so no interval settles the second
+        // comparison. What settles it is that the edge into block 1 recorded that `a < b`.
+        let mut names = Interner::new();
+        let ty = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[ty, ty]));
+        let entry = func.create_block();
+        let middle = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let away = func.create_block();
+        let a = func.append_param(entry, ty);
+        let b = func.append_param(entry, ty);
+        let mut build = Builder::new(&mut func, entry);
+        let first = build.icmp(IntPred::Slt, a, b);
+        build.br_if(first, middle, &[], away, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        // A second comparison of the same two values, written again rather than reused, which is
+        // what a program with the test in two places hands the optimizer.
+        let second = build.icmp(IntPred::Sle, a, b);
+        build.br_if(second, arms[0], &[], arms[1], &[]);
+        for block in [arms[0], arms[1], away] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::Jump);
+        assert_eq!(goes_to(&func, 1), [2]);
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_zero_is_a_branch_that_always_holds() {
+        // `if (x == 5) { if ((_Bool)x) ... }`. The condition is a truncation rather than a
+        // comparison, so what answers is the range on its own: on the edge into block 1 the value
+        // is exactly five, five truncated to one bit is one, and one is not zero.
+        let mut names = Interner::new();
+        let wide = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[wide]));
+        let entry = func.create_block();
+        let middle = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let away = func.create_block();
+        let x = func.append_param(entry, wide);
+        let mut build = Builder::new(&mut func, entry);
+        let five = build.iconst(wide, 5);
+        let is_five = build.icmp(IntPred::Eq, x, five);
+        build.br_if(is_five, middle, &[], away, &[]);
+        let mut build = Builder::new(&mut func, middle);
+        let bit = build.unary(Opcode::Trunc, x, Type::int(1));
+        build.br_if(bit, arms[0], &[], arms[1], &[]);
+        for block in [arms[0], arms[1], away] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+        let stats = prune(&mut func);
+        assert!(stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::Jump);
+        assert_eq!(goes_to(&func, 1), [2]);
+    }
+
+    /// The module that text is with the pass run over every function in it, printed.
+    fn pruned(body: &str) -> String {
+        let mut names = Interner::new();
+        let text = format!(
+            "; ModuleID = 't.c'\n; format 0\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"\n{body}"
+        );
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let ids: Vec<_> = module.funcs().collect();
+        for id in ids {
+            if !module[id].is_declaration() {
+                prune(&mut module[id]);
+            }
+        }
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        rucc_ir::print(&module, &names)
+    }
+
+    /// A compare and exchange loop. The select is made on every turn and read only on the edge
+    /// where the exchange failed, so that edge takes what the exchange saw.
+    const EXCHANGE: &str = r#"
+func @inc(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    jump block1(%1)
+
+block1(%2: i32):
+    %3 = iconst.i32 1
+    %4 = add %2, %3
+    %5, %6 = inline_asm.(i1, i32).volatile "lock cmpxchgl %3,%1\0a\09setz %b0", "=q,+m,+a,r", "memory"(%0, %2, %4)
+    %7 = iconst.i1 -1
+    %8 = xor %5, %7
+    %9 = select.i32 %8, %6, %2
+    br_if %5, block2, block3
+
+block2:
+    return
+
+block3:
+    jump block1(%9)
+}
+"#;
+
+    #[test]
+    fn a_select_the_ranges_settle_where_it_is_read_is_read_as_the_arm_they_settle_on() {
+        let out = pruned(EXCHANGE);
+        assert!(out.contains("jump block1(%6)"), "{out}");
+    }
+
+    /// The same select read where the exchange may have gone either way is still the select.
+    #[test]
+    fn a_select_read_where_the_ranges_do_not_settle_it_stays() {
+        let branch = "br_if %5, block2, block3";
+        let out =
+            pruned(&EXCHANGE.replace(branch, &format!("store %9 -> %0, align 4\n    {branch}")));
+        assert!(out.contains("store %9"), "{out}");
+        assert!(out.contains("jump block1(%6)"), "{out}");
+    }
+
+    #[test]
+    fn a_function_with_no_body_is_left_alone() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let stats = prune(&mut func);
+        assert!(!stats.changed());
+    }
+
+    #[test]
+    fn no_fuel_leaves_the_branch_where_it_is() {
+        let mut func = nested(IntPred::Sgt, 10, IntPred::Sgt);
+        let stats =
+            Prune.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
+        assert!(!stats.changed());
+        assert_eq!(terminator(&func, 1), Opcode::BrIf);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
+    }
+}

@@ -1,0 +1,258 @@
+//! What happens to a body C 6.7.4p7 says this unit emits nothing for, when this unit calls it.
+//!
+//! Design: `spec/08-ir.md` section 8.1.
+//!
+//! The bargain an inline definition offers is that the call is replaced by the body, so nobody
+//! ever has to resolve the name and no object file has to hold one. A compiler that inlines keeps
+//! its end of it. This one inlines only a function marked `always_inline`, so a call left standing
+//! is a call to a name nothing defines and the program fails at the link on a function it can see
+//! the body of. micropython is
+//! a program that does exactly that: `py/misc.h` writes `MP_COMPRESSED_ROM_TEXT` as `inline
+//! __attribute__((always_inline))`, nothing defines it out of line, and every file that reports an
+//! error calls it.
+//!
+//! So a copy goes out of line, weak, in the units that call one. This reads the listing, because
+//! what matters is which symbols the object file offers and under what binding, and that is only
+//! visible from the outside.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// The target is written down rather than taken from the host, so that the listing this reads is
+/// the same listing on every machine that runs the suite, and so that nothing here depends on the
+/// C library the host happens to have.
+const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// The fixture, written under a directory of its own so that two of these running at once do not
+/// write the same file.
+fn fixture(what: &str, source: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rucc-inline-defs-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    path
+}
+
+/// The assembly the compiler writes for that source, at the level asked for.
+fn asm(what: &str, level: &str, source: &str) -> String {
+    let path = fixture(what, source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .arg(level)
+        .args(["-S", "-o", "-"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "the compiler refused the fixture:\n{said}");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    String::from_utf8(out.stdout).expect("what the compiler writes is text")
+}
+
+#[test]
+fn an_inline_definition_this_file_calls_is_emitted_weak() {
+    let source = "\
+inline __attribute__((always_inline)) int pick(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    return pick(1);
+}
+";
+    for level in ["-O0", "-O1", "-O2"] {
+        let text = asm("called", level, source);
+        // Defined, so the call has something to reach, and weak, so the several files that each
+        // include the header this came out of do not hand the linker several definitions of one
+        // name. A file that does hold the real external definition beats every one of these,
+        // because a strong definition beats a weak one.
+        assert!(text.contains("\t.weak\tpick\n"), "{level}:\n{text}");
+        assert!(text.contains("\npick:\n"), "{level}:\n{text}");
+        assert!(!text.contains("\t.globl\tpick\n"), "{level}:\n{text}");
+    }
+}
+
+#[test]
+fn an_inline_definition_nothing_in_the_file_calls_is_still_emitted_as_nothing() {
+    let source = "\
+inline int unused(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    return 0;
+}
+";
+    let text = asm("unused", "-O2", source);
+    // Which is what keeps a file that includes a header full of these from carrying a copy of
+    // every one of them. glibc writes `vprintf`, `putchar`, `getchar` and a dozen more that way,
+    // and a program that calls one of them should pay for one of them.
+    assert!(!text.contains("\nunused:\n"), "{text}");
+    assert!(!text.contains("\t.weak\tunused\n"), "{text}");
+    assert!(!text.contains("\t.globl\tunused\n"), "{text}");
+}
+
+#[test]
+fn a_definition_this_file_does_emit_is_offered_to_the_linker_as_it_was() {
+    let source = "\
+inline int pick(int x) {
+    return x + 1;
+}
+
+int pick(int x);
+
+int main(void) {
+    return pick(1);
+}
+";
+    let text = asm("external", "-O2", source);
+    // The plain declaration underneath makes this an external definition under 6.7.4p7, so there
+    // is nothing to copy and nothing to weaken: it is the definition of the name and it is
+    // offered as one.
+    assert!(text.contains("\t.globl\tpick\n"), "{text}");
+    assert!(!text.contains("\t.weak\tpick\n"), "{text}");
+}
+
+#[test]
+fn a_static_inline_is_not_one_of_these() {
+    let source = "\
+static inline int pick(int x) {
+    return x + 1;
+}
+
+int (*const taken)(int) = pick;
+
+int main(void) {
+    return pick(1);
+}
+";
+    let text = asm("static", "-O2", source);
+    // 6.7.4p7 is about a name with external linkage, so a `static inline` was never an inline
+    // definition and is emitted the way any other `static` function this file reaches is.
+    // Weakening one would be offering the linker a name the program said nothing outside may
+    // reach. The address is taken so that the body stays: a `static` function reached by one call
+    // and nothing else is inlined into it and not emitted, which is not what this is about.
+    assert!(text.contains("\npick:\n"), "{text}");
+    assert!(!text.contains("\t.weak\tpick\n"), "{text}");
+    assert!(!text.contains("\t.globl\tpick\n"), "{text}");
+}
+
+#[test]
+fn what_an_inline_definition_reaches_is_emitted_with_it() {
+    let source = "\
+__attribute__((noinline)) static int helper(int x) {
+    return x + 1;
+}
+
+inline int pick(int x) {
+    return helper(x) + helper(x + 1);
+}
+
+int main(void) {
+    return pick(1);
+}
+";
+    let text = asm("reaches", "-O2", source);
+    // `helper` is `noinline`, since gcc and this compiler both copy a body this small into each
+    // caller and then emit nothing for it.
+    // The copy is a body like any other and the names in it are references like any other, so the
+    // `static` function it calls has to be emitted too. Walking the file without reaching through
+    // one of these would leave the copy calling a name this object does not define, which is the
+    // link error this is here to stop, one step further in.
+    assert!(text.contains("\npick:\n"), "{text}");
+    assert!(text.contains("\nhelper:\n"), "{text}");
+}
+
+#[test]
+fn a_static_function_only_an_uncalled_inline_definition_reaches_is_left_out() {
+    let source = "\
+static int helper(int x) {
+    return x + 1;
+}
+
+inline int unused(int x) {
+    return helper(x);
+}
+
+int main(void) {
+    return 0;
+}
+";
+    let text = asm("unreached", "-O2", source);
+    // The other side of the same walk. Nothing calls the inline definition, so no copy of it goes
+    // out of line, so nothing calls the `static` function either and neither of them is emitted.
+    assert!(!text.contains("\nunused:\n"), "{text}");
+    assert!(!text.contains("\nhelper:\n"), "{text}");
+}
+
+#[test]
+fn a_gnu_inline_definition_this_file_calls_is_never_copied_out_of_line() {
+    // What glibc's `_FORTIFY_SOURCE` headers write for `memcpy`. The builtin inside becomes a call
+    // to `memcpy` again, so a copy of this body out of line would be a `memcpy` that calls itself,
+    // and every test of libsodium from `-O1` up died in one.
+    let source = "\
+typedef unsigned long size_t;
+extern void *memcpy(void *, const void *, size_t);
+extern __inline __attribute__((__always_inline__, __gnu_inline__)) void *
+memcpy(void *d, const void *s, size_t n) {
+    return __builtin___memcpy_chk(d, s, n, __builtin_object_size(d, 0));
+}
+extern __inline __attribute__((__gnu_inline__)) int pick(int x) {
+    return x + 1;
+}
+
+void copy(char *d, const char *s, size_t n) {
+    memcpy(d, s, n);
+}
+
+int main(void) {
+    return pick(1);
+}
+";
+    for level in ["-O0", "-O1", "-O2"] {
+        let text = asm("gnu", level, source);
+        // The external definition of each is in some other object, which is what `extern inline`
+        // promises under this reading, so this file offers neither name.
+        for name in ["memcpy", "pick"] {
+            assert!(!text.contains(&format!("\n{name}:\n")), "{level}:\n{text}");
+            assert!(!text.contains(&format!("\t.weak\t{name}\n")), "{level}:\n{text}");
+            assert!(!text.contains(&format!("\t.globl\t{name}\n")), "{level}:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn noinline_written_beside_the_star_keeps_the_call() {
+    // `void *NOINLINE test4a(char *)` in gcc's `20010122-1.c`, where the attribute sits after the
+    // `*` of the return type. gcc gives an attribute only a declaration can carry to the
+    // declaration wherever it was written, so the call stays a call, and the test depends on it:
+    // `__builtin_return_address (1)` inside a body that was inlined answers for the wrong frame.
+    let source = "\
+void *__attribute__((noinline)) leaf(void) {
+    return __builtin_return_address(0);
+}
+
+void *__attribute__((noinline)) declared(void);
+
+void *call(void) {
+    return leaf();
+}
+
+void *other(void) {
+    return declared();
+}
+
+void *declared(void) {
+    return __builtin_return_address(0);
+}
+";
+    for level in ["-O1", "-O2", "-O3"] {
+        let text = asm("starred-noinline", level, source);
+        let body = text.split("\ncall:\n").nth(1).expect("call is defined");
+        let body = body.split(".size\tcall,").next().unwrap_or(body);
+        assert!(body.contains("leaf"), "{level}: the call to leaf stays:\n{text}");
+        let body = text.split("\nother:\n").nth(1).expect("other is defined");
+        let body = body.split(".size\tother,").next().unwrap_or(body);
+        assert!(body.contains("declared"), "{level}: the call to declared stays:\n{text}");
+    }
+}

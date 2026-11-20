@@ -1,0 +1,27 @@
+[package]
+name = "rucc-pp"
+description = "Macro expansion, conditionals, include resolution, and the header cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Ranks 0, 1, 4 and 5, all below this crate's rank 6. Dependencies are added when they are
+# used, not in advance, so that the graph `cargo xtask layers` reads is the real one.
+[dependencies]
+rucc-base.workspace = true
+rucc-diag.workspace = true
+rucc-gnu.workspace = true
+rucc-lex.workspace = true
+rucc-session.workspace = true
+rucc-target.workspace = true
+rucc-tuple.workspace = true

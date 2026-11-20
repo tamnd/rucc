@@ -1,0 +1,2626 @@
+//! Constant folding: an instruction whose operands are all constants becomes a constant.
+//!
+//! The smallest transformation there is, and the one the rest of the middle end leans on. Every
+//! later pass produces constants where the source had none, and none of them should have to
+//! evaluate the arithmetic itself.
+//!
+//! It is worth having before any of them because the lowering walk produces constant arithmetic
+//! that nothing in the C asked for. The usual arithmetic conversions widen a literal to the type
+//! of the other operand, so `long y; y + 7` lowers to a 32 bit constant, a `sext` of it and an
+//! add, and nothing downstream can see that the operand of the add is a number. On x86-64 that
+//! costs two instructions and a register on every operation between a wide integer and a
+//! literal, which is most address arithmetic and most loop bounds in real code. That is issue
+//! 378.
+//!
+//! The bit counting instructions are here for a related reason. Nothing in the backend selects an
+//! instruction for any of them yet, so each one that survives to the end becomes the twenty odd
+//! instructions of the software expansion in `rucc_codegen::expand`, inlined at the site. A
+//! `__builtin_clzll` on a value the compiler can already see is the worst version of that: the
+//! answer is a number between nought and sixty four and the code that computes it is the largest
+//! thing in the function. Folding it costs one arm here. That is part of issue 310.
+//!
+//! # How it rewrites
+//!
+//! In place. An instruction that folds keeps its result value and becomes an `iconst`, because
+//! the value it produced already has the right type and every use of it is already correct. So
+//! there is no rewriting of uses, no new value, and nothing for a later pass to have to know
+//! about. What is left behind is the old operand, now used by nothing, which costs nothing in
+//! the output because the backend materializes a constant where it is wanted rather than where
+//! the IR wrote it, and which dead code elimination will take out of the printed IR when there
+//! is one.
+//!
+//! # What it does not fold
+//!
+//! Not a divide or a remainder in either of the two cases the language leaves undefined, a zero
+//! divisor and the most negative value divided by minus one. Those are left for the machine to
+//! trap on, as they would have been. Every other divide of two constants is folded, and has to be:
+//! `sizeof (a) / sizeof (a[0])` is a division the lowering writes as one, and the kernel's
+//! `BUILD_BUG_ON (i >= ARRAY_SIZE (table))` is a call to a function declared `error` that is only
+//! gone once that division is a number the comparison can be decided against.
+//!
+//! Not a floating point operation whose answer depends on the environment at run time. An add, a
+//! subtract, a multiply, a divide and a conversion of constants are folded as gcc folds them in
+//! `const_binop`: never when an operand is a NaN, and under `-ftrapping-math`, the default, never
+//! when the answer raises an exception the program could look at, an invalid operation, a divide
+//! by zero or an overflow. Under `-frounding-math` an inexact answer is not folded either, because
+//! it is only the answer in the rounding mode the compiler would have to guess. The function
+//! carries both flags as attributes, so an inlined body is judged by the flags it was built with.
+//! The kernel needs this: it writes `1.5 * DELAY` where it means an integer and builds with
+//! `-mgeneral-regs-only` on arm64, where a `double` left for the machine is a refused build.
+//!
+//! Negation is folded always. 754 says a negation flips the sign bit and copies every other bit,
+//! for every input including a NaN and a zero, so it is exact, it raises nothing and it never
+//! consults the rounding mode: there is no decision about the environment in it to get wrong. The
+//! reason to bother is that C has no negative floating constant. Every one of them is a unary
+//! minus applied to a positive one, so `-1.0` arrives as an `fneg` of an `fconst`, and without
+//! this the back end makes a constant, a mask and three moves through a general register out of
+//! what should be one load. That is every negative floating literal in every program, and it is
+//! issue 1427.
+//!
+//! A bitcast of a constant is folded for the same reason and pays for the same kind of code. It is
+//! the same bits read as another type of the same width, so there is nothing to decide about it
+//! either, and what it unblocks is `fabs` and `copysign` of a constant: neither is a call, the
+//! front end lowers both to a mask over the bits, and without this the mask and the two bitcasts
+//! around it survive to the back end computing a number the compiler already has.
+//!
+//! A conversion from floating point to an integer is folded under any flags. C says the conversion
+//! discards the fractional part, so the rounding is the language's rather than the environment's
+//! and nothing anybody sets at run time reaches it. What is left is a value whose truncation does
+//! not fit the destination type, and a NaN, and both of those are undefined rather than a number:
+//! `rucc_base::float::Float::to_integer` reports each as `Status::INVALID` and neither folds, which
+//! is the rule below for an add that overflows under `nsw` applied to the same kind of program.
+//! That is issue 1357.
+//!
+//! Not an operation that overflows under `nsw` or `nuw`. The result there is poison, so any
+//! answer would be a valid refinement, and quietly picking the wrapping one hides a program that
+//! has stepped outside the language from the sanitizer that should be reporting it.
+//!
+//! Not floating point comparisons. An ordered predicate and an unordered one differ only on a NaN,
+//! and a comparison of a NaN may raise an exception the program can look at, so the answer is the
+//! whole of what makes them two predicates, and evaluating it is the floating point decision rather
+//! than a step around it.
+//!
+//! Integer comparisons are folded, and were not until issue 352 was closed. An `icmp` produces an
+//! `i1`, and while nothing lowered one that was left standing on its own, folding one would have
+//! turned working code into code that does not build. There is now a rule for a one bit constant
+//! and one for a byte holding it, so the constant this leaves behind lowers wherever the
+//! comparison did.
+
+use rucc_base::float::{Float, Format, Status};
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Idx, Symbol};
+use rucc_diag::Span;
+use rucc_ir::{
+    AttrSet, Block, BlockCall, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred,
+    Module, Opcode, SymbolRef, Type, Value,
+};
+
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
+
+/// Recorded once for each instruction that became a constant.
+const FOLDED: &str = "instruction with constant operands folded to a constant";
+
+/// Recorded once for each operation on a block parameter that became a parameter of its own.
+const THROUGH: &str = "operation on a parameter of constants folded into a new parameter";
+
+/// Recorded for an instruction that would have folded if there had been fuel for it.
+///
+/// Not a missed optimization in the ordinary sense, since the fuel is a person deliberately
+/// stopping the pass. It is here because it is the number a bisection is searching for: the count
+/// of sites past the cut is how far there is left to go.
+const NO_FUEL: &str = "instruction not folded, the pass ran out of fuel";
+
+/// Recorded once for each conversion of a block parameter that was folded on the edges into the
+/// block.
+const AT_EDGES: &str = "conversion of a parameter folded on each edge that passes a constant";
+
+/// The pass. It holds nothing, because folding needs to know nothing beyond the instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold;
+
+impl Pass for Fold {
+    fn name(&self) -> &'static str {
+        "fold"
+    }
+
+    fn describe(&self) -> &'static str {
+        "an instruction whose operands are all constants becomes a constant"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
+    fn preserves(&self) -> Preserved {
+        // An instruction becomes a constant where it stands. No block moves, no edge moves,
+        // and a terminator is not one of the instructions this folds, so every analysis in the
+        // cache is about the same graph afterwards as it was before. Not the liveness, though:
+        // the operands the folded instruction read are read by nobody now, and a value whose
+        // last reader went is live over less of the function than it was.
+        Preserved::ALL.without(Analysis::Liveness)
+    }
+
+    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        fold_in(func, fuel)
+    }
+}
+
+/// The whole of the pass, without the analysis cache it does not read.
+///
+/// Apart so that [`crate::ipcp`] can fold a function it has just put a constant into. The
+/// arithmetic a constant parameter enables is what makes that propagation reach a second level, and
+/// running this rather than evaluating it there is what keeps the arithmetic written down once.
+pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
+    let blocks: Vec<Block> = func.blocks().collect();
+    let mut stats = Stats::new();
+    let mut forward = Map::default();
+    let mut split_up = Vec::new();
+    // One list of instructions, filled again for each block, not one list made for each block.
+    let mut insts: Vec<Inst> = Vec::new();
+    for block in blocks {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
+            if let Some(both) = overflow(func, inst) {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    continue;
+                }
+                split(func, inst, both, &mut forward);
+                split_up.push(inst);
+                stats.optimized(FOLDED);
+                continue;
+            }
+            let Some(folded) = evaluate(func, inst) else { continue };
+            if !fuel.take() {
+                // Out of fuel, which is a request to stop transforming rather than to stop
+                // looking. Continuing the walk costs nothing and keeps the count of what
+                // could have been folded the same at every fuel setting, which is what makes
+                // a bisection over it monotonic.
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            write(func, inst, folded);
+            stats.optimized(FOLDED);
+        }
+    }
+    through_params(func, fuel, &mut stats, &mut forward, &mut split_up);
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+        // Gone here rather than left for dead code, because `crate::constant_p` runs this until a
+        // round folds nothing, and an operation left behind on two constants would be folded
+        // again every round and keep that from ever happening.
+        for inst in split_up {
+            func.remove_inst(inst);
+        }
+    }
+    at_edges(func, fuel, &mut stats);
+    stats
+}
+
+/// The most edges into a block for which an operation is folded through its parameter.
+///
+/// Each edge gets one constant and one more argument, so the cost grows with the number of edges.
+/// The cases that pay have a few edges: a switch or an `if` chain that picks a number, then one
+/// call that was inlined.
+const EDGES: usize = 8;
+
+/// Folds an operation on a block parameter whose arguments are all constants into a new parameter
+/// of the same block. That new parameter gets the answer for each edge.
+///
+/// This is LLVM's `foldOpIntoPhi`. gcc gets the same result from its PRE pass, which moves the
+/// operation through the merge into each edge, where it folds. NetBSD's `citrus_prop.c` divides
+/// `UINT64_MAX` by a `base` that is 8, 10 or 16 after inlining. gcc folds each quotient and
+/// remainder to a constant. Without this fold, rucc calls `__udivdi3` and `__umoddi3` on i386, and
+/// `libBIG5.so` needs `libgcc_s.so.1` in the rucc build only. That is tamnd/rucc#4562.
+///
+/// The operation is one that [`arithmetic`] evaluates, with two operands. Each operand is a
+/// constant or a parameter of one block, and at least one is a parameter. An operand of a division
+/// can also be a widening or a narrowing of one, as `UINT64_MAX / base` is when `base` is an `int`.
+/// The answer on each edge is [`arithmetic`] on what that edge passes. So a division by zero and
+/// the most negative value divided by minus one do not fold, and then nothing changes.
+///
+/// An edge can also come from a [`forwarder`] that passes its own parameters on. Then the answers
+/// go on the edges into the forwarder, and the forwarder passes a new parameter of its own on.
+///
+/// A new parameter costs a copy on each edge. That is less than the operation it replaces when the
+/// operation is a division or a remainder, so those fold always. Any other operation folds only
+/// when it is the one reader of each parameter it reads. Then the old parameter goes away with it.
+///
+/// The result is pointed at the new parameter through `forward`, and the operation is put in
+/// `gone`, so that the caller takes both of them out with the rest.
+fn through_params(
+    func: &mut Func,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+    forward: &mut Map<Value, Value>,
+    gone: &mut Vec<Inst>,
+) {
+    let Some(entry) = func.entry() else { return };
+    let mut found: Vec<(Inst, Block)> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if let Some(merge) = through(func, inst, entry) {
+                found.push((inst, merge));
+            }
+        }
+    }
+    // Most functions have no candidate at all, so the edges and the use counts are found only
+    // when there is one.
+    if found.is_empty() {
+        return;
+    }
+    let edges = crate::simplify_cfg::incoming(func);
+    let addressed = crate::copy::addressed(func);
+    let uses = uses::count(func);
+    for (inst, merge) in found {
+        if addressed.contains(&merge) {
+            continue;
+        }
+        let Some(into) = edges.get(&merge) else { continue };
+        if into.is_empty() || into.len() > EDGES {
+            continue;
+        }
+        let Some(ways) = answers(func, inst, merge, into, &edges, entry, &addressed, &uses) else {
+            continue;
+        };
+        if !fuel.take() {
+            stats.missed(NO_FUEL);
+            continue;
+        }
+        let result = result_of(func, inst);
+        let ty = func[result].ty;
+        let span = func.span(inst);
+        let param = func.append_param(merge, ty);
+        for (&(from, at), way) in into.iter().zip(ways) {
+            let value = match way {
+                Way::Direct(answer) => answer_before(func, from, answer, ty, span),
+                Way::Forwarded(answers) => {
+                    let passed = func.append_param(from, ty);
+                    let outer = edges.get(&from).map_or(&[][..], Vec::as_slice);
+                    for (&(above, over), answer) in outer.iter().zip(answers) {
+                        let value = answer_before(func, above, answer, ty, span);
+                        pass(func, over, value);
+                    }
+                    passed
+                }
+            };
+            pass(func, at, value);
+        }
+        forward.insert(result, param);
+        gone.push(inst);
+        stats.optimized(THROUGH);
+    }
+}
+
+/// How the answer of a folded operation gets to the merge on one edge.
+enum Way {
+    /// The edge passes constants, and this is the answer on it.
+    Direct(Imm),
+    /// The edge comes from a block that only passes its own parameters on to the merge. These are
+    /// the answers on each edge into that block, in the order of its edges.
+    Forwarded(Vec<Imm>),
+}
+
+/// A constant with the answer, put at the end of `from` before its branch.
+fn answer_before(func: &mut Func, from: Block, answer: Imm, ty: Type, span: Span) -> Value {
+    let term = func.terminator(from).expect("a block with an edge out ends in a branch");
+    let imm = func.add_imm(answer);
+    let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+    let made = func.create_inst(data, &[ty], span);
+    func.insert_before(made, term);
+    func[made].results().next().expect("a constant is one value")
+}
+
+/// Adds `value` to the end of what the edge at `at` passes.
+fn pass(func: &mut Func, at: Idx<BlockCall>, value: Value) {
+    let call = func[at];
+    let args = func.append_arg(call.args, value);
+    func.set_block_call(at, BlockCall { args, ..call });
+}
+
+/// Whether `block` only jumps to `merge` and does nothing else, so that what it passes on is what
+/// came into it.
+///
+/// `simplify_cfg` keeps such a block when it passes arguments on, because the back end would put
+/// an empty block back on the edge. In `citrus_prop.c` that block is the inner `if` that picks 16
+/// or 8, and the merge sees 10 and a parameter of that block, not three constants.
+fn forwarder(
+    func: &Func,
+    block: Block,
+    merge: Block,
+    entry: Block,
+    addressed: &Set<Block>,
+) -> bool {
+    if block == entry || block == merge || addressed.contains(&block) {
+        return false;
+    }
+    let Some(term) = func.terminator(block) else { return false };
+    func[term].opcode == Opcode::Jump && func.insts(block).count() == 1
+}
+
+/// The block whose parameters this instruction reads, when it is one [`through_params`] can fold.
+fn through(func: &Func, inst: Inst, entry: Block) -> Option<Block> {
+    let data = &func[inst];
+    let foldable = matches!(
+        data.opcode,
+        Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::Shl
+            | Opcode::LShr
+            | Opcode::AShr
+            | Opcode::SDiv
+            | Opcode::UDiv
+            | Opcode::SRem
+            | Opcode::URem
+            | Opcode::ICmp
+    );
+    // A division that can unwind under `-fnon-call-exceptions` has an `unwound` after it, and that
+    // has to stay where the division was.
+    if !foldable || data.results != 1 || func.unwinds_to_pad(inst) {
+        return None;
+    }
+    let ty = func[data.results().next()?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let &[lhs, rhs] = &func[data.args] else { return None };
+    let depth = if divides(data.opcode) { CONVERSIONS } else { 0 };
+    let mut merge = None;
+    for value in [lhs, rhs] {
+        let value = beneath(func, value, depth);
+        match func[value].def {
+            Def::Param { block, .. } if block != entry && merge.is_none_or(|it| it == block) => {
+                merge = Some(block);
+            }
+            _ if constant(func, value).is_some() => {}
+            _ => return None,
+        }
+    }
+    merge
+}
+
+/// How many conversions [`through_params`] looks through on an operand of a division.
+///
+/// The usual arithmetic conversions put one between `UINT64_MAX / base` and the `int` `base`, and
+/// a narrowing and a widening make two.
+const CONVERSIONS: u32 = 2;
+
+/// Whether the operation is a division or a remainder, the operations that fold through a
+/// parameter whatever else reads it.
+fn divides(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem)
+}
+
+/// The value under as many as `depth` widenings and narrowings of this one.
+fn beneath(func: &Func, value: Value, depth: u32) -> Value {
+    let mut value = value;
+    for _ in 0..depth {
+        let Some(inner) = converted(func, value) else { break };
+        value = inner;
+    }
+    value
+}
+
+/// What this value is a widening or a narrowing of, if it is one.
+fn converted(func: &Func, value: Value) -> Option<Value> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::SExt | Opcode::ZExt | Opcode::Trunc) {
+        return None;
+    }
+    func[data.args].first().copied()
+}
+
+/// The answer of the operation on each edge into `merge`, in the order of `into`, or nothing if
+/// one edge does not fold or the fold does not pay.
+///
+/// An edge that does not pass constants can come from a [`forwarder`]. Then the answers are
+/// found on the edges into the forwarder. All the edges with an answer count against [`EDGES`].
+#[expect(clippy::too_many_arguments, reason = "each is a different fact the fold reads")]
+fn answers(
+    func: &Func,
+    inst: Inst,
+    merge: Block,
+    into: &[(Block, Idx<BlockCall>)],
+    edges: &crate::simplify_cfg::Edges,
+    entry: Block,
+    addressed: &Set<Block>,
+    uses: &[u32],
+) -> Option<Vec<Way>> {
+    let data = &func[inst];
+    let args = &func[data.args];
+    let ty = func[result_of(func, inst)].ty;
+    let index = |value: Value| match func[value].def {
+        Def::Param { block, index } if block == merge => Some(index as usize),
+        _ => None,
+    };
+    let depth = if divides(data.opcode) {
+        CONVERSIONS
+    } else {
+        // An operand of anything else is the parameter itself, and this is its one reader.
+        for &value in args {
+            if index(value).is_none() {
+                continue;
+            }
+            let here = args.iter().filter(|&&arg| arg == value).count();
+            if uses.get(value.index()).copied() != u32::try_from(here).ok() {
+                return None;
+            }
+        }
+        0
+    };
+    let evaluate = |arg: &dyn Fn(usize) -> Option<(Imm, Type)>| {
+        arithmetic(data, args, ty, &|value| on_edge(func, value, &index, arg, depth))
+    };
+    let mut ways = Vec::with_capacity(into.len());
+    let mut count = 0;
+    for &(from, at) in into {
+        let edge = &func[func[at].args];
+        if let Some(answer) = evaluate(&|at| constant(func, *edge.get(at)?)) {
+            ways.push(Way::Direct(answer));
+            count += 1;
+            continue;
+        }
+        if !forwarder(func, from, merge, entry, addressed) {
+            return None;
+        }
+        let outer = edges.get(&from).filter(|outer| !outer.is_empty())?;
+        let mut answers = Vec::with_capacity(outer.len());
+        for &(_, above) in outer {
+            let passed = &func[func[above].args];
+            let arg = |at: usize| {
+                let value = *edge.get(at)?;
+                match func[value].def {
+                    Def::Param { block, index } if block == from => {
+                        constant(func, *passed.get(index as usize)?)
+                    }
+                    _ => constant(func, value),
+                }
+            };
+            answers.push(evaluate(&arg)?);
+        }
+        count += answers.len();
+        ways.push(Way::Forwarded(answers));
+    }
+    (count <= EDGES).then_some(ways)
+}
+
+/// What `value` is when control arrives at the merge, looking through as many as `depth`
+/// conversions to a parameter of the merge or a constant. `arg` gives the constant that the edge
+/// passes to the parameter at an index.
+fn on_edge(
+    func: &Func,
+    value: Value,
+    index: &dyn Fn(Value) -> Option<usize>,
+    arg: &dyn Fn(usize) -> Option<(Imm, Type)>,
+    depth: u32,
+) -> Option<(Imm, Type)> {
+    if let Some(at) = index(value) {
+        return arg(at);
+    }
+    if let Some(found) = constant(func, value) {
+        return Some(found);
+    }
+    let inner = converted(func, value)?;
+    let next = depth.checked_sub(1)?;
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let (number, from) = on_edge(func, inner, index, arg, next)?;
+    let to = func[value].ty;
+    Some((convert(func[inst].opcode, number, from, to), to))
+}
+
+/// The conversions [`at_edges`] folds on the edges into a join. They are the floating point ones,
+/// because a select of their operand type is not always there to take the join away first. An
+/// `f80` has no select on x86-64, and a conversion of one to `f128` is a call.
+fn converts_float(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::FPExt
+            | Opcode::FPTrunc
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::FPToSI
+            | Opcode::FPToUI
+    )
+}
+
+/// Whether this value is an `iconst` or an `fconst`.
+fn is_constant(func: &Func, value: Value) -> Option<Inst> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst).then_some(inst)
+}
+
+/// Folds a floating point conversion of a block parameter on each edge into the block.
+///
+/// The conversion must be the only reader of the parameter, and each edge must pass a constant
+/// that the conversion folds. Then each edge passes the converted constant, the parameter gets
+/// the type of the conversion, and the conversion goes. `(__float128) (c ? 0.5L : -0.5L)` is two
+/// `f80` constants into a join and an `fpext` after it. Without this, the `fpext` stays as a call
+/// to `__extendxftf2` that gcc does not make, because gcc folds a conversion of a conditional into
+/// its two arms in `fold_unary`. That call is the one `sind_r16` in libgfortran made, and the one
+/// symbol the libgfortran of tamnd/rucc-bsd had that gcc's did not.
+///
+/// A parameter that is the value of a declaration is left alone, because the debugging
+/// information says what type the declaration has.
+fn at_edges(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) {
+    let Some(entry) = func.entry() else { return };
+    let uses = uses::count(func);
+    let mut readers: Vec<(Value, Inst)> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            if data.results != 1 || !converts_float(data.opcode) {
+                continue;
+            }
+            let &[arg] = &func[data.args] else { continue };
+            let Def::Param { block: at, .. } = func[arg].def else { continue };
+            if at != entry && uses[arg.index()] == 1 && func.value_decls(arg).next().is_none() {
+                readers.push((arg, inst));
+            }
+        }
+    }
+    if readers.is_empty() {
+        return;
+    }
+    readers.sort_unstable();
+    // The runs of arguments of the edges into each block.
+    let mut edges: Map<Block, Vec<rucc_ir::ValueList>> = Map::default();
+    for block in func.blocks() {
+        let Some(terminator) = func.terminator(block) else { continue };
+        for call in func.successors(terminator) {
+            edges.entry(call.block).or_default().push(call.args);
+        }
+    }
+    let mut forward = Map::default();
+    let mut gone = Vec::new();
+    for (param, conversion) in readers {
+        let Def::Param { block, index } = func[param].def else { continue };
+        let Some(lists) = edges.get(&block) else { continue };
+        let index = index as usize;
+        let incoming: Option<Vec<Value>> =
+            lists.iter().map(|&list| func[list].get(index).copied()).collect();
+        let Some(mut incoming) = incoming else { continue };
+        incoming.sort_unstable();
+        incoming.dedup();
+        if incoming.is_empty() || incoming.iter().any(|&value| is_constant(func, value).is_none()) {
+            continue;
+        }
+        // One converted constant next to each constant, which is where it is sure to be above
+        // every edge that passes the constant. It is kept only if it folds.
+        let ty = func[result_of(func, conversion)].ty;
+        let span = func.span(conversion);
+        let mut made = Vec::new();
+        let mut folds = true;
+        for &value in &incoming {
+            let args = func.push_values(&[value]);
+            let data = InstData { args, ..func[conversion] };
+            let inst = func.create_inst(data, &[ty], span);
+            let after = is_constant(func, value).expect("checked above");
+            func.insert_after(inst, after);
+            made.push((value, inst));
+            match evaluate(func, inst) {
+                Some(folded) => write(func, inst, folded),
+                None => {
+                    folds = false;
+                    break;
+                }
+            }
+        }
+        if !folds || !fuel.take() {
+            if folds {
+                stats.missed(NO_FUEL);
+            }
+            for (_, inst) in made {
+                func.remove_inst(inst);
+            }
+            continue;
+        }
+        let converted: Map<Value, Value> =
+            made.iter().map(|&(value, inst)| (value, result_of(func, inst))).collect();
+        for &list in lists {
+            let mut at = 0;
+            func.rewrite(list, |value| {
+                let passed = if at == index {
+                    converted.get(&value).copied().unwrap_or(value)
+                } else {
+                    value
+                };
+                at += 1;
+                passed
+            });
+        }
+        func.retype(param, ty);
+        func.set_facts(param, rucc_ir::Facts::NONE);
+        forward.insert(result_of(func, conversion), param);
+        gone.push(conversion);
+        stats.optimized(AT_EDGES);
+    }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+    }
+}
+
+/// The result and the overflow bit of an overflow checking operation on two constants.
+///
+/// `__builtin_mul_overflow (256, 3, &bytes)` is how the kernel's `kmalloc_array` works out a size,
+/// and gcc folds it to 768 before it asks `__builtin_constant_p` about the size. Left alone the
+/// size is not a constant there, `kmalloc` takes the out of line path, and the object size of
+/// what it returns is lost with it. That is the `WARN_ON_ONCE` gcc drops in keyboard.c's
+/// `vt_do_kdgkbdiacr` and rucc kept.
+fn overflow(func: &Func, inst: Inst) -> Option<(Imm, bool)> {
+    let data = &func[inst];
+    let &[left, right] = &func[data.args] else { return None };
+    let ty = func[data.results().next()?].ty;
+    let (a, _) = constant(func, left)?;
+    let (b, _) = constant(func, right)?;
+    overflowing(data.opcode, a, b, ty)
+}
+
+/// What an overflow checking operation gives for two constants: the wrapped result and whether
+/// the exact one did not fit. `None` for anything that is not one of the six.
+pub(crate) fn overflowing(opcode: Opcode, a: Imm, b: Imm, ty: Type) -> Option<(Imm, bool)> {
+    let signed = match opcode {
+        Opcode::SAddOverflow | Opcode::SSubOverflow | Opcode::SMulOverflow => true,
+        Opcode::UAddOverflow | Opcode::USubOverflow | Opcode::UMulOverflow => false,
+        _ => return None,
+    };
+    if !ty.is_int() || ty.is_vector() {
+        return None;
+    }
+    let width = ty.bits();
+    let fits = if signed {
+        let (a, b) = (a.signed(ty), b.signed(ty));
+        let exact = match opcode {
+            Opcode::SAddOverflow => a.checked_add(b),
+            Opcode::SSubOverflow => a.checked_sub(b),
+            _ => a.checked_mul(b),
+        };
+        exact.is_some_and(|exact| Imm::int(exact, ty).signed(ty) == exact)
+    } else {
+        let (a, b) = (a.unsigned(), b.unsigned());
+        let exact = match opcode {
+            Opcode::UAddOverflow => a.checked_add(b),
+            Opcode::USubOverflow => a.checked_sub(b),
+            _ => a.checked_mul(b),
+        };
+        exact.is_some_and(|exact| width >= 128 || exact >> width == 0)
+    };
+    let (a, b) = (a.unsigned(), b.unsigned());
+    let wrapped = match opcode {
+        Opcode::SAddOverflow | Opcode::UAddOverflow => a.wrapping_add(b),
+        Opcode::SSubOverflow | Opcode::USubOverflow => a.wrapping_sub(b),
+        _ => a.wrapping_mul(b),
+    };
+    Some((Imm::from_bits(wrapped & Imm::int(-1, ty).unsigned()), !fits))
+}
+
+/// Puts two constants in front of a folded overflow operation and points its readers at them.
+///
+/// An instruction with two results has no one constant to become, so unlike the rest of this pass
+/// it is not changed in place, and the caller takes it out once nothing reads it.
+fn split(func: &mut Func, inst: Inst, (sum, over): (Imm, bool), forward: &mut Map<Value, Value>) {
+    let results: Vec<Value> = func[inst].results().collect();
+    let span = func.span(inst);
+    for (result, imm) in results.into_iter().zip([sum, Imm::from_bits(u128::from(over))]) {
+        let ty = func[result].ty;
+        let at = func.add_imm(imm);
+        let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+        let made = func.create_inst(data, &[ty], span);
+        func.insert_before(made, inst);
+        let value = func[made].results().next().expect("a constant is one value");
+        forward.insert(result, value);
+    }
+}
+
+/// Turns the instruction into the constant it was worked out to be, keeping its result value.
+pub(crate) fn write(func: &mut Func, inst: Inst, folded: Imm) {
+    let ty = func[result_of(func, inst)].ty;
+    let at = func.add_imm(folded);
+    let data = &mut func[inst];
+    // Which constant instruction holds the answer is the result type's question and not the
+    // folded instruction's. An `fneg` and a bitcast out of an integer both answer in a floating
+    // point type and the rest of what folds here answers in an integer one, and an immediate is
+    // the same bits either way.
+    data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
+    data.flags = Flags::NONE;
+    data.args = rucc_ir::ValueList::EMPTY;
+    data.extra = Extra::Imm(at);
+}
+
+/// Decides `&f == NULL` and `&x != NULL` for every `f` and `x` this module defines, and returns
+/// how many comparisons it decided.
+///
+/// A function or an object with a body here has an address that is not null, whatever its
+/// linkage, which is gcc's rule as well and the one it keeps under the kernel's
+/// `-fno-delete-null-pointer-checks`. A name only declared here is left alone, because a weak one
+/// may never be defined and then its address is null. The kernel leans on this in
+/// `BUILD_BUG_ON (fn == NULL)`, which i915 writes around each callback it registers and which
+/// only builds once the comparison is a number.
+///
+/// Over the module rather than in [`Fold`] because whether a name has a body is a fact about the
+/// module, and a pass sees one function.
+pub fn addresses(module: &mut Module) -> usize {
+    let mut decided = 0;
+    for id in module.funcs().collect::<Vec<FuncId>>() {
+        if module[id].is_declaration() {
+            continue;
+        }
+        let func = &module[id];
+        let mut found = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if let Some(answer) = against_null(func, inst, |name| defined(module, name)) {
+                    found.push((inst, answer));
+                }
+            }
+        }
+        for (inst, answer) in found {
+            write(&mut module[id], inst, answer);
+            decided += 1;
+        }
+    }
+    decided
+}
+
+/// The answer to `&f == NULL` or `&f != NULL`, when the instruction is one of those and `defined`
+/// says `f` has a body.
+pub(crate) fn against_null(
+    func: &Func,
+    inst: Inst,
+    defined: impl Fn(Symbol) -> bool,
+) -> Option<Imm> {
+    let data = &func[inst];
+    let Extra::IntPred(pred) = data.extra else { return None };
+    if data.opcode != Opcode::ICmp || !matches!(pred, IntPred::Eq | IntPred::Ne) {
+        return None;
+    }
+    let &[lhs, rhs] = &func[data.args] else { return None };
+    let null = |value| {
+        cast(func, value)
+            .or_else(|| constant(func, value))
+            .is_some_and(|(imm, _)| imm.unsigned() == 0)
+    };
+    let defined = |value| named(func, value).is_some_and(&defined);
+    if (defined(lhs) && null(rhs)) || (null(lhs) && defined(rhs)) {
+        let ty = func[result_of(func, inst)].ty;
+        return Some(Imm::int(i128::from(pred == IntPred::Ne), ty));
+    }
+    None
+}
+
+/// The name whose address this value is, if it is one.
+fn named(func: &Func, value: Value) -> Option<Symbol> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let Extra::Symbol(name) = data.extra else { return None };
+    (data.opcode == Opcode::GlobalAddr).then_some(name)
+}
+
+/// Whether this module gives the name a body, a function's or an object's.
+pub(crate) fn defined(module: &Module, name: Symbol) -> bool {
+    match module.lookup(name) {
+        Some(SymbolRef::Func(id)) => !module[id].is_declaration(),
+        Some(SymbolRef::Global(id)) => !module[id].is_declaration(),
+        _ => false,
+    }
+}
+
+/// The integer constant this value is, or the one a pointer was cast from, with the integer's type.
+///
+/// For what works out what a constant argument does to a body, where a null pointer is an
+/// `inttoptr` of a zero. `init_vma_prep` in mm/vma.c passes `NULL` for the `vmg` that every branch
+/// in `init_multi_vma_prep` but two tests, and weighed without it the body was too large to go in
+/// where gcc puts it in.
+pub(crate) fn known(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    constant(func, value).or_else(|| cast(func, value))
+}
+
+/// The integer constant this pointer was cast from, with its type, if it was cast from one.
+fn cast(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IntToPtr {
+        return None;
+    }
+    constant(func, *func[func[inst].args].first()?)
+}
+
+/// A pointer cast back to an integer when the pointer was cast from an integer constant, which is
+/// that constant again as long as no address is too narrow to hold it.
+///
+/// The kernel's `xa_mk_value (0)` is this once it is inlined, and `swap_table.h` checks it with a
+/// `BUILD_BUG_ON`, so it has to be a number. How wide an address is is not known here, but none is
+/// narrower than thirty two bits, so a number that fits in those comes back the same through any of
+/// them. A larger one is left for the back end, where it costs nothing either.
+///
+/// A number cast from and back to the same integer type is also that number whatever it is. The
+/// lowering builds every cast to a pointer from an integer as wide as an address and every cast
+/// back into one, so a type that is the same on both sides is the width of an address and nothing
+/// was cut. `test_printf.c` asks `BUILD_BUG_ON (IS_ERR (PTR))` of `(void *) 0xffff0123456789abUL`.
+fn round_trip(func: &Func, pointer: Value, ty: Type) -> Option<Imm> {
+    let (number, from) = cast(func, pointer)?;
+    if from == ty {
+        return Some(number);
+    }
+    let small = u32::try_from(number.unsigned()).ok()?;
+    Some(Imm::int(i128::from(small), ty))
+}
+
+/// Whether two integer constants cast to pointers are the same address, when that can be said
+/// without knowing how wide an address is.
+///
+/// `ERR_PTR (-ENOENT) == ERR_PTR (-EINVAL)` is this, and so is any pair of the kernel's sentinel
+/// pointers. A cast to a pointer widens with zeroes or cuts the top off, so two equal numbers of
+/// one type are one address. Two that differ in their low thirty two bits are two addresses on
+/// every target, since no address is narrower than that. Two that differ only above those bits
+/// are the same address on a thirty two bit target and not on a sixty four bit one, and are left.
+///
+/// A stack slot against null is the other thing this answers. A slot is never at address zero,
+/// which gcc also takes as given, even under `-fno-delete-null-pointer-checks`. Landlock's
+/// `copy_min_struct_from_user` checks `BUILD_BUG_ON (!dst)` with `dst` the address of a local once
+/// it is inlined, and that only builds once the comparison is a number.
+fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<Imm> {
+    let (first, second) = (*args.first()?, *args.get(1)?);
+    let null = |value| {
+        cast(func, value)
+            .or_else(|| constant(func, value))
+            .is_some_and(|(imm, _)| imm.unsigned() == 0)
+    };
+    if (on_stack(func, first) && null(second)) || (null(first) && on_stack(func, second)) {
+        return match pred {
+            IntPred::Eq => Some(Imm::int(0, ty)),
+            IntPred::Ne => Some(Imm::int(1, ty)),
+            _ => None,
+        };
+    }
+    if let Some(answer) = apart(func, pred, first, second) {
+        return Some(Imm::int(i128::from(answer), ty));
+    }
+    if distinct(func, first, second) {
+        return match pred {
+            IntPred::Eq => Some(Imm::int(0, ty)),
+            IntPred::Ne => Some(Imm::int(1, ty)),
+            _ => None,
+        };
+    }
+    let (lhs, from) = cast(func, *args.first()?)?;
+    let (rhs, other) = cast(func, *args.get(1)?)?;
+    if from != other {
+        return None;
+    }
+    let low = |imm: Imm| imm.unsigned() & u128::from(u32::MAX);
+    let same = if lhs == rhs {
+        true
+    } else if low(lhs) != low(rhs) {
+        false
+    } else {
+        return None;
+    };
+    match pred {
+        IntPred::Eq => Some(Imm::int(i128::from(same), ty)),
+        IntPred::Ne => Some(Imm::int(i128::from(!same), ty)),
+        _ => None,
+    }
+}
+
+/// How two addresses into one object compare, when both are a constant distance into it.
+///
+/// The object is one name or one stack slot, and the distances are what was added to its address
+/// on the way here. Two places in one object are in the order of their distances, and the
+/// comparison of them only needs the distances, since an object and the place just past its end
+/// never straddle the end of the address space. Only unsigned orders and equality are answered: an
+/// address compared as signed can cross from positive to negative in the middle of an object, and a
+/// kernel address usually does sit up there. A distance outside 0 to 2^31 is left alone too, since
+/// it is not inside any object that size and its address is anybody's guess.
+///
+/// `mm/ksm.c` writes `BUILD_BUG_ON (STABLE_NODE_DUP_HEAD <= &migrate_nodes)`, where the first is
+/// `&migrate_nodes.prev` cast, and that only builds once the comparison is a number.
+fn apart(func: &Func, pred: IntPred, first: Value, second: Value) -> Option<bool> {
+    let (base, lhs) = offset(func, first)?;
+    let (other, rhs) = offset(func, second)?;
+    let inside = |at: i128| (0..=1 << 31).contains(&at);
+    if base != other || !inside(lhs) || !inside(rhs) {
+        return None;
+    }
+    match pred {
+        IntPred::Eq => Some(lhs == rhs),
+        IntPred::Ne => Some(lhs != rhs),
+        IntPred::Ult => Some(lhs < rhs),
+        IntPred::Ule => Some(lhs <= rhs),
+        IntPred::Ugt => Some(lhs > rhs),
+        IntPred::Uge => Some(lhs >= rhs),
+        _ => None,
+    }
+}
+
+/// Whether two addresses are inside two different stack slots, and so are not the same address.
+///
+/// Both have to be strictly inside their slot. The place just past the end of one slot can be the
+/// start of the next one, and an empty slot, which a GNU `struct {}` gets, can share its address
+/// with anything. A slot sized at run time is left alone, since its size is not known here.
+///
+/// The kernel's `typecheck` writes `(void)(&__dummy == &__dummy2)` with two locals to make the
+/// compiler warn when their types differ, and `rt2x00_set_field32` in `rt2800lib.c` does that for
+/// every register field it sets. While the comparison stands both locals have their address taken
+/// and keep a slot each, and `rt2800_init_registers` came out at 2800 bytes of frame against the
+/// 96 gcc gives it.
+fn distinct(func: &Func, first: Value, second: Value) -> bool {
+    let inside = |value| {
+        let (Object::Slot(inst), at) = offset(func, value)? else { return None };
+        let Extra::Mem(mem) = func[inst].extra else { return None };
+        if !func[func[inst].args].is_empty() {
+            return None;
+        }
+        let size = i128::from(func[mem].size);
+        (0..size).contains(&at).then_some(inst)
+    };
+    match (inside(first), inside(second)) {
+        (Some(lhs), Some(rhs)) => lhs != rhs,
+        _ => false,
+    }
+}
+
+/// The object an address points into, and how far into it the address is, as a pointer or as the
+/// integer the lowering casts it to.
+fn offset(func: &Func, mut value: Value) -> Option<(Object, i128)> {
+    let mut by = 0_i128;
+    // A chain this long is not something the lowering writes, and the bound keeps a cycle through
+    // block parameters, which this never follows anyway, from being a question at all.
+    for _ in 0..16 {
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let data = &func[inst];
+        match data.opcode {
+            Opcode::GlobalAddr => {
+                let Extra::Symbol(name) = data.extra else { return None };
+                return Some((Object::Named(name), by));
+            }
+            Opcode::Alloca => return Some((Object::Slot(inst), by)),
+            Opcode::PtrAdd => {
+                let &[base, step] = &func[data.args] else { return None };
+                let (step, ty) = constant(func, step)?;
+                by = by.checked_add(step.signed(ty))?;
+                value = base;
+            }
+            Opcode::PtrToInt => value = *func[data.args].first()?,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// What [`offset`] measures from.
+///
+/// A name rather than the instruction that took its address, since a function takes the address of
+/// one global as many times as it writes it and every one of those is the same place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Object {
+    /// A function or a global, defined here or not.
+    Named(Symbol),
+    /// One stack slot.
+    Slot(Inst),
+}
+
+/// Whether this value is the address of a stack slot, as a pointer or as the integer the lowering
+/// casts it to, which is as wide as an address. The kernel's `test_bit` asks
+/// `(uintptr_t)(addr) != (uintptr_t)NULL` of a local bitmap.
+fn on_stack(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    match func[inst].opcode {
+        Opcode::Alloca => true,
+        Opcode::PtrToInt => func[func[inst].args].first().is_some_and(|&from| on_stack(func, from)),
+        _ => false,
+    }
+}
+
+/// The single result of an instruction that folded.
+fn result_of(func: &Func, inst: Inst) -> Value {
+    func[inst].results().next().expect("an instruction that folds produces a value")
+}
+
+/// What this instruction evaluates to, if it evaluates to anything.
+///
+/// `None` covers every reason not to fold and does not distinguish between them, because the
+/// answer to all of them is the same: leave the instruction alone.
+fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
+    let data = &func[inst];
+    if data.results != 1 {
+        return None;
+    }
+    let result = data.results().next()?;
+    let ty = func[result].ty;
+    // A vector constant is a `splat` rather than an `iconst` or an `fconst`, so a vector fold
+    // would have to build a different instruction and would have to be right about the lane
+    // count as well.
+    if !ty.is_scalar() {
+        return None;
+    }
+    let args = &func[data.args];
+    // The ones whose answer can have a floating point type. They are above the gate below rather
+    // than inside the match under it because that gate is what keeps the rest of this file about
+    // integers.
+    match data.opcode {
+        Opcode::FNeg => return negated(func, *args.first()?, ty),
+        Opcode::Bitcast => return reinterpreted(func, *args.first()?, ty),
+        Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
+            let lhs = number(func, *args.first()?)?;
+            let rhs = number(func, *args.get(1)?)?;
+            let answer = match data.opcode {
+                Opcode::FAdd => lhs.sum(rhs),
+                Opcode::FSub => lhs.difference(rhs),
+                Opcode::FMul => lhs.product(rhs),
+                _ => lhs.quotient(rhs),
+            };
+            return settled(func, answer);
+        }
+        Opcode::SIToFP | Opcode::UIToFP => {
+            let (value, from) = constant(func, *args.first()?)?;
+            let format = folded_format(func, ty)?;
+            if format.decimal().is_some() {
+                return None;
+            }
+            let answer = if data.opcode == Opcode::SIToFP {
+                Float::from_signed(value.signed(from), format)
+            } else {
+                Float::from_unsigned(value.unsigned(), format)
+            };
+            return settled(func, answer);
+        }
+        Opcode::FPExt | Opcode::FPTrunc => {
+            let format = folded_format(func, ty)?;
+            if format.decimal().is_some() {
+                return None;
+            }
+            return settled(func, number(func, *args.first()?)?.to_format(format));
+        }
+        _ => {}
+    }
+    if !ty.is_int() {
+        return None;
+    }
+    match data.opcode {
+        Opcode::FPToSI | Opcode::FPToUI => {
+            let value = floating(func, *args.first()?)?;
+            to_integer(value, ty, data.opcode == Opcode::FPToSI)
+        }
+        Opcode::PtrToInt => round_trip(func, *args.first()?, ty),
+        // A question about a value that is already a number has the answer `constant_p` would
+        // give it, and the answer cannot change by waiting. Answered there, it came after the last
+        // jump threading, so `find_next_bit` over a constant size kept its call to
+        // `_find_next_bit` and the merge of `size` with the bit found through both threadings,
+        // and every loop over the possible cpus on i386 tested the `size` a miss returned again.
+        Opcode::IsConstant => constant(func, *args.first()?).map(|_| Imm::int(1, ty)),
+        Opcode::ICmp
+            if func[*args.first()?].ty.is_ptr()
+                || args
+                    .iter()
+                    .any(|&value| on_stack(func, value) || offset(func, value).is_some()) =>
+        {
+            let Extra::IntPred(pred) = data.extra else { return None };
+            same_address(func, pred, args, ty)
+        }
+        _ => arithmetic(data, args, ty, &|value| constant(func, value)),
+    }
+}
+
+/// What an instruction of integer arithmetic works out to, given a way to read each operand as a
+/// constant.
+///
+/// The way to read an operand is the caller's, because this pass wants an operand that is already
+/// a constant and nothing more, while [`evaluated`] wants to go on looking underneath one that is
+/// not. Both of them want the arithmetic itself to be this one, so that the two cannot disagree
+/// about what an instruction answers.
+pub(crate) fn arithmetic(
+    data: &InstData,
+    args: &[Value],
+    ty: Type,
+    operand: &dyn Fn(Value) -> Option<(Imm, Type)>,
+) -> Option<Imm> {
+    match data.opcode {
+        Opcode::Trunc | Opcode::SExt | Opcode::ZExt => {
+            let (value, from) = operand(*args.first()?)?;
+            Some(convert(data.opcode, value, from, ty))
+        }
+        Opcode::Shl | Opcode::LShr | Opcode::AShr => {
+            let (value, from) = operand(*args.first()?)?;
+            let (count, count_ty) = operand(*args.get(1)?)?;
+            shift(data.opcode, value, from, count, count_ty, ty, data.flags)
+        }
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::And | Opcode::Or | Opcode::Xor => {
+            let (lhs, lhs_ty) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
+            binary(data.opcode, lhs, rhs, lhs_ty, ty, data.flags)
+        }
+        Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem => {
+            let (lhs, from) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
+            divide(data.opcode, lhs, rhs, from, ty)
+        }
+        Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
+            let (value, from) = operand(*args.first()?)?;
+            count(data.opcode, value, from, ty)
+        }
+        Opcode::ICmp => {
+            let Extra::IntPred(pred) = data.extra else { return None };
+            let (lhs, from) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
+            Some(Imm::int(i128::from(compare(pred, lhs, rhs, from)), ty))
+        }
+        // A select between two constants that are the same number is that number whichever way
+        // the condition goes. Unrolling makes these, when both arms worked out something from a
+        // counter that is now a constant and came to the same answer, and each arm's answer is
+        // its own constant instruction, so nothing that compares values sees they are equal.
+        Opcode::Select => {
+            let (then, _) = operand(*args.get(1)?)?;
+            let (other, _) = operand(*args.get(2)?)?;
+            (then.signed(ty) == other.signed(ty)).then_some(then)
+        }
+        _ => None,
+    }
+}
+
+/// The constant this value works out to, looking through as many as `depth` instructions of
+/// integer arithmetic over constants.
+///
+/// For a pass that runs before this one has had the chance to write the answer down as a constant,
+/// which is [`crate::libcall`]: it runs over the module before any function pass has started, so
+/// an index the source wrote as `x & 3` with `x` known is still an `and` of two constants when it
+/// looks. Nothing here changes the function, and the arithmetic is [`arithmetic`], so the answer
+/// is the one this pass would have written later.
+pub(crate) fn evaluated(func: &Func, value: Value, depth: u32) -> Option<(Imm, Type)> {
+    if let Some(found) = constant(func, value) {
+        return Some(found);
+    }
+    let next = depth.checked_sub(1)?;
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let ty = func[value].ty;
+    if data.results != 1 || !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let found = arithmetic(data, &func[data.args], ty, &|arg| evaluated(func, arg, next))?;
+    Some((found, ty))
+}
+
+/// The bits a value holds, if it is a constant of either kind.
+///
+/// Both kinds, because the two rewrites above this are about the bits and do not care which of
+/// them they were written as. A constant of either is one instruction with one immediate, and an
+/// immediate is the bits.
+fn bits_of(func: &Func, value: Value) -> Option<u128> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::IConst | Opcode::FConst) {
+        return None;
+    }
+    let Extra::Imm(at) = data.extra else { return None };
+    Some(func[at].bits())
+}
+
+/// A negation of a floating point constant, which is that constant with its sign bit flipped.
+///
+/// Unlike the rest of the floating point arithmetic here it folds under any flags, NaN included.
+/// 754 says a negation flips the sign bit and copies every other bit, for every input including a
+/// NaN and a zero, so it is exact, it raises nothing and it never consults the rounding mode.
+/// There is no decision about the environment to get wrong.
+///
+/// The reason to bother is that C has no negative floating constant. Every one of them is a unary
+/// minus applied to a positive one, so `-1.0` arrives here as an `fneg` of an `fconst` and stays
+/// that way, and what the back end makes of it is a constant, a mask and three moves through a
+/// general register where one load would do. That is every negative floating literal in every
+/// program, and it is issue 1427.
+///
+/// The sign bit is the top bit of the value and not of the object it is stored in. An `f80` is
+/// eighty bits of value in a hundred and twenty eight of storage, and [`Type::bits`] answers
+/// eighty for it, which is the bit this has to flip.
+fn negated(func: &Func, operand: Value, ty: Type) -> Option<Imm> {
+    if !ty.is_float() {
+        return None;
+    }
+    let bits = bits_of(func, operand)?;
+    Some(Imm::from_bits(bits ^ 1u128 << (ty.bits() - 1)))
+}
+
+/// A bitcast of a constant, which is the same bits read as another type of the same width.
+///
+/// It folds in both directions, and the one that pays is out of an integer, because that is what
+/// `fabs` and `copysign` leave behind. Neither is a call: the front end lowers both to a mask over
+/// the bits, so `fabs (1.0)` is a bitcast of an `and` of a bitcast, and without this the three
+/// survive to the back end and compute a number the compiler already has.
+///
+/// The widths are checked rather than assumed. The verifier requires them to match and a fold that
+/// quietly widened or narrowed a constant would be a wrong answer rather than a refused one, which
+/// is not a thing to leave to another pass being right.
+fn reinterpreted(func: &Func, operand: Value, ty: Type) -> Option<Imm> {
+    let from = func[operand].ty;
+    if !from.is_scalar() || from.bits() != ty.bits() {
+        return None;
+    }
+    let bits = bits_of(func, operand)?;
+    Some(Imm::from_bits(bits))
+}
+
+/// The constant this value is, with the type it has, if it is one.
+///
+/// Shared with [`crate::simplify_cfg`], which asks the same question about the condition of a
+/// branch. Asking it in two places would be two answers about what a constant is.
+pub(crate) fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IConst {
+        return None;
+    }
+    let Extra::Imm(at) = func[inst].extra else { return None };
+    let ty = func[value].ty;
+    ty.is_int().then(|| (func[at], ty))
+}
+
+/// The floating point constant this value is, read in the format its own type gives it.
+///
+/// An `fconst` stores the bits and the type says how to read them, which is why this is one
+/// function and not a pair of them: the bits of an `f80` and the bits of an `f128` are the same
+/// hundred and twenty eight bits and mean different numbers.
+fn floating(func: &Func, value: Value) -> Option<Float> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::FConst {
+        return None;
+    }
+    let Extra::Imm(at) = func[inst].extra else { return None };
+    let format = folded_format(func, func[value].ty)?;
+    // A decimal constant decodes, but the arithmetic a fold does on it is binary and would read the
+    // coefficient as a significand, so a decimal is never a constant here. Its operations become
+    // library calls in the back end instead, tamnd/rucc#207.
+    if format.decimal().is_some() {
+        return None;
+    }
+    Some(Float::from_bits(format, func[at].bits()))
+}
+
+/// The format a floating point type of this function is folded in.
+///
+/// The type's encoding, but for an `f80` in a function marked [`AttrSet::X87_ROUND_53`], which is
+/// folded in [`Format::X87Round53`] so that every answer is rounded to fifty three bits the way
+/// the x87 unit of i386 FreeBSD rounds it. The bits are the same in both.
+pub(crate) fn folded_format(func: &Func, ty: Type) -> Option<Format> {
+    let format = ty.format()?.encoding();
+    if format == Format::X87Extended && func.attrs.set.contains(AttrSet::X87_ROUND_53) {
+        Some(Format::X87Round53)
+    } else {
+        Some(format)
+    }
+}
+
+/// The floating point constant this value is, if it is one and is a number.
+///
+/// Not a NaN, quiet or signalling. gcc gives back the quiet NaN for an operation on one, but a
+/// signalling one raises when the operation runs and keeping both to the machine is one rule
+/// rather than two for a case nobody writes on purpose.
+fn number(func: &Func, value: Value) -> Option<Float> {
+    floating(func, value).filter(|number| !number.is_nan())
+}
+
+/// The answer of a floating point operation on constants, if the floating point environment lets
+/// it be decided now.
+///
+/// These are gcc's rules in `const_binop`. Under `-ftrapping-math`, the default, an operation that
+/// makes a NaN out of numbers, divides by zero or overflows to an infinity raises an exception the
+/// program may look at, so it is left to run. Under `-frounding-math` an inexact answer is the one
+/// the default rounding mode gives and not the one the program may have asked for, so only an
+/// exact one is folded. What is left is an answer every run of the program agrees on.
+fn settled(func: &Func, (value, status): (Float, Status)) -> Option<Imm> {
+    let set = func.attrs.set;
+    let raised = [Status::INVALID, Status::DIVIDE_BY_ZERO, Status::OVERFLOW];
+    if !set.contains(AttrSet::NO_TRAPPING_MATH) && raised.iter().any(|&flag| status.has(flag)) {
+        return None;
+    }
+    if set.contains(AttrSet::ROUNDING_MATH) && status.has(Status::INEXACT) {
+        return None;
+    }
+    Some(Imm::from_bits(value.to_bits()))
+}
+
+/// A conversion of a floating point constant to an integer, and nothing when C does not say what
+/// the answer is.
+///
+/// The two undefined cases are a number whose truncation is outside the destination type and a
+/// NaN, and `to_integer` reports both as [`Status::INVALID`] rather than answering. Folding either
+/// would be picking one refinement of poison and writing it into the program, which is what this
+/// pass declines to do for an add that overflows under `nsw` and declines to do here for the same
+/// reason.
+fn to_integer(value: Float, to: Type, signed: bool) -> Option<Imm> {
+    let (number, status) = value.to_integer(to.bits(), signed);
+    (!status.has(Status::INVALID)).then(|| Imm::int(number, to))
+}
+
+/// A widening or a narrowing of a constant.
+pub(crate) fn convert(opcode: Opcode, value: Imm, from: Type, to: Type) -> Imm {
+    match opcode {
+        // Truncation is the masking that `Imm::int` does anyway, and sign extension is reading
+        // the value as signed at its own width and storing it at the wider one.
+        Opcode::Trunc | Opcode::SExt => Imm::int(value.signed(from), to),
+        // Zero extension reads the same bits as unsigned, which for a width below 128 is a
+        // non-negative number and survives the cast to the signed type `Imm::int` takes.
+        _ => Imm::int(value.unsigned() as i128, to),
+    }
+}
+
+/// A shift of a constant by a constant.
+///
+/// `None` when the count is not one the language defines, which is a count at or above the width
+/// of the value. The result there is poison and folding it would be picking an answer for a
+/// program that asked for none.
+fn shift(
+    opcode: Opcode,
+    value: Imm,
+    from: Type,
+    count: Imm,
+    count_ty: Type,
+    to: Type,
+    flags: Flags,
+) -> Option<Imm> {
+    let by = count.unsigned();
+    if by >= u128::from(to.bits()) || count.signed(count_ty) < 0 {
+        return None;
+    }
+    let by = by as u32;
+    let exact = match opcode {
+        Opcode::Shl => value.signed(from).checked_shl(by)?,
+        // A logical shift right is on the bits rather than on the number, so it reads unsigned
+        // and the cast back cannot lose anything: the value has at most `from.bits()` bits set
+        // and shifting right sets none.
+        Opcode::LShr => (value.unsigned() >> by) as i128,
+        _ => value.signed(from) >> by,
+    };
+    if opcode == Opcode::Shl && overflowed(exact, to, flags) {
+        return None;
+    }
+    Some(Imm::int(exact, to))
+}
+
+/// An arithmetic or bitwise operation on two constants.
+fn binary(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type, flags: Flags) -> Option<Imm> {
+    let (a, b) = (lhs.signed(from), rhs.signed(from));
+    let exact = match opcode {
+        // The bitwise three cannot overflow and are the same operation whichever way the
+        // operands are read, so they take the signed reading and are done.
+        Opcode::And => a & b,
+        Opcode::Or => a | b,
+        Opcode::Xor => a ^ b,
+        // The arithmetic three are computed at 128 bits and then asked whether they fit. A type
+        // of 128 bits is the one case where the checked form is doing real work rather than
+        // being a formality, and it is why these are checked rather than wrapping.
+        Opcode::Add => a.checked_add(b)?,
+        Opcode::Sub => a.checked_sub(b)?,
+        _ => a.checked_mul(b)?,
+    };
+    if overflowed(exact, to, flags) {
+        return None;
+    }
+    Some(Imm::int(exact, to))
+}
+
+/// What a divide or a remainder of two constants comes out as, or nothing for the two cases that
+/// are undefined. See the module documentation.
+fn divide(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type) -> Option<Imm> {
+    if rhs.unsigned() == 0 {
+        return None;
+    }
+    let answer = match opcode {
+        // An unsigned answer is no wider than the dividend, so it fits the type it came from and
+        // the cast only moves the bits across. [`Imm::int`] keeps the ones the type has.
+        Opcode::UDiv => (lhs.unsigned() / rhs.unsigned()) as i128,
+        Opcode::URem => (lhs.unsigned() % rhs.unsigned()) as i128,
+        _ => {
+            let (a, b) = (lhs.signed(from), rhs.signed(from));
+            let least = if from.bits() >= 128 { i128::MIN } else { -(1i128 << (from.bits() - 1)) };
+            if b == -1 && a == least {
+                return None;
+            }
+            if opcode == Opcode::SDiv { a / b } else { a % b }
+        }
+    };
+    Some(Imm::int(answer, to))
+}
+
+/// What a comparison of two constants comes out as.
+///
+/// Shared with [`crate::simplify_cfg`], which asks the same question about the condition of a
+/// branch it is deciding the direction of. Two answers about what `slt` means would be one too
+/// many, and the two places would not be checked against each other by anything.
+///
+/// The type is the one the operands have rather than the `i1` the answer has, since that is the
+/// width the comparison is at and the only thing the reading depends on. The two equalities are
+/// the same question whichever way the bits are read, so they compare the immediates directly:
+/// an immediate holds its value in exactly the width of its type, which is what makes that
+/// equality the equality on the numbers.
+pub(crate) fn compare(pred: IntPred, lhs: Imm, rhs: Imm, ty: Type) -> bool {
+    match pred {
+        IntPred::Eq => lhs == rhs,
+        IntPred::Ne => lhs != rhs,
+        IntPred::Slt => lhs.signed(ty) < rhs.signed(ty),
+        IntPred::Sle => lhs.signed(ty) <= rhs.signed(ty),
+        IntPred::Sgt => lhs.signed(ty) > rhs.signed(ty),
+        IntPred::Sge => lhs.signed(ty) >= rhs.signed(ty),
+        IntPred::Ult => lhs.unsigned() < rhs.unsigned(),
+        IntPred::Ule => lhs.unsigned() <= rhs.unsigned(),
+        IntPred::Ugt => lhs.unsigned() > rhs.unsigned(),
+        IntPred::Uge => lhs.unsigned() >= rhs.unsigned(),
+    }
+}
+
+/// One of the five bit operations on a constant.
+///
+/// All five are on the bits rather than on the number, so all five read the value unsigned. An
+/// immediate is stored with everything above its own width cleared, so the bits of a value of a
+/// narrow type are already in the low end of a 128 bit word with zeroes above them, and the whole
+/// of the work here is putting the answer back at the width it was asked at.
+///
+/// The two searches answer the width for a zero argument. C leaves `__builtin_clz(0)` and
+/// `__builtin_ctz(0)` undefined so nothing is entitled to that answer, but it is the answer the
+/// software expansion in `rucc_codegen::expand` gives and `__builtin_ffs` is built on top of it, so
+/// folding to anything else here would make the same program answer two different things depending
+/// on whether the argument was visible. That is a worse outcome than either answer on its own.
+///
+/// A byte swap of a width that is not a whole number of bytes is left alone, which is what the
+/// expansion does with one too. The verifier does not allow one and quietly reversing something
+/// else would be worse than the instruction surviving to a selector that says it has no rule.
+fn count(opcode: Opcode, value: Imm, from: Type, to: Type) -> Option<Imm> {
+    let width = from.bits();
+    if width == 0 || width > 128 {
+        return None;
+    }
+    // The bits of the word that are above the value's own type, which is how far a whole word
+    // answer has to come back down. Both ends of the range above are ruled out for it: a shift by
+    // the width of the word is not defined and a width of nought has no bits to answer about.
+    let spare = 128 - width;
+    let bits = value.unsigned();
+    let answer = match opcode {
+        Opcode::Ctpop => i128::from(bits.count_ones()),
+        // The zeroes above the type are counted by the word and are not the value's, so they come
+        // off. For a zero value that leaves the width, which is the answer wanted.
+        Opcode::Ctlz => i128::from(bits.leading_zeros() - spare),
+        // Trailing zeroes need no correction because the zeroes above the type are above every
+        // set bit, except for a zero value, where the word answers 128 and the width is wanted.
+        Opcode::Cttz => i128::from(bits.trailing_zeros().min(width)),
+        Opcode::Bswap if width % 8 == 0 => (bits.swap_bytes() >> spare) as i128,
+        Opcode::Bitreverse => (bits.reverse_bits() >> spare) as i128,
+        _ => return None,
+    };
+    Some(Imm::int(answer, to))
+}
+
+/// Whether storing `exact` at `to` would lose something the flags promised would not happen.
+///
+/// An operation with neither flag wraps, and wrapping is defined, so the answer there is no
+/// however far outside the type the exact result is.
+fn overflowed(exact: i128, to: Type, flags: Flags) -> bool {
+    let stored = Imm::int(exact, to);
+    if flags.contains(Flags::NSW) && stored.signed(to) != exact {
+        return true;
+    }
+    flags.contains(Flags::NUW) && (exact < 0 || stored.unsigned() != exact as u128)
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_base::float::Format;
+    use rucc_ir::{
+        AttrSet, Block, Builder, Extra, Flags, Float, Func, Imm, IntPred, Module, Opcode,
+        Signature, Type, Value,
+    };
+    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+
+    use crate::stats::Kind;
+    use crate::{Fuel, Pass, fold::Fold};
+
+    /// A function with one block, ready to have instructions appended to it.
+    fn blank() -> (Interner, Func, Block) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut func = Func::new(name, Signature::new().with_returns(&[Type::int(64)]));
+        let block = func.create_block();
+        (names, func, block)
+    }
+
+    /// Runs the pass over the function with as much fuel as it wants, and says whether it
+    /// rewrote anything.
+    fn fold(func: &mut Func) -> bool {
+        Fold.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited()).changed()
+    }
+
+    /// An `fconst` of the number this text spells, in the format the type gives it.
+    ///
+    /// Through `rucc_base::float` rather than through the host's `f64`, for the reason that module
+    /// exists: the bits a literal means are the target's answer and not the machine running the
+    /// test's.
+    fn number(build: &mut Builder<'_>, text: &str, ty: Type) -> Value {
+        let format = ty.format().expect("a floating point type").encoding();
+        let (value, _) = super::Float::parse(text, format).expect("a number");
+        build.fconst(ty, value.to_bits())
+    }
+
+    /// The constant a value now holds, or `None` if it is not one.
+    fn value_of(func: &Func, value: Value, ty: Type) -> Option<i128> {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { return None };
+        if func[inst].opcode != Opcode::IConst {
+            return None;
+        }
+        let Extra::Imm(at) = func[inst].extra else { return None };
+        Some(func[at].signed(ty))
+    }
+
+    /// The bits a value now holds, or `None` if it is not a floating point constant.
+    fn float_bits(func: &Func, value: Value) -> Option<u128> {
+        let rucc_ir::Def::Result { inst, .. } = func[value].def else { return None };
+        if func[inst].opcode != Opcode::FConst {
+            return None;
+        }
+        let Extra::Imm(at) = func[inst].extra else { return None };
+        Some(func[at].bits())
+    }
+
+    /// Builds `lhs op rhs` on two `double` constants under the environment given, folds it, and
+    /// says what it became.
+    fn arithmetic(opcode: Opcode, lhs: &str, rhs: &str, environment: AttrSet) -> Option<u128> {
+        let (_, mut func, block) = blank();
+        func.attrs.set |= environment;
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let lhs = number(&mut build, lhs, ty);
+        let rhs = number(&mut build, rhs, ty);
+        let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+        build.ret(&[out]);
+        fold(&mut func);
+        float_bits(&func, out)
+    }
+
+    /// An answer every run of the program agrees on folds, rounded to nearest as the machine
+    /// would have rounded it.
+    #[test]
+    fn floating_arithmetic_on_constants_folds() {
+        let none = AttrSet::NONE;
+        assert_eq!(arithmetic(Opcode::FAdd, "0.1", "0.2", none), Some(0x3fd3_3333_3333_3334));
+        assert_eq!(arithmetic(Opcode::FSub, "1.0", "0.25", none), Some(0x3fe8_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FMul, "1.5", "200", none), Some(0x4072_c000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "3.0", none), Some(0x3fd5_5555_5555_5555));
+    }
+
+    /// Under `-ftrapping-math` an answer that raises an exception is left for the machine to
+    /// raise it, and under `-fno-trapping-math` it is a number like any other.
+    #[test]
+    fn an_answer_that_raises_folds_only_when_nothing_traps() {
+        let none = AttrSet::NONE;
+        let quiet = AttrSet::NO_TRAPPING_MATH;
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "0.0", none), None);
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "0.0", quiet), Some(0x7ff0_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FMul, "1e308", "10", none), None);
+        assert_eq!(arithmetic(Opcode::FMul, "1e308", "10", quiet), Some(0x7ff0_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FDiv, "0.0", "0.0", none), None);
+        assert!(arithmetic(Opcode::FDiv, "0.0", "0.0", quiet).is_some());
+    }
+
+    /// Under `-frounding-math` the answer is only known when it is exact.
+    #[test]
+    fn under_rounding_math_only_an_exact_answer_folds() {
+        let rounding = AttrSet::ROUNDING_MATH;
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "3.0", rounding), None);
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "4.0", rounding), Some(0x3fd0_0000_0000_0000));
+    }
+
+    /// On i386 FreeBSD the x87 unit rounds every result to fifty three bits, so an `f80` answer
+    /// folded there is the `double` answer in the x87 encoding, and a conversion from an integer
+    /// rounds there too.
+    #[test]
+    fn an_x87_answer_is_rounded_to_fifty_three_bits_where_the_unit_rounds_there() {
+        let third = |environment: AttrSet| {
+            let (_, mut func, block) = blank();
+            func.attrs.set |= environment;
+            let ty = Type::float(Float::F80);
+            let mut build = Builder::new(&mut func, block);
+            let one = number(&mut build, "1.0", ty);
+            let three = number(&mut build, "3.0", ty);
+            let out = build.binary(Opcode::FDiv, one, three, Flags::NONE);
+            let big = build.iconst(Type::int(64), (1 << 53) + 1);
+            let wide = build.unary(Opcode::SIToFP, big, ty);
+            build.ret(&[out, wide]);
+            assert!(fold(&mut func));
+            (float_bits(&func, out), float_bits(&func, wide))
+        };
+        let double = super::Float::parse("1", Format::Double).expect("one").0;
+        let double = double.quotient(super::Float::parse("3", Format::Double).expect("three").0).0;
+        let rounded = double.to_format(Format::X87Extended).0.to_bits();
+        let (out, wide) = third(AttrSet::X87_ROUND_53);
+        assert_eq!(out, Some(rounded));
+        assert_eq!(wide, Some(0x4034_8000_0000_0000_0000));
+        let (out, wide) = third(AttrSet::NONE);
+        assert_eq!(out, Some(0x3ffd_aaaa_aaaa_aaaa_aaab));
+        assert_eq!(wide, Some(0x4034_8000_0000_0000_0400));
+    }
+
+    /// C has no negative floating constant, so `-1.0` is a unary minus on a positive one and
+    /// arrives here as two instructions. This is the fold that makes it one.
+    #[test]
+    fn a_negated_floating_constant_becomes_a_constant() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let one = number(&mut build, "1.0", ty);
+        let minus = build.unary(Opcode::FNeg, one, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(0xbff0_0000_0000_0000));
+    }
+
+    /// Negation is the sign bit and nothing else, which is what lets it fold at all, and a
+    /// negative zero is where that shows: the value is equal to a positive zero and the bits are
+    /// not, so anything that went through a comparison would give the wrong answer here.
+    #[test]
+    fn a_negated_zero_keeps_its_sign_bit() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let zero = number(&mut build, "0.0", ty);
+        let minus = build.unary(Opcode::FNeg, zero, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(1 << 63));
+    }
+
+    /// The same for a NaN, whose payload goes through untouched. 754 says negation copies every
+    /// bit but the sign for every input, and a NaN is the input where a compiler that quietly did
+    /// arithmetic instead would be caught.
+    #[test]
+    fn a_negated_nan_keeps_its_payload() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let nan = build.fconst(ty, 0x7ff8_0000_dead_beef);
+        let minus = build.unary(Opcode::FNeg, nan, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, minus), Some(0xfff8_0000_dead_beef));
+    }
+
+    /// The sign bit of an `f80` is the top bit of the eighty the value has and not of the hundred
+    /// and twenty eight the object is stored in, which is the one place this could be written
+    /// wrong and give a number nobody asked for.
+    #[test]
+    fn the_sign_bit_of_an_x87_value_is_the_top_bit_of_its_width() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F80);
+        let mut build = Builder::new(&mut func, block);
+        let one = number(&mut build, "1.0", ty);
+        let minus = build.unary(Opcode::FNeg, one, ty);
+        build.ret(&[minus]);
+        assert!(fold(&mut func));
+        let bits = float_bits(&func, minus).expect("a constant");
+        assert_eq!(bits >> 79 & 1, 1, "the sign bit is set");
+        assert_eq!(bits >> 80, 0, "nothing above the value is touched");
+    }
+
+    /// A bitcast of a constant is the same bits read as another type, which is what `fabs` of a
+    /// constant needs: the front end lowers it to a mask over the bits rather than to a call, so
+    /// folding it away is three instructions rather than one.
+    #[test]
+    fn a_bitcast_of_a_constant_is_the_same_bits() {
+        let (_, mut func, block) = blank();
+        let ty = Type::float(Float::F64);
+        let bits = Type::int(64);
+        let mut build = Builder::new(&mut func, block);
+        let value = number(&mut build, "-3.5", ty);
+        let number = build.unary(Opcode::Bitcast, value, bits);
+        let mask = build.iconst(bits, i128::from(i64::MAX));
+        let cleared = build.binary(Opcode::And, number, mask, Flags::NONE);
+        let back = build.unary(Opcode::Bitcast, cleared, ty);
+        build.ret(&[back]);
+        assert!(fold(&mut func));
+        assert_eq!(float_bits(&func, back), Some(0x400c_0000_0000_0000));
+    }
+
+    /// A bitcast whose operand is not a constant is left alone, which is the case nearly every
+    /// bitcast in a real function is.
+    #[test]
+    fn a_bitcast_of_something_that_is_not_a_constant_is_left_alone() {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let ty = Type::float(Float::F64);
+        let signature = Signature::new().with_params(&[ty]).with_returns(&[Type::int(64)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let number = build.unary(Opcode::Bitcast, x, Type::int(64));
+        build.ret(&[number]);
+        assert!(!fold(&mut func));
+        assert_eq!(value_of(&func, number, Type::int(64)), None);
+    }
+
+    /// `__builtin_constant_p` of a value inlining has made a number is one, answered here rather
+    /// than left for `constant_p`, so the jump threading in front of that pass sees the branch.
+    #[test]
+    fn a_question_about_a_value_that_is_already_a_number_is_answered_yes() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let size = build.iconst(Type::int(32), 8);
+        let asked = build.unary(Opcode::IsConstant, size, Type::int(32));
+        build.ret(&[asked]);
+        assert!(fold(&mut func));
+        assert_eq!(value_of(&func, asked, Type::int(32)), Some(1));
+    }
+
+    #[test]
+    fn a_widened_constant_becomes_a_constant_of_the_wider_type() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let narrow = build.iconst(Type::int(32), 7);
+        let wide = build.unary(Opcode::SExt, narrow, Type::int(64));
+        build.ret(&[wide]);
+        assert!(fold(&mut func));
+        assert_eq!(value_of(&func, wide, Type::int(64)), Some(7));
+    }
+
+    #[test]
+    fn sign_extension_copies_the_sign_and_zero_extension_does_not() {
+        for (opcode, expected) in [(Opcode::SExt, -1_i128), (Opcode::ZExt, 0xffff_ffff)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let narrow = build.iconst(Type::int(32), -1);
+            let wide = build.unary(opcode, narrow, Type::int(64));
+            build.ret(&[wide]);
+            assert!(fold(&mut func));
+            assert_eq!(value_of(&func, wide, Type::int(64)), Some(expected), "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn truncation_keeps_the_low_bits_and_reads_them_at_the_narrow_width() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let wide = build.iconst(Type::int(32), 0x1234_5680);
+        let narrow = build.unary(Opcode::Trunc, wide, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(fold(&mut func));
+        assert_eq!(value_of(&func, narrow, Type::int(8)), Some(-128));
+    }
+
+    #[test]
+    fn the_arithmetic_and_the_bitwise_operations_are_evaluated() {
+        let cases = [
+            (Opcode::Add, 6_i128, 7_i128, 13_i128),
+            (Opcode::Sub, 6, 7, -1),
+            (Opcode::Mul, 6, 7, 42),
+            (Opcode::And, 0b1100, 0b1010, 0b1000),
+            (Opcode::Or, 0b1100, 0b1010, 0b1110),
+            (Opcode::Xor, 0b1100, 0b1010, 0b0110),
+        ];
+        for (opcode, a, b, want) in cases {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(64), a);
+            let rhs = build.iconst(Type::int(64), b);
+            let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{opcode:?}");
+            assert_eq!(value_of(&func, out, Type::int(64)), Some(want), "{opcode:?}");
+        }
+    }
+
+    /// A select of two constants of the same number, under a condition nothing knows, is that
+    /// number, and one of two different numbers is left for the back end to choose between.
+    #[test]
+    fn a_select_between_two_equal_constants_is_that_constant() {
+        for (other, folds) in [(2_i128, true), (3, false)] {
+            let mut names = Interner::new();
+            let signature = Signature::new().with_params(&[Type::int(32)]);
+            let mut func = Func::new(names.intern("f"), signature.with_returns(&[Type::int(32)]));
+            let block = func.create_block();
+            let x = func.append_param(block, Type::int(32));
+            let mut build = Builder::new(&mut func, block);
+            let zero = build.iconst(Type::int(32), 0);
+            let test = build.icmp(IntPred::Slt, x, zero);
+            let then = build.iconst(Type::int(32), 2);
+            let other = build.iconst(Type::int(32), other);
+            let out = build.select(test, then, other);
+            build.ret(&[out]);
+            assert_eq!(fold(&mut func), folds);
+            let want = folds.then_some(2);
+            assert_eq!(value_of(&func, out, Type::int(32)), want);
+        }
+    }
+
+    #[test]
+    fn the_three_shifts_are_evaluated_and_the_two_right_ones_differ_on_the_sign() {
+        let cases = [(Opcode::Shl, -8_i128, 1_i128, -16_i128), (Opcode::AShr, -8, 1, -4)];
+        for (opcode, a, b, want) in cases {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(64), a);
+            let rhs = build.iconst(Type::int(64), b);
+            let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{opcode:?}");
+            assert_eq!(value_of(&func, out, Type::int(64)), Some(want), "{opcode:?}");
+        }
+        // The logical shift is the one that reads the value as bits, so minus eight shifted
+        // right by one is a very large positive number rather than minus four.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let lhs = build.iconst(Type::int(64), -8);
+        let rhs = build.iconst(Type::int(64), 1);
+        let out = build.binary(Opcode::LShr, lhs, rhs, Flags::NONE);
+        build.ret(&[out]);
+        assert!(fold(&mut func));
+        assert_eq!(value_of(&func, out, Type::int(64)), Some(i128::from(i64::MAX) - 3));
+    }
+
+    /// The one instruction under test, on one constant, folded as far as the pass takes it.
+    fn one(opcode: Opcode, ty: Type, arg: i128) -> Option<i128> {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.iconst(ty, arg);
+        let out = build.unary(opcode, value, ty);
+        build.ret(&[out]);
+        fold(&mut func);
+        value_of(&func, out, ty)
+    }
+
+    #[test]
+    fn the_bit_counts_are_evaluated_at_the_width_they_were_asked_at() {
+        let cases = [
+            (Opcode::Ctlz, 64, 0x0000_1000_0000_0000_i128, 19_i128),
+            (Opcode::Ctlz, 32, 0x0000_1000, 19),
+            (Opcode::Cttz, 64, 0x0000_1000_0000_0000, 44),
+            (Opcode::Cttz, 32, 0x0000_1000, 12),
+            (Opcode::Ctpop, 64, 0x0000_1000_0000_0000, 1),
+            (Opcode::Ctpop, 32, -1, 32),
+            (Opcode::Ctpop, 64, -1, 64),
+        ];
+        for (opcode, width, arg, want) in cases {
+            let ty = Type::int(width);
+            assert_eq!(one(opcode, ty, arg), Some(want), "{opcode:?} at {width} of {arg:#x}");
+        }
+    }
+
+    #[test]
+    fn a_search_for_a_bit_in_a_zero_answers_the_width_the_expansion_answers() {
+        for width in [8_u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            let want = Some(i128::from(width));
+            assert_eq!(one(Opcode::Ctlz, ty, 0), want, "leading, at {width}");
+            assert_eq!(one(Opcode::Cttz, ty, 0), want, "trailing, at {width}");
+            assert_eq!(one(Opcode::Ctpop, ty, 0), Some(0), "count, at {width}");
+        }
+    }
+
+    #[test]
+    fn the_two_reversals_are_evaluated_and_a_byte_swap_of_a_part_of_a_byte_is_not() {
+        let ty = Type::int(32);
+        assert_eq!(one(Opcode::Bswap, ty, 0x1234_5678), Some(0x7856_3412));
+        assert_eq!(one(Opcode::Bswap, Type::int(16), 0x1234), Some(0x3412));
+        assert_eq!(one(Opcode::Bitreverse, Type::int(8), 0b1010_1100), Some(0b0011_0101));
+        // A width that is not a whole number of bytes has no byte swap, so there is nothing to
+        // evaluate and the instruction stays for the backend to refuse.
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.iconst(Type::int(4), 0b1010);
+        let out = build.unary(Opcode::Bswap, value, Type::int(4));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_comparison_of_two_constants_becomes_a_one_or_a_nought() {
+        let cases = [
+            (IntPred::Eq, 7_i128, 7_i128, true),
+            (IntPred::Eq, 7, 8, false),
+            (IntPred::Ne, 7, 8, true),
+            (IntPred::Slt, -1, 1, true),
+            (IntPred::Sle, -1, -1, true),
+            (IntPred::Sgt, -1, 1, false),
+            (IntPred::Sge, 1, -1, true),
+            // The same pair read as bits rather than as numbers, where minus one is the largest
+            // value there is and every unsigned answer is the opposite of the signed one.
+            (IntPred::Ult, -1, 1, false),
+            (IntPred::Ule, -1, 1, false),
+            (IntPred::Ugt, -1, 1, true),
+            (IntPred::Uge, -1, 1, true),
+        ];
+        for (pred, a, b, want) in cases {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(64), a);
+            let rhs = build.iconst(Type::int(64), b);
+            let out = build.icmp(pred, lhs, rhs);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{pred:?} {a} {b}");
+            // The answer is one bit, where a set bit read as a signed number is minus one, so
+            // the question is which of the two constants it is rather than what it prints as.
+            let got = value_of(&func, out, Type::I1).expect("the comparison folded");
+            assert_eq!(got != 0, want, "{pred:?} {a} {b}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_at_a_narrow_width_is_read_at_that_width() {
+        // Two hundred and fifty five stored in eight bits is minus one, so it is below one when
+        // the comparison is signed and above it when the comparison is not.
+        let ty = Type::int(8);
+        for (pred, want) in [(IntPred::Slt, true), (IntPred::Ult, false)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(ty, 255);
+            let rhs = build.iconst(ty, 1);
+            let out = build.icmp(pred, lhs, rhs);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{pred:?}");
+            let got = value_of(&func, out, Type::I1).expect("the comparison folded");
+            assert_eq!(got != 0, want, "{pred:?}");
+        }
+    }
+
+    #[test]
+    fn a_comparison_with_one_constant_operand_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let ty = Type::int(64);
+        let param = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let rhs = build.iconst(ty, 3);
+        let out = build.icmp(IntPred::Eq, param, rhs);
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_bit_count_of_something_that_is_not_a_constant_is_left_alone() {
+        for opcode in [Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop, Opcode::Bswap] {
+            let (_, mut func, block) = blank();
+            let ty = Type::int(64);
+            let param = func.append_param(block, ty);
+            let mut build = Builder::new(&mut func, block);
+            let out = build.unary(opcode, param, ty);
+            build.ret(&[out]);
+            assert!(!fold(&mut func), "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn a_shift_by_the_width_or_more_is_left_alone_because_the_language_does_not_define_it() {
+        for count in [64_i128, 65, -1] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(64), 1);
+            let rhs = build.iconst(Type::int(64), count);
+            let out = build.binary(Opcode::Shl, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(!fold(&mut func), "a shift by {count} was folded");
+        }
+    }
+
+    #[test]
+    fn an_operation_that_wraps_folds_and_the_same_one_promising_it_will_not_does_not() {
+        let big = i128::from(i32::MAX);
+        for (flags, folds) in [(Flags::NONE, true), (Flags::NSW, false)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(32), big);
+            let rhs = build.iconst(Type::int(32), 1);
+            let out = build.binary(Opcode::Add, lhs, rhs, flags);
+            build.ret(&[out]);
+            assert_eq!(fold(&mut func), folds, "{flags}");
+            if folds {
+                assert_eq!(value_of(&func, out, Type::int(32)), Some(i128::from(i32::MIN)));
+            }
+        }
+    }
+
+    /// The function of `(__float128) (c ? 0.5L : -0.5L)` as the lowering hands it over, and the
+    /// same with the parameter read a second time.
+    fn joined(second_reader: bool) -> String {
+        let tail = if second_reader {
+            "    %7 = fpext.f128 %5\n    %8 = fadd %6, %7\n    return %8\n"
+        } else {
+            "    return %6\n"
+        };
+        format!(
+            "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+func @f(i32) -> f128, linkage(external) {{
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp slt %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = fconst.f80 0x3ffe8000000000000000
+    jump block3(%3)
+
+block2:
+    %4 = fconst.f80 0xbffe8000000000000000
+    jump block3(%4)
+
+block3(%5: f80):
+    %6 = fpext.f128 %5
+{tail}}}
+"
+        )
+    }
+
+    #[test]
+    fn a_conversion_of_a_join_of_two_constants_is_folded_on_each_edge() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(false), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        assert!(super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+        rucc_ir::verify(&module, &names).expect("the folded function is well formed");
+        let func = &module[id];
+        let insts = func.blocks().flat_map(|block| func.insts(block));
+        assert!(insts.into_iter().all(|inst| func[inst].opcode != Opcode::FPExt));
+        let join = func.blocks().last().expect("the join");
+        let param = func[join].params[0];
+        assert_eq!(func[param].ty, Type::float(Float::F128));
+        // 0.5 and -0.5 in binary128: a biased exponent of 0x3ffe and nothing in the fraction.
+        let mut passed: Vec<u128> = func
+            .blocks()
+            .filter_map(|block| func.terminator(block))
+            .flat_map(|jump| func.successors(jump).collect::<Vec<_>>())
+            .filter(|call| call.block == join)
+            .map(|call| float_bits(func, func[call.args][0]).expect("a constant is passed"))
+            .collect();
+        passed.sort_unstable();
+        assert_eq!(
+            passed,
+            [0x3ffe_0000_0000_0000_0000_0000_0000_0000, 0xbffe_0000_0000_0000_0000_0000_0000_0000]
+        );
+        assert!(!super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+    }
+
+    #[test]
+    fn a_join_parameter_read_twice_keeps_its_conversions() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(true), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        assert!(!super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+    }
+
+    #[test]
+    fn a_conversion_of_a_join_folds_only_with_fuel_for_it() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(false), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = super::fold_in(&mut module[id], &mut Fuel::of(0));
+        assert!(!stats.changed());
+        rucc_ir::verify(&module, &names).expect("nothing is left half done");
+        let func = &module[id];
+        let insts = func.blocks().flat_map(|block| func.insts(block));
+        assert_eq!(insts.into_iter().filter(|&inst| func[inst].opcode == Opcode::FPExt).count(), 1);
+    }
+
+    #[test]
+    fn a_folded_overflow_check_is_gone_so_the_next_round_has_nothing_to_fold() {
+        // `crate::constant_p` folds round after round until a round changes nothing, and an
+        // operation left behind on its two constants kept every round changing. In the kernel
+        // that left md.c's and netconsole.c's `flush_workqueue` questions to the fallback answer
+        // and the call to `__warn_flushing_systemwide_wq` stayed.
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+func @f() -> i64, linkage(external) {
+block0:
+    %0 = iconst.i64 256
+    %1 = iconst.i64 3
+    %2, %3 = umul_overflow.(i64, i1) %0, %1
+    return %2
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let func = &mut module[id];
+        assert!(super::fold_in(func, &mut Fuel::unlimited()).changed());
+        assert!(!super::fold_in(func, &mut Fuel::unlimited()).changed());
+        let func = &module[id];
+        let left = func.blocks().flat_map(|block| func.insts(block));
+        assert!(left.into_iter().all(|inst| func[inst].opcode != Opcode::UMulOverflow));
+    }
+
+    #[test]
+    fn an_overflow_check_on_two_constants_gives_the_wrapped_result_and_whether_it_wrapped() {
+        let check = |opcode, a: i128, b: i128, bits| {
+            let ty = Type::int(bits);
+            let (sum, over) =
+                super::overflowing(opcode, Imm::int(a, ty), Imm::int(b, ty), ty).unwrap();
+            (sum.signed(ty), over)
+        };
+        assert_eq!(check(Opcode::UMulOverflow, 256, 3, 64), (768, false));
+        assert_eq!(check(Opcode::UMulOverflow, 1 << 32, 1 << 32, 64), (0, true));
+        assert_eq!(check(Opcode::UAddOverflow, 255, 1, 8), (0, true));
+        assert_eq!(check(Opcode::USubOverflow, 1, 2, 8), (-1, true));
+        assert_eq!(check(Opcode::SAddOverflow, 127, 1, 8), (-128, true));
+        assert_eq!(check(Opcode::SSubOverflow, -128, 1, 8), (127, true));
+        assert_eq!(check(Opcode::SMulOverflow, -8, 16, 8), (-128, false));
+        assert_eq!(check(Opcode::SMulOverflow, -1, -128, 8), (-128, true));
+        let ty = Type::int(64);
+        assert!(super::overflowing(Opcode::Add, Imm::int(1, ty), Imm::int(1, ty), ty).is_none());
+    }
+
+    #[test]
+    fn an_unsigned_promise_is_broken_by_a_negative_result_as_well_as_by_a_large_one() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let lhs = build.iconst(Type::int(32), 1);
+        let rhs = build.iconst(Type::int(32), 2);
+        let out = build.binary(Opcode::Sub, lhs, rhs, Flags::NUW);
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn an_operation_with_one_constant_operand_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let param = func.append_param(block, Type::int(64));
+        let mut build = Builder::new(&mut func, block);
+        let rhs = build.iconst(Type::int(64), 7);
+        let out = build.binary(Opcode::Add, param, rhs, Flags::NONE);
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+        assert_eq!(func[out_inst(&func, out)].opcode, Opcode::Add);
+    }
+
+    #[test]
+    fn a_conversion_to_an_integer_truncates_toward_zero() {
+        for (text, expected) in [("2.75", 2_i128), ("-2.75", -2), ("0.5", 0), ("-0.5", 0)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = number(&mut build, text, Type::float(Float::F64));
+            let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{text}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_negative_number_converts_to_an_unsigned_type_only_when_truncating_lands_on_zero() {
+        for (text, expected) in [("-0.5", Some(0)), ("-1.5", None)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = number(&mut build, text, Type::float(Float::F64));
+            let out = build.unary(Opcode::FPToUI, value, Type::int(32));
+            build.ret(&[out]);
+            assert_eq!(fold(&mut func), expected.is_some(), "{text}");
+            assert_eq!(value_of(&func, out, Type::int(32)), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_number_the_destination_type_has_no_room_for_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = number(&mut build, "1e30", Type::float(Float::F64));
+        let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+        assert_eq!(func[out_inst(&func, out)].opcode, Opcode::FPToSI);
+    }
+
+    #[test]
+    fn a_nan_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let value = build.fconst(Type::float(Float::F64), 0x7ff8_0000_0000_0000);
+        let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_constant_is_read_in_the_format_its_own_type_gives_it() {
+        // The same hundred and twenty eight bits, which are an x87 three and an `f128` far too
+        // small to be anything but zero once it has been truncated.
+        let bits = super::Float::parse("3.0", Format::X87Extended).expect("a number").0.to_bits();
+        for (float, expected) in [(Float::F80, 3_i128), (Float::F128, 0)] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let value = build.fconst(Type::float(float), bits);
+            let out = build.unary(Opcode::FPToSI, value, Type::int(32));
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{float}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{float}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_of_something_that_is_not_a_constant_is_left_alone() {
+        let (_, mut func, block) = blank();
+        let param = func.append_param(block, Type::float(Float::F64));
+        let mut build = Builder::new(&mut func, block);
+        let out = build.unary(Opcode::FPToSI, param, Type::int(32));
+        build.ret(&[out]);
+        assert!(!fold(&mut func));
+    }
+
+    #[test]
+    fn a_divide_of_two_constants_is_folded() {
+        for (opcode, lhs, rhs, expected) in [
+            (Opcode::UDiv, 84, 12, 7),
+            (Opcode::URem, 85, 12, 1),
+            (Opcode::SDiv, -42, 5, -8),
+            (Opcode::SRem, -42, 5, -2),
+            (Opcode::UDiv, -1, 2, i128::from(u32::MAX / 2)),
+        ] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(32), lhs);
+            let rhs = build.iconst(Type::int(32), rhs);
+            let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{opcode:?}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn a_divide_the_language_leaves_undefined_is_left_for_the_machine() {
+        for (opcode, lhs, rhs) in [
+            (Opcode::SDiv, 42, 0),
+            (Opcode::UDiv, 42, 0),
+            (Opcode::SRem, 42, 0),
+            (Opcode::URem, 42, 0),
+            (Opcode::SDiv, i128::from(i32::MIN), -1),
+            (Opcode::SRem, i128::from(i32::MIN), -1),
+        ] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(32), lhs);
+            let rhs = build.iconst(Type::int(32), rhs);
+            let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(!fold(&mut func), "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn folding_leaves_the_function_something_the_verifier_accepts() {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let mut func = Func::new(name, Signature::new().with_returns(&[Type::int(64)]));
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let narrow = build.iconst(Type::int(32), 7);
+        let wide = build.unary(Opcode::SExt, narrow, Type::int(64));
+        build.ret(&[wide]);
+        assert!(fold(&mut func));
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let module_name = names.intern("m");
+        let mut module = Module::new(module_name, &target);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("folding does not break the IR");
+    }
+
+    #[test]
+    fn fuel_stops_the_transformation_and_not_the_walk() {
+        let build_two = |func: &mut Func, block: Block| {
+            let mut build = Builder::new(func, block);
+            let a = build.iconst(Type::int(32), 7);
+            let wide_a = build.unary(Opcode::SExt, a, Type::int(64));
+            let b = build.iconst(Type::int(32), 9);
+            let wide_b = build.unary(Opcode::SExt, b, Type::int(64));
+            let sum = build.binary(Opcode::Add, wide_a, wide_b, Flags::NONE);
+            build.ret(&[sum]);
+            (wide_a, wide_b)
+        };
+
+        let (_, mut none, block) = blank();
+        let (first, _) = build_two(&mut none, block);
+        let stats =
+            Fold.run(&mut none, &mut crate::machine::fixtures::analyses(), &mut Fuel::of(0));
+        assert!(!stats.changed());
+        assert_eq!(none[out_inst(&none, first)].opcode, Opcode::SExt);
+        // Both of them looked at and neither of them folded, which is the count a bisection is
+        // reading: how many sites are left past where the fuel ran out.
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 2);
+
+        let (_, mut one, block) = blank();
+        let (first, second) = build_two(&mut one, block);
+        let mut fuel = Fuel::of(1);
+        let stats = Fold.run(&mut one, &mut crate::machine::fixtures::analyses(), &mut fuel);
+        assert!(stats.changed());
+        assert_eq!(fuel.spent(), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
+        assert_eq!(one[out_inst(&one, first)].opcode, Opcode::IConst);
+        assert_eq!(one[out_inst(&one, second)].opcode, Opcode::SExt);
+    }
+
+    #[test]
+    fn folding_one_operation_uncovers_the_next() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let a = build.iconst(Type::int(32), 7);
+        let wide = build.unary(Opcode::SExt, a, Type::int(64));
+        let b = build.iconst(Type::int(64), 9);
+        let sum = build.binary(Opcode::Add, wide, b, Flags::NONE);
+        build.ret(&[sum]);
+        assert!(fold(&mut func));
+        // One walk in order is enough for this shape, because a constant is written before it
+        // is used and the walk is in the same order.
+        assert_eq!(value_of(&func, sum, Type::int(64)), Some(16));
+    }
+
+    #[test]
+    fn a_constant_is_left_where_it_is_and_folding_it_again_changes_nothing() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let a = build.iconst(Type::int(32), 7);
+        let wide = build.unary(Opcode::SExt, a, Type::int(64));
+        build.ret(&[wide]);
+        assert!(fold(&mut func));
+        assert!(!fold(&mut func), "a second run found something to do");
+    }
+
+    /// Parses one function, runs the pass over it, checks that the result verifies, and gives
+    /// back the text and the statistics.
+    fn through(body: &str) -> (String, crate::Stats) {
+        let text = format!(
+            "; ModuleID = 'phi.c'\n; format 0\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"\n\
+             func @f(i32) -> i64, linkage(external) {{\n{body}}}\n"
+        );
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let mut an = crate::machine::fixtures::analyses();
+        let stats = Fold.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = rucc_ir::verify_func(&module, &module[id], &names) {
+            panic!("{errors:#?}\n{}", rucc_ir::print(&module, &names));
+        }
+        (rucc_ir::print(&module, &names), stats)
+    }
+
+    /// Three edges into `block5`, each passing `%8` a constant, then `op`, which starts at `%9`
+    /// and ends in `%last`. A `mul` of that by `%8` reads the parameter a second time.
+    fn three(left: i64, middle: i64, right: i64, op: &str, last: u32) -> String {
+        let next = last + 1;
+        format!(
+            "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i64 {left}
+    jump block5(%3)
+block2:
+    %4 = iconst.i32 1
+    %5 = icmp eq %0, %4
+    br_if %5, block3, block4
+block3:
+    %6 = iconst.i64 {middle}
+    jump block5(%6)
+block4:
+    %7 = iconst.i64 {right}
+    jump block5(%7)
+block5(%8: i64):
+{op}
+    %{next} = mul %{last}, %8
+    return %{next}
+"
+        )
+    }
+
+    /// `UINT64_MAX / base` and `UINT64_MAX % base` with `base` 8, 16 or 10, which is NetBSD's
+    /// `citrus_prop.c` after inlining. Both become a new parameter, the division and the remainder
+    /// are gone, and each edge passes the answer for its own divisor.
+    #[test]
+    fn a_division_by_a_parameter_of_constants_becomes_a_parameter_of_answers() {
+        let op = "    %9 = iconst.i64 -1\n    %10 = udiv %9, %8\n    %11 = urem %9, %8\n    \
+                  %12 = add %10, %11";
+        let (out, stats) = through(&three(8, 16, 10, op, 12));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 2, "{out}");
+        assert!(!out.contains("udiv") && !out.contains("urem"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 16, u64::MAX / 10] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        for rest in [7, 15, 5] {
+            assert!(out.contains(&format!("iconst.i64 {rest}\n")), "{rest}: {out}");
+        }
+    }
+
+    /// The divisor is an `int` widened to the dividend's type, which is what the usual arithmetic
+    /// conversions make of `UINT64_MAX / base`. The fold looks through the widening, and the
+    /// widening stays for the `mul` that also reads it.
+    #[test]
+    fn a_division_by_a_widened_parameter_of_constants_folds() {
+        let body = "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i32 8
+    jump block3(%3)
+block2:
+    %4 = iconst.i32 10
+    jump block3(%4)
+block3(%5: i32):
+    %6 = iconst.i64 -1
+    %7 = sext.i64 %5
+    %8 = udiv %6, %7
+    %9 = mul %8, %7
+    return %9
+";
+        let (out, stats) = through(body);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(!out.contains("udiv"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 10] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        assert!(out.contains("sext.i64"), "{out}");
+    }
+
+    /// A zero divisor on one edge is undefined there, so nothing is folded on any edge.
+    #[test]
+    fn a_zero_divisor_on_one_edge_is_not_folded() {
+        for op in ["udiv", "sdiv", "urem", "srem"] {
+            let body = format!("    %9 = iconst.i64 100\n    %10 = {op} %9, %8");
+            let (out, stats) = through(&three(8, 0, 10, &body, 10));
+            assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+            assert!(out.contains(&format!("%10 = {op} %9, %8")), "{out}");
+        }
+    }
+
+    /// The most negative value divided by minus one overflows, so a signed division with that on
+    /// one edge is not folded on any edge.
+    #[test]
+    fn the_most_negative_value_divided_by_minus_one_is_not_folded() {
+        for op in ["sdiv", "srem"] {
+            let body = format!("    %9 = iconst.i64 {}\n    %10 = {op} %9, %8", i64::MIN);
+            let (out, stats) = through(&three(8, -1, 10, &body, 10));
+            assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+            assert!(out.contains(&format!("%10 = {op} %9, %8")), "{out}");
+        }
+        // The same divisors with a dividend that does not overflow do fold.
+        let body = "    %9 = iconst.i64 -80\n    %10 = sdiv %9, %8";
+        let (out, stats) = through(&three(8, -1, 10, body, 10));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(out.contains("iconst.i64 80\n") && out.contains("iconst.i64 -10\n"), "{out}");
+    }
+
+    /// An add on a parameter that something else also reads is left alone, because the new
+    /// parameter would cost a copy on each edge and the old one would stay. An add that is the
+    /// one reader of the parameter folds.
+    #[test]
+    fn a_cheap_operation_folds_only_when_it_is_the_one_reader() {
+        let body = "    %9 = iconst.i64 5\n    %10 = add %8, %9";
+        let (out, stats) = through(&three(1, 2, 3, body, 10));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        let alone = three(1, 2, 3, body, 10).replace("mul %10, %8", "mul %10, %10");
+        let (out, stats) = through(&alone);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(!out.contains("add %8"), "{out}");
+        assert!(out.contains("iconst.i64 6\n") && out.contains("iconst.i64 8\n"), "{out}");
+    }
+
+    /// Both operands are parameters of the same block, and each edge gives both a constant.
+    #[test]
+    fn two_parameters_of_one_block_fold_together() {
+        let body = "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i64 100
+    %4 = iconst.i64 7
+    jump block3(%3, %4)
+block2:
+    %5 = iconst.i64 90
+    %6 = iconst.i64 4
+    jump block3(%5, %6)
+block3(%7: i64, %8: i64):
+    %9 = udiv %7, %8
+    %10 = mul %9, %8
+    return %10
+";
+        let (out, stats) = through(body);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(out.contains("iconst.i64 14\n") && out.contains("iconst.i64 22\n"), "{out}");
+        assert!(!out.contains("udiv"), "{out}");
+    }
+
+    /// The shape of `citrus_prop.c` after inlining. The inner `if` picks 16 or 8 in `block5`, which
+    /// only passes it on, and `block6` sees 10 and the parameter of `block5`.
+    fn forwarded(inner: i64) -> String {
+        format!(
+            "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i32 10
+    jump block6(%3)
+block2:
+    %4 = iconst.i32 1
+    %5 = icmp eq %0, %4
+    br_if %5, block3, block4
+block3:
+    %6 = iconst.i32 16
+    jump block5(%6)
+block4:
+    %7 = iconst.i32 {inner}
+    jump block5(%7)
+block5(%8: i32):
+    jump block6(%8)
+block6(%9: i32):
+    %10 = iconst.i64 -1
+    %11 = sext.i64 %9
+    %12 = udiv %10, %11
+    %13 = urem %10, %11
+    %14 = add %12, %13
+    %15 = mul %14, %11
+    return %15
+"
+        )
+    }
+
+    /// The answers for 16 and 8 go on the edges into the forwarder, and the forwarder passes them
+    /// on in a new parameter. A zero on an edge into the forwarder stops the fold as well.
+    #[test]
+    fn a_division_through_a_block_that_only_passes_a_parameter_on_folds() {
+        let (out, stats) = through(&forwarded(8));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 2, "{out}");
+        assert!(!out.contains("udiv") && !out.contains("urem"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 16, u64::MAX / 10, 7, 15, 5] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        let (out, stats) = through(&forwarded(0));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        assert!(out.contains("udiv") && out.contains("urem"), "{out}");
+    }
+
+    /// A division by a parameter that `edges` edges pass a constant into.
+    fn many(edges: u32) -> String {
+        let cases: Vec<String> =
+            (1..edges).map(|case| format!("{case} => block{}", case + 1)).collect();
+        let mut body = format!("block0(%0: i32):\n    switch %0, block1, [{}]\n", cases.join(", "));
+        let merge = edges + 1;
+        for block in 1..=edges {
+            body.push_str(&format!(
+                "block{block}:\n    %{block} = iconst.i64 {}\n    jump block{merge}(%{block})\n",
+                block + 1
+            ));
+        }
+        let (param, dividend, quotient) = (merge, merge + 1, merge + 2);
+        body.push_str(&format!(
+            "block{merge}(%{param}: i64):\n    %{dividend} = iconst.i64 1000\n    \
+             %{quotient} = udiv %{dividend}, %{param}\n    return %{quotient}\n"
+        ));
+        body
+    }
+
+    /// More edges than the limit are not folded, because each edge pays a copy.
+    #[test]
+    fn a_block_with_many_edges_is_not_folded() {
+        let (out, stats) = through(&many(super::EDGES as u32));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        let (out, stats) = through(&many(super::EDGES as u32 + 1));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        assert!(out.contains("udiv"), "{out}");
+    }
+
+    /// The instruction that defines a value, which every value in these tests has.
+    fn out_inst(func: &Func, value: Value) -> rucc_ir::Inst {
+        match func[value].def {
+            rucc_ir::Def::Result { inst, .. } => inst,
+            rucc_ir::Def::Param { .. } => panic!("a parameter has no instruction"),
+        }
+    }
+}

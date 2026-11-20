@@ -1,0 +1,23 @@
+[package]
+name = "rucc-archive"
+description = "Writes the ar archives a linker reads as static libraries, with the symbol index in them and nothing that varies between two runs, for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0, beside `rucc-base` and `rucc-tuple`, and it depends on neither. Rank 0 is what
+# makes it reachable from `rucc-stub` at rank 1, which is the reason it is a crate rather than a
+# module: the import library writer there and the builtins archive want the same container. It is
+# also why the interface takes a flavour rather than a target, since `rucc-tuple` is at rank 0 too
+# and a crate cannot depend on its own rank.
+[dependencies]

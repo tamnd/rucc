@@ -1,0 +1,24 @@
+[package]
+name = "rucc-debug"
+description = "DWARF 5 generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# `rucc-object` is here because what this crate hands back is the bytes of a section and the
+# relocations in them, which is the object writer's vocabulary rather than a second one. The rest
+# of the crates section 18.3 expects this one to reach for are added when they are used, not in
+# advance, so that the graph `cargo xtask layers` reads is the real one.
+[dependencies]
+rucc-object.workspace = true
+gimli = { workspace = true, features = ["write", "std"] }

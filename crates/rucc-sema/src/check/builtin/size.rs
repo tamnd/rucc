@@ -1,0 +1,920 @@
+//! `__builtin_object_size` and `__builtin_dynamic_object_size`, which ask how many bytes there
+//! are behind an address.
+//!
+//! Design: `spec/13-gnu-compat.md` section 13.5.
+//!
+//! This is what `_FORTIFY_SOURCE` is built on. A fortified `string.h` turns every `memcpy` into
+//! `__builtin___memcpy_chk(dst, src, len, __builtin_object_size(dst, 0))`, so a compiler with no
+//! answer for this one has no answer for any copying function either, and every distribution
+//! builds with the macro on. The `_chk` family is tamnd/rucc#225 and this is the half of it that
+//! has to come first.
+//!
+//! # The four kinds
+//!
+//! The second argument is two bits. The low one says which object is being asked about: clear for
+//! the whole object the address is inside, set for the closest member containing it. The high one
+//! says which way to guess when there is more than one answer: clear for the largest and set for
+//! the smallest. So `&s.b[2]` in a structure whose `b` is a twelve byte array ten bytes in asks
+//! about `s` for kinds zero and two and about `b` for kinds one and three.
+//!
+//! Only the low bit does anything here, because nothing answered here is a guess. Where the object
+//! is in front of us the largest and the smallest are the same number, and where it is not there
+//! is no answer at all, which is `(size_t) -1` for the kinds that want the largest and zero for
+//! the kinds that want the smallest. That pair is what the standard idiom in a fortified header
+//! tests against, and answering it is what makes the header take the unchecked path.
+//!
+//! # What the walk sees
+//!
+//! A declared object, a string literal or a compound literal, with members and constant subscripts
+//! on top of it and a constant displacement added to the whole. That is an address this compiler
+//! knows the object of by looking at it, and no analysis is involved: every number comes from the
+//! layout of a type. An array with no size, the flexible array member at the end of a structure,
+//! has no size of its own, and in a declared object it is the rest of that object.
+//!
+//! A dereference is half a stop. What is behind `p` is a fact about where `p` came from rather
+//! than about the expression, so the whole object is not known, but `p->name` is a member whose
+//! size is in its type, and the kinds that ask about the closest object have that answer. The
+//! exception is a trailing array, which a program may allocate past the end of, and which ones
+//! count is `-fstrict-flex-arrays`: at the default every trailing array does, and at three, which
+//! the kernel builds with, only one written `[]`. Only the record the pointer points at is looked
+//! at this way, since a record nested in it is followed by the rest of the outer one. A union is
+//! looked through, so an array in a union that is a member of a structure is as long as its type
+//! says unless the union is at the end of the structure and the array counts as flexible, and an
+//! array in the union the pointer points at has no answer at any level. That is gcc 13 and gcc 15
+//! at `-O2`, and [`unbounded_member`] is the rule.
+//!
+//! The storage duration does not matter. A local is as knowable as a global here, unlike in a
+//! constant expression, where the difference is the whole question.
+//!
+//! # What is left for the IR
+//!
+//! An address this cannot see that is read out of a local of the function, with nothing in
+//! working it out that a program could notice, is not answered here. It becomes an
+//! `ExprKind::ObjectSize`, which lowers to an `object_size` instruction, and `rucc_opt::objsize`
+//! answers it before any other pass, following the branches and loops that set the pointer. That
+//! is where the guessing the high bit asks for happens. A pointer read out of a parameter or a
+//! global is answered here as not known, because the IR has no more of where it came from, and
+//! answering it now is what lets lowering make a checking call over one the plain call at `-O0`.
+//! The exception is a `static` above `-O0`, which the IR may find nothing writes.
+//!
+//! # Where this parts company with gcc
+//!
+//! gcc gives up on the subobject question as soon as any pointer arithmetic is involved and this
+//! does not, so `__builtin_object_size(g + 4, 1)` over a thirty two byte array is twenty eight
+//! here and `(size_t) -1` at gcc 16.2.0's `-O0`. The two agree again at `-O1`, where gcc's own
+//! object size pass runs and gives twenty eight, so what this differs from is a stage of gcc
+//! rather than an answer of gcc's, and the number is the exact one either way. Measured on gcc
+//! 16.2.0 over twelve shapes at `-O0` and `-O2`.
+//!
+//! Both compilers agree that the pointer is not evaluated. `__builtin_object_size(f(), 0)` does
+//! not call `f`, which was measured rather than read off the manual, and it is the same rule
+//! `sizeof` follows for the same reason: what the builtin reads is the shape of the expression and
+//! not the value it would produce.
+//!
+//! One thing gcc refuses and this takes, which is either of these in a static initializer. gcc
+//! folds them after the front end has decided what a constant expression is, so it reports
+//! `initializer element is not constant`; here the answer is a constant by the time anything asks,
+//! and refusing a program on the strength of when the folding happens to run is not a rule worth
+//! copying.
+
+use rucc_ast::{BinaryOp, UnaryOp};
+use rucc_base::Symbol;
+use rucc_diag::{Diagnostic, Span};
+use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, Types, integer_info, layout};
+
+use crate::check::Checker;
+use crate::decl::{DeclKind, Linkage, StorageDuration};
+use crate::eval::bare;
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
+use crate::tast::{Const, Tast};
+
+/// The two names, which ask the same question.
+///
+/// They differ in what a program may do with the answer rather than in what the answer is. The
+/// dynamic spelling is allowed to come back as something computed while the program runs, so a
+/// header may use it where the object is one that was allocated; the other must be a constant. A
+/// constant satisfies both, so both are answered here and the same way.
+const FAMILY: &[&str] = &["__builtin_object_size", "__builtin_dynamic_object_size"];
+
+/// The bit [`ExprKind::ObjectSize`] carries above the two of the kind when the question was asked
+/// with `__builtin_dynamic_object_size`.
+const DYNAMIC: u8 = 4;
+
+/// The code the second argument reports under.
+const CODE: &str = "E0709";
+
+/// The largest the second argument may be, which is the two bits it is made of.
+const KINDS: i128 = 3;
+
+/// An address whose object this compiler can see some of, and where in it the address lands.
+///
+/// Either size can be missing. The outermost object is missing when the walk went through a
+/// pointer, since what the pointer points into is not in the expression, and the closest one is
+/// missing when it is a trailing array that `-fstrict-flex-arrays` counts as flexible. A kind that
+/// asks about the missing one has no answer here.
+#[derive(Debug, Clone, Copy)]
+struct Reach {
+    /// The size of the outermost object the address is inside.
+    whole: Option<u64>,
+    /// How far into that the address is.
+    into_whole: u64,
+    /// The size of the closest member or complete object containing the address.
+    closest: Option<u64>,
+    /// How far into that the address is.
+    into_closest: u64,
+}
+
+impl Reach {
+    /// An object whose own start this address is.
+    const fn all(size: u64) -> Reach {
+        Reach { whole: Some(size), into_whole: 0, closest: Some(size), into_closest: 0 }
+    }
+
+    /// An object reached through a pointer, of which nothing is known until a member is taken.
+    const UNSEEN: Reach = Reach { whole: None, into_whole: 0, closest: None, into_closest: 0 };
+
+    /// A member `size` bytes long, reached by going `offset` bytes into whatever holds it.
+    ///
+    /// The member becomes the closest object and the outermost one is unchanged, which is the
+    /// whole of the difference the low bit of the kind asks about.
+    const fn member(self, offset: u64, size: Option<u64>) -> Reach {
+        Reach {
+            whole: self.whole,
+            into_whole: self.into_whole.saturating_add(offset),
+            closest: size,
+            into_closest: 0,
+        }
+    }
+
+    /// The same address moved along by `bytes`, which is what arithmetic on a pointer does.
+    ///
+    /// Nothing for a displacement that walks off the front, since an address before the object it
+    /// was built from is one C says nothing about and a wrapped number is not an answer.
+    fn moved(self, bytes: i128) -> Option<Reach> {
+        let step = |from: u64| u64::try_from(i128::from(from).checked_add(bytes)?).ok();
+        Some(Reach {
+            into_whole: step(self.into_whole)?,
+            into_closest: step(self.into_closest)?,
+            ..self
+        })
+    }
+
+    /// How many bytes are left in front of the address, which is the answer.
+    ///
+    /// Zero rather than a negative number for an address past the end of what it names. Such an
+    /// address is either the one past the end C allows and has nothing in front of it, or it is
+    /// one C says nothing about, and zero is the right answer to both.
+    fn left(self, closest: bool) -> Option<u64> {
+        let (size, into) =
+            if closest { (self.closest, self.into_closest) } else { (self.whole, self.into_whole) };
+        Some(size?.saturating_sub(into))
+    }
+}
+
+impl Checker<'_> {
+    /// The node for a call to either of the two, if the name is one of them.
+    ///
+    /// The name decides this rather than the declaration, the way it does for the rest of the
+    /// family: what a name beginning `__builtin_` means is a fact about the name.
+    pub(in crate::check) fn object_size_builtin(
+        &mut self,
+        function: Option<Symbol>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Option<ExprId> {
+        let name = function?;
+        let spelled = self.text(name);
+        if !spelled.starts_with("__builtin_") || !FAMILY.contains(&spelled) {
+            return None;
+        }
+        let spelled = spelled.to_owned();
+        let &[address, kind] = args else { return None };
+        if args.iter().any(|&arg| self.is_poisoned(arg)) {
+            return Some(self.poison(span));
+        }
+        let Some(kind) = self.object_size_kind(&spelled, kind) else {
+            return Some(self.poison(span));
+        };
+        let ty = self.size_type();
+        let reach = self.behind(address);
+        let answer = reach.and_then(|reach| reach.left(kind & 1 == 1));
+        // A member of what a pointer points at, asked about for the largest closest answer above
+        // `-O0`, which gcc answers with what is left of the member or of the whole object,
+        // whichever is less. The whole object is a fact about where the pointer came from, so the
+        // IR answers it, and where it finds nothing the member stands.
+        let capped = kind == 1
+            && self.cx.optimizing
+            && reach.is_some_and(|reach| reach.whole.is_none())
+            && self.read_pointer(address);
+        // Inside a function, an address read out of a local is asked about again once the function
+        // is IR, where a pointer chosen by a branch or a loop is a block parameter whose every
+        // argument is in front of the walk. Only where lowering the address does nothing a
+        // program could notice, since the pointer is not evaluated, and never in a static
+        // initializer, which has to be a constant by the time this is done. A pointer read out of
+        // a global came from somewhere the IR cannot see either, unless it is a `static` nothing
+        // in the file writes, so it is answered here and now,
+        // and so is one read out of a parameter at `-O0`, which is what lets a `_chk` call over
+        // one be the plain call there. Above that a parameter waits, because once the function is
+        // inlined the IR can see what the caller passed, and that is when gcc answers it:
+        // `check_copy_size` inside `copy_from_user` asks about its `addr` and gets the size of
+        // the buffer the caller of the caller passed.
+        // The dynamic spelling asked about a flexible array member with `counted_by` is answered
+        // with the count, which the IR reads where the address of the array is taken. gcc 16
+        // answers every kind that way above `-O0`.
+        let counted = spelled == FAMILY[1] && self.cx.optimizing && self.counted_array(address);
+        if ((answer.is_none() && self.local(address)) || capped || counted)
+            && self.body.is_some()
+            && self.quiet(address)
+        {
+            // The dynamic spelling is carried down as a third bit, because the IR is where an
+            // answer computed while the program runs can be built, and only that spelling may
+            // have one. See `rucc_opt::objsize`.
+            let dynamic = if spelled == FAMILY[1] { DYNAMIC } else { 0 };
+            let kind = u8::try_from(kind).ok()? | dynamic;
+            let node = ExprKind::ObjectSize { address, kind };
+            return Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span));
+        }
+        let answer = match answer {
+            Some(answer) => i128::from(answer),
+            // Nothing is known, so the answer is the one that says so. The two spellings of it
+            // are the extremes of the range, because a kind asking for the largest has to name a
+            // size no object is bigger than and one asking for the smallest has to name a size no
+            // object is smaller than.
+            None if kind & 2 == 0 => {
+                integer_info(&self.types, ty, self.cx.target).map_or(-1, |info| info.wrap(-1))
+            }
+            None => 0,
+        };
+        let answer = self.constant(Const::Int(answer), ty, span);
+        self.answered_late.insert(answer);
+        Some(answer)
+    }
+
+    /// The second argument as one of the four kinds, or nothing with the complaint already made.
+    ///
+    /// gcc refuses a kind that is not a constant and a constant outside the range in the same
+    /// sentence, and so does this, because both are the same defect: the builtin has to decide
+    /// which of four questions it was asked before it can answer, and a number that is not there
+    /// yet decides nothing.
+    fn object_size_kind(&mut self, spelled: &str, kind: ExprId) -> Option<i128> {
+        let span = self.tast.expr_span(kind);
+        // The folding is asked and its own complaints are dropped, for the reason
+        // `check/builtin/prefetch.rs` drops them: what is wrong here is that the argument is not a
+        // constant, said in the words of the builtin it is an argument of.
+        let value = self.eval().integer(kind).ok();
+        if let Some(value) = value {
+            if (0..=KINDS).contains(&value) {
+                return Some(value);
+            }
+        }
+        let what = format!("the second argument of `{spelled}` is a constant from 0 to {KINDS}");
+        let note = "the low bit asks about the closest member rather than the whole object and \
+                    the high bit asks for the smallest answer rather than the largest, so a \
+                    number that is not known until the program runs names no question";
+        self.report(Diagnostic::error(what, span).with_code(CODE).note(note, span));
+        None
+    }
+
+    /// What the object behind this address is, or nothing when the expression does not say.
+    ///
+    /// The argument arrives converted to `const void *` by the prototype, so the conversions come
+    /// off first: a `void` has no size, and what the call was written with is underneath them.
+    fn behind(&mut self, address: ExprId) -> Option<Reach> {
+        let mut expr = address;
+        loop {
+            match self.tast[expr].kind {
+                ExprKind::Cast(inner) => expr = inner,
+                ExprKind::Convert { kind, operand } if through(kind) => expr = operand,
+                // The address of an object, which is the object.
+                ExprKind::Unary { op: UnaryOp::AddrOf, operand } => return self.inside(operand),
+                // A displacement from one, which is the same object further along. The scale comes
+                // from what the pointer points at rather than from what the other side folded to,
+                // since that is what decides the arithmetic.
+                ExprKind::Binary { op: BinaryOp::Add, lhs, rhs } => {
+                    return self.displaced(lhs, rhs, 1);
+                }
+                ExprKind::Binary { op: BinaryOp::Sub, lhs, rhs } => {
+                    return self.displaced(lhs, rhs, -1);
+                }
+                // An array that decayed, which the loop has just walked through the conversion
+                // of, and anything else that names an object rather than holding a pointer.
+                _ => return self.inside(expr),
+            }
+        }
+    }
+
+    /// What the object this lvalue names is part of, or nothing when the walk cannot say.
+    fn inside(&mut self, expr: ExprId) -> Option<Reach> {
+        match self.tast[expr].kind {
+            // What a pointer points at, which has no size until a member of it is taken. `p[i]`
+            // is the same object as `*(p + i)`, so both spellings arrive here.
+            _ if self.through_pointer(expr) => Some(Reach::UNSEEN),
+            ExprKind::Decl(decl) => {
+                // A parameter of array type is a pointer by the time it is declared, so what is
+                // measured here is a pointer and not the array the program wrote, which is right:
+                // nothing about the caller's object survives into the callee's type.
+                Some(Reach::all(self.bytes_of(self.tast[decl].ty)?))
+            }
+            ExprKind::CompoundLiteral(decl) => Some(Reach::all(self.bytes_of(self.tast[decl].ty)?)),
+            ExprKind::Str(_) => Some(Reach::all(self.bytes_of(self.tast[expr].ty)?)),
+            ExprKind::Member { base, field: index } => {
+                let reach = self.inside(base)?;
+                let TypeKind::Record(record) = bare(&self.types, self.tast[base].ty) else {
+                    return None;
+                };
+                let info = self.types.record_info(record);
+                let field = info.fields.get(index as usize).copied()?;
+                // A bit-field has no address, so nothing may ask this about one, and the member
+                // is skipped rather than measured in bytes it does not own.
+                if field.bits.is_some() {
+                    return None;
+                }
+                // Through a pointer the record may be longer than its type says, when its last
+                // member is an array the program allocates more of. Which arrays count is what
+                // `-fstrict-flex-arrays` says, and which records is what `unbounded_member` says.
+                let size = self.bytes_of(field.ty);
+                let level = self.strict_flex_of(record, field.name);
+                if unbounded_member(&self.tast, &self.types, base, index, level) {
+                    return Some(reach.member(field.offset, None));
+                }
+                // A record ending in a flexible array goes on past its type, and so does every
+                // record holding it that ends in it too. Where that runs all the way out to the
+                // pointer, the closest object is what the pointer points at, as gcc walks it.
+                if self.types.ends_flexible(field.ty, self.cx.gnuc) && self.open_to_pointer(base) {
+                    return Some(reach.member(field.offset, None));
+                }
+                // An array with no length in a declared object is what is left of that object, at
+                // either kind and wherever the record holding it sits, so `n.in.f` runs on over
+                // the members of `n` after `in`. That is gcc 13 and gcc 15. Through a pointer it
+                // has no answer, but a member of one of its elements still has its own size, as
+                // in gs_usb's `hf->classic_can->data`, where the array is in an unnamed struct.
+                let Some(size) = size else {
+                    if reach.whole.is_none() {
+                        return Some(reach.member(field.offset, None));
+                    }
+                    let reach = reach.member(field.offset, reach.whole);
+                    return Some(Reach { into_closest: reach.into_whole, ..reach });
+                };
+                Some(reach.member(field.offset, Some(size)))
+            }
+            ExprKind::Subscript { base, index } => {
+                // The closest object is the array and not the element, which is gcc's rule and is
+                // what makes `__builtin_object_size(&v.a[1], 1)` the rest of `a`.
+                let array = self.decayed(base)?;
+                let reach = self.inside(array)?;
+                // A subscript the program works out says nothing about how far into the array the
+                // element is, but a member taken from the element is still as long as its type
+                // says, whichever element it is in. That is `cpu_topology[cpu].core_sibling`,
+                // which gcc measures as the 64 bytes of a `struct cpumask` whatever `cpu` is.
+                let Ok(count) = self.eval().integer(index) else {
+                    return Some(Reach::UNSEEN);
+                };
+                self.sized_element(expr, array, reach, count)
+            }
+            // `*a` of an array reached through a pointer, which is `a[0]`. One in a declared
+            // object is what a pointer points at, and the arm at the top has it.
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+                let array = self.decayed(operand)?;
+                let reach = self.inside(array)?;
+                self.sized_element(expr, array, reach, 0)
+            }
+            _ => None,
+        }
+    }
+
+    /// The element `count` places into `array`, which the walk measured as `reach`.
+    fn sized_element(
+        &mut self,
+        expr: ExprId,
+        array: ExprId,
+        reach: Reach,
+        count: i128,
+    ) -> Option<Reach> {
+        let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
+        let into = u64::try_from(count.checked_mul(element)?).ok()?;
+        // An array the member walk left without a size has none as an array either. One
+        // with no length that it did measure is the rest of the object it is in.
+        let (closest, into_closest) = match reach.closest {
+            Some(_) => match self.bytes_of(self.tast[array].ty) {
+                Some(size) => (Some(size), into),
+                None => (reach.closest, reach.into_closest.saturating_add(into)),
+            },
+            None => (None, into),
+        };
+        Some(Reach {
+            whole: reach.whole,
+            into_whole: reach.into_whole.saturating_add(into),
+            closest,
+            into_closest,
+        })
+    }
+
+    /// Whether working this address out changes nothing, so that lowering it for the question
+    /// the IR answers is the same as not evaluating it.
+    ///
+    /// Reads, members, subscripts, arithmetic and choices. A call, an assignment, an increment or
+    /// anything else with an effect stops it, and so does a read of something `volatile`.
+    fn quiet(&self, expr: ExprId) -> bool {
+        if self.types.quals(self.tast[expr].ty).has(Qualifiers::VOLATILE) {
+            return false;
+        }
+        match self.tast[expr].kind {
+            ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) => true,
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.quiet(inner),
+            ExprKind::Member { base, .. } => self.quiet(base),
+            ExprKind::Unary { op, operand } => {
+                !matches!(
+                    op,
+                    UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec
+                ) && self.quiet(operand)
+            }
+            ExprKind::Subscript { base: lhs, index: rhs } | ExprKind::Binary { lhs, rhs, .. } => {
+                self.quiet(lhs) && self.quiet(rhs)
+            }
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.quiet(cond) && self.quiet(then) && self.quiet(otherwise)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the address reads a local of the function being checked, which is the one place a
+    /// pointer can come from that the IR has every assignment of in front of it.
+    ///
+    /// The pointer may be under a member, a subscript or a dereference, as in `p->data`, whose
+    /// object is the one `p` was set to. The walk has no answer for a flexible array reached that
+    /// way, and gcc's at `-O2` is what is left of that object, which the IR can work out. The
+    /// kernel's nouveau sizes a request on the stack with `__member_size(args->data)`. A place
+    /// whose index is worked out when the program runs goes to the IR too, as
+    /// [`Self::indexed_here`] says.
+    fn local(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Member { .. }
+            | ExprKind::Subscript { .. }
+            | ExprKind::Unary { op: UnaryOp::Deref | UnaryOp::AddrOf, .. } => {
+                self.set_here(expr) || self.indexed_here(expr)
+            }
+            ExprKind::Decl(id) => {
+                let decl = &self.tast[id];
+                decl.kind == DeclKind::Object
+                    && match decl.duration {
+                        StorageDuration::Automatic => self.cx.optimizing || !self.is_parameter(id),
+                        // A `static` nothing in the file writes is read only once the IR has
+                        // looked at all of it, and what it points at is known then.
+                        // fortify_kunit's `ptr_of_11` is one, and gcc answers 12 for it.
+                        StorageDuration::Static => {
+                            self.cx.optimizing && decl.linkage != Linkage::External
+                        }
+                        _ => false,
+                    }
+            }
+            // A pointer read out of what another pointer points at, as `inode->i_link` is, or out
+            // of a member of a local, as f2fs's `dst.bitmap` is. ufs sets `i_link` just before it
+            // copies the name there, and above `-O0` the IR looks for that store the way gcc's
+            // loads take the value of one. Where there is none the answer is the one that says
+            // nothing, as it would be here.
+            ExprKind::Convert { kind: Conversion::Lvalue, operand }
+                if self.cx.optimizing && self.in_memory(operand) =>
+            {
+                true
+            }
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs }
+                if self.counted_here(lhs, rhs) =>
+            {
+                true
+            }
+            ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),
+            ExprKind::Cond { then, otherwise, .. } => self.local(then) || self.local(otherwise),
+            _ => false,
+        }
+    }
+
+    /// Whether this place is reached through a pointer this function set, a local that is not a
+    /// parameter. A parameter's object is only known once the call is inlined, and a place named
+    /// rather than reached through a pointer has the size its type says, so both are answered here.
+    fn set_here(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Member { base, .. }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand: base } => self.set_here(base),
+            ExprKind::Subscript { base, .. }
+            | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => match self.decayed(base) {
+                Some(array) => self.set_here(array),
+                None => self.pointer_set_here(base),
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether a subscript on the way to this place has an index that reads a local, the way the
+    /// count of `p + i` does, or above `-O0` any index the program works out. How far into the
+    /// array the element is is then known only when the program runs, and the dynamic spelling has
+    /// an answer the IR can work out from it. That is cxgb3's `memcpy (&d->flit[flits], ...)`,
+    /// which gcc checks against what is left of `flit`, and venus's
+    /// `memcpy (&cap->pl[cap->num_pl], ...)`, whose index is read through the pointer itself.
+    fn indexed_here(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Member { base, .. }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand: base } => self.indexed_here(base),
+            ExprKind::Subscript { base, index } => {
+                self.local(index)
+                    || self.cx.optimizing && self.eval().integer(index).is_err()
+                    || self.decayed(base).is_some_and(|array| self.indexed_here(array))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `lhs op rhs` moves a pointer by a count that above `-O0` is worked out when the
+    /// program runs, the way an index is for [`Self::indexed_here`]. `p + n` is `&p[n]`, so the two
+    /// spellings go to the IR alike. That is poly1305's `memcpy(dctx->buf + dctx->buflen, ...)`,
+    /// which gcc checks against what is left of `buf` and which was answered here with nothing
+    /// because neither side reads a local.
+    fn counted_here(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        let pointer = |expr: ExprId| {
+            matches!(
+                bare(&self.types, self.tast[expr].ty),
+                TypeKind::Pointer(_) | TypeKind::Array { .. }
+            )
+        };
+        let count = match (pointer(lhs), pointer(rhs)) {
+            (true, false) => rhs,
+            (false, true) => lhs,
+            _ => return false,
+        };
+        self.cx.optimizing && self.eval().integer(count).is_err()
+    }
+
+    /// Whether the object behind this address is what a pointer read out of a local or a parameter
+    /// of the function points at, as in `p->name`, `&p->name[3]` and `p[2].name`.
+    fn read_pointer(&self, expr: ExprId) -> bool {
+        let automatic = |expr: ExprId| {
+            let mut expr = expr;
+            while let ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } =
+                self.tast[expr].kind
+            {
+                expr = inner;
+            }
+            let ExprKind::Decl(id) = self.tast[expr].kind else { return false };
+            let decl = &self.tast[id];
+            decl.kind == DeclKind::Object && decl.duration == StorageDuration::Automatic
+        };
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner)
+            | ExprKind::Convert { operand: inner, .. }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand: inner }
+            | ExprKind::Member { base: inner, .. } => self.read_pointer(inner),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs } => {
+                self.read_pointer(lhs) || self.read_pointer(rhs)
+            }
+            ExprKind::Subscript { base, .. }
+            | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => match self.decayed(base) {
+                Some(array) => self.read_pointer(array),
+                None => automatic(base),
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether this lvalue is a pointer kept in memory a pointer points at, as `p->next` and
+    /// `p[1].buf` are, or in a member of a local the IR can read the stores to, as `dst.bitmap`
+    /// is, rather than in a variable of its own.
+    fn in_memory(&self, expr: ExprId) -> bool {
+        if !matches!(bare(&self.types, self.tast[expr].ty), TypeKind::Pointer(_)) {
+            return false;
+        }
+        let mut expr = expr;
+        let mut inside = false;
+        loop {
+            match self.tast[expr].kind {
+                _ if self.through_pointer(expr) => return true,
+                ExprKind::Member { base, .. } => expr = base,
+                ExprKind::Subscript { base, .. }
+                | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => {
+                    match self.decayed(base) {
+                        Some(array) => expr = array,
+                        None => return true,
+                    }
+                }
+                ExprKind::Decl(_) => return inside && self.local(expr),
+                _ => return false,
+            }
+            inside = true;
+        }
+    }
+
+    /// Whether this pointer is a local of the function, not a parameter, read as it is.
+    fn pointer_set_here(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Decl(id) => {
+                let decl = &self.tast[id];
+                decl.kind == DeclKind::Object
+                    && decl.duration == StorageDuration::Automatic
+                    && !self.is_parameter(id)
+            }
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => {
+                self.pointer_set_here(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this lvalue is what a pointer points at, or a member of that whose record ends in a
+    /// flexible array, as [`open_to_pointer`] says.
+    fn open_to_pointer(&self, expr: ExprId) -> bool {
+        open_to_pointer(&self.tast, &self.types, expr, self.cx.gnuc)
+    }
+
+    /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
+    fn through_pointer(&self, expr: ExprId) -> bool {
+        pointed_at(&self.tast, &self.types, expr)
+    }
+
+    /// Whether an address is a flexible array member whose `counted_by` named its count, or a step
+    /// into one.
+    fn counted_array(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner) | ExprKind::Unary { op: UnaryOp::AddrOf, operand: inner } => {
+                self.counted_array(inner)
+            }
+            ExprKind::Convert { kind, operand } if through(kind) => self.counted_array(operand),
+            ExprKind::Subscript { base, .. } => self.counted_array(base),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs } => {
+                self.counted_array(lhs) || self.counted_array(rhs)
+            }
+            ExprKind::Member { base, field } => {
+                let TypeKind::Record(record) =
+                    self.types.kind(self.types.canonical(self.tast[base].ty))
+                else {
+                    return false;
+                };
+                let fields = &self.types.record_info(record).fields;
+                let Some(name) = fields.get(field as usize).and_then(|field| field.name) else {
+                    return false;
+                };
+                self.tast.counter(record, name).is_some()
+                    && matches!(
+                        self.types.kind(self.types.canonical(self.tast[expr].ty)),
+                        TypeKind::Array { .. }
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// The lvalue an array to pointer conversion was applied to, if that is what this is.
+    ///
+    /// A subscript whose base is a real pointer rather than a decayed array stops the walk, since
+    /// where that pointer came from is not a fact about the expression.
+    fn decayed(&self, base: ExprId) -> Option<ExprId> {
+        decayed_in(&self.tast, &self.types, base)
+    }
+
+    /// The object behind `lhs op rhs`, where one side is the pointer and the other is a count.
+    ///
+    /// Either side may be the pointer, since `4 + p` is the same address as `p + 4`. The sign is
+    /// what the operator contributes, and a subtraction whose right side is the pointer never
+    /// arrives here, because the difference of two pointers is an integer.
+    fn displaced(&mut self, lhs: ExprId, rhs: ExprId, sign: i128) -> Option<Reach> {
+        let (pointer, count) = if let Some(step) = self.step_of(lhs) {
+            (lhs, i128::from(step).checked_mul(self.eval().integer(rhs).ok()?)?)
+        } else {
+            let step = self.step_of(rhs)?;
+            (rhs, i128::from(step).checked_mul(self.eval().integer(lhs).ok()?)?)
+        };
+        self.behind(pointer)?.moved(sign.checked_mul(count)?)
+    }
+
+    /// The size of what this pointer or array points at, which is what its arithmetic is scaled
+    /// by.
+    fn step_of(&mut self, expr: ExprId) -> Option<u64> {
+        let target = match bare(&self.types, self.tast[expr].ty) {
+            TypeKind::Pointer(target) | TypeKind::Array { elem: target, .. } => target,
+            _ => return None,
+        };
+        self.bytes_of(target)
+    }
+
+    /// How large an object of this type is, or nothing when it has no size.
+    ///
+    /// The one that matters is the array with no length at the end of a structure, which is a
+    /// promise that more bytes follow and no claim about how many, so a program asking about it
+    /// gets the answer that says nothing.
+    fn bytes_of(&mut self, ty: TypeId) -> Option<u64> {
+        if let TypeKind::Array { len: ArrayLen::Unknown | ArrayLen::Star, .. } =
+            bare(&self.types, ty)
+        {
+            return None;
+        }
+        layout(&self.types, ty, self.cx.target).ok().map(|it| it.size)
+    }
+}
+
+/// Whether gcc has no size for member `field` of what `base` names when asked about the closest
+/// object, because the member is an array that may run on past its type through a pointer.
+///
+/// gcc 13 and gcc 15 at `-O2` agree on this, measured on twenty two shapes at every
+/// `-fstrict-flex-arrays` level. A member that is not an array is always as long as its type
+/// says. For an array the unions holding it are looked through: if one of them is what the
+/// pointer points at there is no answer. Otherwise the record holding the outermost of them, or
+/// the array itself when there is none, decides. The array is bounded unless it counts as
+/// flexible at its level and what holds it is the last member of that record. If it is, the
+/// answer is lost only when that record is what the pointer points at, or is a member of unions
+/// that are. So `p->a` for `struct { union { char a[8]; int k; }; int z; } *p` is eight at every
+/// level, as the kernel's `struct vmac_desc_ctx` has it, and `u->a` for a `union` pointer is not
+/// known at any.
+///
+/// `level` is the `-fstrict-flex-arrays` level the member is measured at, which is the command
+/// line's unless the member said `strict_flex_array`, as [`crate::flexible_at`] takes it. The IR
+/// asks the same question of a member of a union when lowering marks where it starts.
+#[must_use]
+pub fn unbounded_member(tast: &Tast, types: &Types, base: ExprId, field: u32, level: u8) -> bool {
+    let record_of = |expr: ExprId| match bare(types, tast[expr].ty) {
+        TypeKind::Record(id) => Some(id),
+        _ => None,
+    };
+    let union = |expr: ExprId| {
+        record_of(expr).is_some_and(|id| types.record_info(id).kind == RecordKind::Union)
+    };
+    let Some(record) = record_of(base) else {
+        return false;
+    };
+    let Some(member) = types.record_info(record).fields.get(field as usize).copied() else {
+        return false;
+    };
+    if !matches!(bare(types, member.ty), TypeKind::Array { .. }) {
+        return false;
+    }
+    let flexible = crate::flexible_at(types, member.ty, level);
+    let (mut holder, mut index) = (base, field);
+    while union(holder) {
+        if pointed_at(tast, types, holder) {
+            return true;
+        }
+        let ExprKind::Member { base, field } = tast[holder].kind else {
+            return false;
+        };
+        (holder, index) = (base, field);
+    }
+    let Some(record) = record_of(holder) else {
+        return false;
+    };
+    if !flexible || types.record_info(record).fields.len() != index as usize + 1 {
+        return false;
+    }
+    loop {
+        if pointed_at(tast, types, holder) {
+            return true;
+        }
+        match tast[holder].kind {
+            ExprKind::Member { base, .. } if union(base) => holder = base,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether this lvalue is what a pointer points at, or a member of that whose record ends in a
+/// flexible array, or a member of that again, so that nothing between it and the pointer has a
+/// size the program cannot run past.
+///
+/// That is how gcc walks the address of a record that ends in a flexible array, in the release
+/// `gnuc` names, and the IR asks it too when lowering marks where such a member starts.
+#[must_use]
+pub fn open_to_pointer(tast: &Tast, types: &Types, expr: ExprId, gnuc: u32) -> bool {
+    match tast[expr].kind {
+        _ if pointed_at(tast, types, expr) => true,
+        ExprKind::Member { base, .. } => {
+            types.ends_flexible(tast[expr].ty, gnuc) && open_to_pointer(tast, types, base, gnuc)
+        }
+        _ => false,
+    }
+}
+
+/// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
+///
+/// `*a` of an array `a` that is reached through a pointer is `a[0]` to gcc, an element of the
+/// array, and so not what a pointer points at. gs_usb's `hf->classic_can->data` is how the kernel
+/// writes it, and gcc keeps the field spanning WARN of the copy into it. An array in a declared
+/// object is not folded that way, and gcc answers what is left of the object there.
+fn pointed_at(tast: &Tast, types: &Types, expr: ExprId) -> bool {
+    match tast[expr].kind {
+        ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+            decayed_in(tast, types, operand).is_none_or(|array| !reached(tast, types, array))
+        }
+        ExprKind::Subscript { base, .. } => decayed_in(tast, types, base).is_none(),
+        _ => false,
+    }
+}
+
+/// Whether this lvalue is in an object a pointer points at, through the members and the elements
+/// of arrays it is in.
+fn reached(tast: &Tast, types: &Types, expr: ExprId) -> bool {
+    match tast[expr].kind {
+        ExprKind::Member { base, .. } => reached(tast, types, base),
+        ExprKind::Unary { op: UnaryOp::Deref, operand: base }
+        | ExprKind::Subscript { base, .. } => {
+            decayed_in(tast, types, base).is_none_or(|array| reached(tast, types, array))
+        }
+        _ => false,
+    }
+}
+
+/// The lvalue an array to pointer conversion was applied to, if that is what `base` is.
+fn decayed_in(tast: &Tast, types: &Types, base: ExprId) -> Option<ExprId> {
+    let mut expr = base;
+    loop {
+        match tast[expr].kind {
+            ExprKind::Cast(inner) => expr = inner,
+            ExprKind::Convert { kind, operand } if through(kind) => expr = operand,
+            _ => break,
+        }
+    }
+    matches!(bare(types, tast[expr].ty), TypeKind::Array { .. }).then_some(expr)
+}
+
+/// Whether the walk can see through this conversion to the object underneath it.
+///
+/// The one that is not transparent is the read, and it is the whole of the difference between an
+/// address this compiler knows the object of and one it does not. `g` where `g` is an array is the
+/// array itself under a decay, so the walk goes through it; `p` where `p` is a pointer is a read
+/// of a variable, and what was stored in it is a fact about the program's history rather than
+/// about the expression, so the walk stops there and the answer is the one that says nothing.
+const fn through(kind: Conversion) -> bool {
+    match kind {
+        Conversion::ArrayDecay
+        | Conversion::FunctionDecay
+        | Conversion::Pointer
+        | Conversion::NullPointer
+        | Conversion::Void => true,
+        Conversion::Lvalue
+        | Conversion::Arithmetic
+        | Conversion::Bool
+        | Conversion::Broadcast
+        | Conversion::Hardbool
+        | Conversion::Excess => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_gnu::{Kind, Status};
+
+    use super::*;
+
+    /// Both names are rows of the table that carry a signature, because the signature is what the
+    /// call is checked against before this replaces it. A row without one would never be declared
+    /// and the call would be to an undeclared name.
+    #[test]
+    fn both_names_are_rows_of_the_table_that_carry_the_same_signature() {
+        for name in FAMILY {
+            let Some(feature) = rucc_gnu::lookup(Kind::Builtin, name) else {
+                panic!("{name} is answered here and is not in features.toml");
+            };
+            assert_eq!(feature.status, Status::Implemented);
+            assert_eq!(feature.signature, "size_t(const void *, int)", "{name}");
+            assert!(feature.library.is_empty(), "{name} is not a call to anything");
+        }
+    }
+
+    /// An address past the end of what it names has nothing in front of it, rather than a number
+    /// that wrapped.
+    ///
+    /// One past the end is an address C allows a program to form and not to read, and anything
+    /// further is one C says nothing about, so zero is the right answer to both. A subtraction is
+    /// what saturates here instead, and letting it wrap would hand a fortified header the largest
+    /// size there is for the one address it should refuse.
+    #[test]
+    fn an_address_past_the_end_has_nothing_left_in_front_of_it() {
+        let reach = Reach::all(8).moved(8).expect("one past the end is an address");
+        assert_eq!(reach.left(false), Some(0));
+        assert_eq!(reach.left(true), Some(0));
+        let reach = Reach::all(8).moved(40).expect("further is still an address");
+        assert_eq!(reach.left(false), Some(0));
+    }
+
+    /// An address before the object it was built from has no answer at all.
+    ///
+    /// It is not an address C gives a meaning to, and the arithmetic that would produce a size for
+    /// it is the arithmetic that wraps. Nothing is what the caller turns into the unknown answer,
+    /// which is the one a fortified header reads as a copy it cannot check.
+    #[test]
+    fn an_address_in_front_of_its_object_is_not_one_this_answers_about() {
+        assert!(Reach::all(8).moved(-1).is_none());
+    }
+
+    /// The low bit of the kind is the whole of the difference between the two questions, and the
+    /// member is what the narrower one names.
+    ///
+    /// Worth a test of its own because the two answers coincide for every object that is not
+    /// inside another one, which is most of them, so a walk that ignored the bit would look right
+    /// almost everywhere and be wrong exactly where `_FORTIFY_SOURCE` is most useful.
+    #[test]
+    fn the_low_bit_of_the_kind_picks_the_member_out_of_the_object_it_is_in() {
+        let reach = Reach::all(24).member(12, Some(12)).moved(2).expect("two bytes into a member");
+        assert_eq!(reach.left(false), Some(10), "twenty four bytes with fourteen used");
+        assert_eq!(reach.left(true), Some(10), "twelve bytes with two used");
+        let reach = Reach::all(24).member(0, Some(8));
+        assert_eq!(reach.left(false), Some(24));
+        assert_eq!(reach.left(true), Some(8));
+    }
+}

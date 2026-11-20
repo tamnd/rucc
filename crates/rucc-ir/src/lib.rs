@@ -1,0 +1,148 @@
+//! The SSA IR with block parameters, and its printer, parser and verifier.
+//!
+//! Design: `spec/08-ir.md`. Layer rank 9, see `spec/18-package-layout.md`.
+//!
+//! One IR, target-independent, in SSA form, produced by lowering the typed AST and consumed by
+//! the optimizer and the code generator. The MIR is a second, target-dependent representation
+//! and lives in its own crate.
+//!
+//! **Block parameters, not phi nodes.** A phi is a pseudo-instruction whose operands are
+//! positionally tied to a predecessor list stored somewhere else, and every IR built that way
+//! collects bugs where the two get out of step during a CFG edit. Block parameters put the
+//! correspondence in the branch, where it belongs: `br_if %c, block2(%a, %b), block3(%d)`.
+//! Removing a predecessor is then a local edit, and there is no such thing as a malformed phi.
+//!
+//! # What is here so far
+//!
+//! The vocabulary: [`Type`] and [`Float`] for the type system, [`Opcode`] with [`IntPred`] and
+//! [`FloatPred`] for the instruction set, [`Flags`] with [`MemOrder`] and [`RmwOp`] for what
+//! rides on an instruction, and [`Attrs`] for what is true of a whole function rather than of
+//! one instruction in it. [`Signature`] for what a function takes and returns, with [`Abi`] on
+//! each [`Param`] for what a call asks of it beyond its type, which is the one thing about a C
+//! function that reading the C cannot answer. The containers: [`Func`], holding [`BlockData`] and
+//! [`InstData`] and [`ValueData`] in flat tables, with [`Builder`] to append to it, and
+//! [`Module`], holding the functions with the [`Global`]s and the [`Alias`]es and the target
+//! they are all for. The textual form: [`print()`], which writes a module out, and [`parse()`],
+//! which reads it back byte for byte. And [`verify()`], which says whether a module is one the
+//! rest of the compiler may believe.
+//!
+//! Every crate in the workspace is published, and publishing implies a promise. This one is
+//! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
+//! Depend on the `rucc` binary's behaviour, not on this.
+
+#![doc(html_root_url = "https://docs.rs/rucc-ir/0.30.15")]
+
+mod asm;
+mod attrs;
+mod facts;
+#[cfg(test)]
+mod fixtures;
+mod flags;
+mod func;
+pub mod holding;
+mod inst;
+mod module;
+mod opcode;
+mod parse;
+mod print;
+pub mod term;
+mod ty;
+mod verify;
+
+pub use asm::{AsmOperand, AsmOperands, AsmRole};
+pub use attrs::{AllocSize, AttrSet, Attrs, FpContract, twice_by_name};
+pub use facts::{Bounds, Facts};
+pub use flags::{Flags, MATH_BUILTINS, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
+pub use func::{Builder, Counts, Func, Notices, Start, WasmNames};
+pub use inst::{
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Counter,
+    Def, Drains, Extra, Hint, Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode,
+    Param, PlaneNode, Restrict, Shuffle, Sig, Signature, SlotList, SwitchInfo, TbaaNode, VaInfo,
+    Value, ValueData, ValueList, ValueRef,
+};
+pub use module::{
+    Alias, AliasId, AliasKind, Byte, ByteRange, COPIED, Copies, DataLayout, DataList, Datum, Dll,
+    FuncId, Global, GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, Site, SymbolRef, TlsModel,
+    Visibility,
+};
+pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
+pub use parse::{Joiner, ParseError, parse};
+pub use print::{Printer, numbers, print, print_func};
+pub use ty::{Float, Kind, Type};
+pub use verify::{Doms, VerifyError, verify, verify_func};
+
+/// The milestone in `spec/17-milestones.md` that fills this crate in.
+pub const MILESTONE: &str = "M2";
+
+/// The version of the textual form, written in the module header.
+///
+/// The IR is not a stable interface before 1.0 and this number does not promise that it is.
+/// It exists so that a dump from one build read by another build fails with something a person
+/// can act on rather than with a parse error twenty lines in.
+pub const FORMAT_VERSION: u32 = 0;
+
+/// The names a library call fold may leave behind, sorted.
+///
+/// Here rather than beside the folds because lowering asks as well. A declaration of one of these
+/// is what decides the signature a call the fold makes has to carry, so it stays in the module
+/// even where nothing in the file calls it by name.
+pub const LIBCALL_REPLACEMENTS: [&str; 16] = [
+    "__memcpy_chk",
+    "ceilf",
+    "floorf",
+    "fputc",
+    "fputs",
+    "fwrite",
+    "memcpy",
+    "nearbyintf",
+    "putchar",
+    "puts",
+    "rintf",
+    "roundf",
+    "strchr",
+    "strcpy",
+    "strlen",
+    "truncf",
+];
+
+/// The names a checking call may become once its check cannot fail, sorted.
+///
+/// These are not in [`LIBCALL_REPLACEMENTS`] because what a call to one of them looks like is read
+/// off the call it replaces rather than written down. Half of them are variadic or take a
+/// `va_list`, and what a `va_list` is travels with the target, so the one signature that is right
+/// is the one the checking call already had with the checking arguments taken out of it.
+pub const LIBCALL_UNCHECKED: [&str; 18] = [
+    "__memcpy_chk",
+    "__strcat_chk",
+    "__strcpy_chk",
+    "__strncpy_chk",
+    "memcpy",
+    "memmove",
+    "mempcpy",
+    "memset",
+    "snprintf",
+    "sprintf",
+    "stpcpy",
+    "stpncpy",
+    "strcat",
+    "strcpy",
+    "strncat",
+    "strncpy",
+    "vsnprintf",
+    "vsprintf",
+];
+
+/// The routine that runs a C function's landing pads, which is libgcc's. See [`Opcode::Landing`].
+pub const PERSONALITY: &str = "__gcc_personality_v0";
+
+/// The name of the pointer to [`PERSONALITY`] that the header of an unwind table reaches it
+/// through, which is gcc's name for the same object.
+pub const PERSONALITY_REF: &str = "DW.ref.__gcc_personality_v0";
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn milestone_is_recorded() {
+        assert!(super::MILESTONE.starts_with('M'));
+    }
+}

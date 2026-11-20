@@ -1,0 +1,2352 @@
+//! The instruction set.
+//!
+//! Design: `spec/08-ir.md` section 8.3.
+//!
+//! The set is small enough to enumerate and it is closed. Adding an opcode is a spec change,
+//! because the verifier, the printer, the parser, the rewrite rules and the lowering all have
+//! to learn it, and an opcode that only half of them know about is a silent miscompilation
+//! waiting for the right input.
+//!
+//! Two things are deliberately absent. There is no `getelementptr`: pointer arithmetic is
+//! [`Opcode::PtrAdd`] over a byte offset the frontend computed, because C never needs the
+//! multi-index form and its absence removes a well known source of complexity. And there is no
+//! `phi`: values arriving at a block are the block's parameters, passed by the branch, so
+//! there is no operand list positionally tied to a predecessor list kept somewhere else.
+
+use std::fmt;
+
+/// One instruction of the IR.
+///
+/// The names are the textual form exactly, so [`Opcode::name`] and [`Opcode::from_name`] are
+/// what the printer and the parser use, and neither carries a table of its own that could
+/// drift from this one.
+///
+/// The enum is not `non_exhaustive`, deliberately. The set is closed, so a pass that matches
+/// on every opcode should stop compiling when one is added rather than fall into a wildcard
+/// arm that quietly does the wrong thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Opcode {
+    // Constants. A constant is an instruction rather than an operand kind, so that every
+    // operand is a value and every value has one definition, which is what makes the
+    // dominance check in the verifier a single rule rather than a rule with exceptions.
+    /// An integer constant, `iconst.i32 7`.
+    IConst,
+    /// A floating point constant, `fconst.f64 0x1.8p+1`.
+    FConst,
+    /// A vector constant with every lane the same, `splat.i8x16 0`.
+    Splat,
+    /// The address of a global or a function, `global_addr @counter`.
+    GlobalAddr,
+    /// The address of a block in this function, `block_addr block3`.
+    ///
+    /// The one instruction that names a block without being a branch, which is what GNU's
+    /// `&&label` is. Where it goes is [`Opcode::IndirectBr`], and the two are only useful
+    /// together: an address on its own is a number that nothing can do anything with.
+    BlockAddr,
+
+    // Arithmetic.
+    /// Integer addition.
+    Add,
+    /// Integer subtraction.
+    Sub,
+    /// Integer multiplication.
+    Mul,
+    /// Signed division.
+    SDiv,
+    /// Unsigned division.
+    UDiv,
+    /// Signed remainder, with the sign of the dividend.
+    SRem,
+    /// Unsigned remainder.
+    URem,
+    /// The high half of the product of two unsigned integers, which is the half an ordinary
+    /// multiply throws away. Only the back end writes one, for a division by a constant.
+    UMulHigh,
+    /// The high half of the product of two signed integers.
+    SMulHigh,
+    /// Bitwise and.
+    And,
+    /// Bitwise or.
+    Or,
+    /// Bitwise exclusive or.
+    Xor,
+    /// Shift left.
+    Shl,
+    /// Logical shift right, shifting in zeroes.
+    LShr,
+    /// Arithmetic shift right, shifting in the sign bit.
+    AShr,
+    /// Floating point addition.
+    FAdd,
+    /// Floating point subtraction.
+    FSub,
+    /// Floating point multiplication.
+    FMul,
+    /// Floating point division.
+    FDiv,
+    /// Floating point remainder.
+    FRem,
+    /// Floating point negation, which flips the sign bit and is not `0 - x`.
+    FNeg,
+    /// Fused multiply-add, rounded once.
+    Fma,
+
+    // Comparison.
+    /// Integer comparison, producing `i1` or a vector of `i1`.
+    ICmp,
+    /// Floating point comparison, producing `i1` or a vector of `i1`.
+    FCmp,
+
+    // Selection.
+    /// One of two values, chosen by a bit. `select c, a, b` is `a` when `c` is one.
+    ///
+    /// This is what control flow becomes when it stops being control flow.
+    /// `spec/optimizer/22-phiopt-and-if-conversion.md` section 22.2 makes it the lowering target
+    /// for a diamond whose two arms compute a value, and the reason it is an opcode rather than a
+    /// pattern is that it is the form the rule set is written against: `select(c, a, a) -> a` and
+    /// `select(c, 1, 0) -> zext(c)` are ordinary rules once the shape has a name.
+    ///
+    /// Both arms are evaluated, which is the whole point and also the whole danger. Whatever
+    /// produces one of these owes the argument that evaluating the arm that is not chosen is
+    /// harmless, and section 22.6 is the list of ways that argument goes wrong.
+    Select,
+
+    // Conversion.
+    /// Narrows an integer, discarding the high bits.
+    Trunc,
+    /// Widens an integer, copying the sign bit.
+    SExt,
+    /// Widens an integer, filling with zeroes.
+    ZExt,
+    /// Narrows a floating point value.
+    FPTrunc,
+    /// Widens a floating point value.
+    FPExt,
+    /// Floating point to signed integer.
+    FPToSI,
+    /// Floating point to unsigned integer.
+    FPToUI,
+    /// Signed integer to floating point.
+    SIToFP,
+    /// Unsigned integer to floating point.
+    UIToFP,
+    /// An address to an integer of the same width.
+    PtrToInt,
+    /// An integer to an address.
+    IntToPtr,
+    /// A reinterpretation of the same bits at the same width.
+    Bitcast,
+
+    // Lanes.
+    /// One lane of a vector, `extractlane.i32 %v, lane 2`, which is a value of the lane's type.
+    ExtractLane,
+    /// A vector with one lane replaced, `insertlane.i32x4 %v, %x, lane 2`.
+    InsertLane,
+    /// A vector made of the lanes of another in the order a list of lane numbers gives,
+    /// `shuffle.i32x4 %v, lanes [1, 2, 3, 0]`. One source and at most eight lanes, which is what
+    /// the one register SSE2 shuffles read.
+    Shuffle,
+
+    // Memory.
+    /// Memory as the function found it, which is where a memory SSA chain starts.
+    ///
+    /// It produces one `mem` and takes nothing, and it belongs at the top of the entry block.
+    /// GCC calls the same thing the default definition of `.MEM` and LLVM calls it
+    /// `liveOnEntry`. It exists as an instruction rather than as a parameter of the entry block
+    /// because the entry block's parameters are the function's parameters and the verifier
+    /// checks them against the signature, and memory is not an argument anybody passed.
+    MemEntry,
+    /// A stack slot. In the entry block, or marked dynamic for a variable length array.
+    Alloca,
+    /// A read.
+    Load,
+    /// A write, producing no value.
+    Store,
+    /// Address arithmetic: an address and a byte offset.
+    PtrAdd,
+    /// A copy between addresses that do not overlap, of the payload's size or of a third operand.
+    Memcpy,
+    /// A copy between addresses that may overlap, of the payload's size or of a third operand.
+    Memmove,
+    /// A fill with one byte, of the payload's size or of a third operand.
+    Memset,
+    /// An atomic read.
+    AtomicLoad,
+    /// An atomic write.
+    AtomicStore,
+    /// An atomic read-modify-write, carrying which operation in [`RmwOp`](crate::RmwOp).
+    AtomicRmw,
+    /// An atomic compare and exchange, producing the old value and whether it succeeded.
+    Cmpxchg,
+    /// A memory barrier.
+    Fence,
+
+    // Memory safety. Design: `spec/safe-memory/06-instrumentation.md` section 6.2.2. None of
+    // these is emitted unless `-fsafety` asked for it, and a function compiled without it
+    // contains not one of them.
+    /// The capability of a pointer value, taken from the pointer's provenance.
+    ///
+    /// One operand, the pointer, and one capability out. This is the general question and the other
+    /// producers are all the special cases of it that have a cheap answer, which is why it is the
+    /// one that always works and the one to reach for last. A pointer whose provenance the compiler
+    /// still holds should have got its capability from wherever that provenance came from: from the
+    /// allocation site, from the aux slot beside it in memory, from the frame its caller wrote, or
+    /// from the derivation that narrowed it. One of these is what is left when none of those did.
+    ///
+    /// So it has two lowerings and which one it gets is not a property of the instruction. A pointer
+    /// the lowering can trace back to an allocation site gets the cheap answer, which is a subtract
+    /// and a load off the header the allocator wrote. Anything else gets the plane walk, which is
+    /// the expensive answer and the only one that is always available, and comes back marked as
+    /// recovered so the summary counts it as the weakening it is.
+    ///
+    /// An interior pointer is always the second of those, and that is the answer to the question
+    /// document 05 section 5.2.3 leaves open rather than a gap in it. The header is behind the
+    /// payload so that finding it is a subtract by a constant, which is true of a pointer to the
+    /// base of an object and false of a pointer to the middle of one, and the lowering asks for the
+    /// base by construction rather than by checking.
+    CapOf,
+    /// The capability in the auxiliary slot beside a stored pointer, read back.
+    ///
+    /// A pointer written to memory and read again has to bring its capability with it, and where
+    /// the capability lives is document 05's question rather than this one's. What this says is
+    /// that a capability comes back from an address.
+    ///
+    /// Three operands: the capability of the object the word is in, the address of the word, and
+    /// the pointer that was loaded from it. The first is what says where the slot is, since the
+    /// aux is in front of the object and the arithmetic is over the object's own base and extent,
+    /// and the third is what the slot's two numbers are relative to. Both of those are facts about
+    /// the representation document 05 section 5.2.2 chose, and an instrumented load has both
+    /// values in hand already, since the capability is the one its bounds check used and the
+    /// pointer is what the load produced.
+    CapLoad,
+    /// The other half of [`Opcode::CapLoad`], writing one into the slot beside a pointer.
+    ///
+    /// Four operands: the capability of the object the word is in, the address of the word, the
+    /// pointer being stored there, and that pointer's capability. The first three are the same
+    /// three [`Opcode::CapLoad`] takes and for the same reasons, and the fourth is what is being
+    /// written down.
+    CapStore,
+    /// The slots beside a run of copied words, carried over from the run they were copied from.
+    ///
+    /// Three operands, for the reason [`Opcode::MetaTypeCopy`] has three: the destination, the
+    /// source, and how many bytes moved. A copy of a structure moves whatever pointers are in it
+    /// and the capability of each of those lives in the slot beside it, so a copy that moved the
+    /// bytes and left the slots alone would leave every pointer in the destination described by
+    /// whatever was there before, which is nothing at best and another instance's answer at worst.
+    ///
+    /// No capability operand, for the reason the other two copies name no node. What each
+    /// destination slot ends up saying is whatever the slot beside the word it came from said, and
+    /// the only place that is written down is the aux over the source.
+    CapCopy,
+    /// The capability that permits nothing, which is what a null pointer has.
+    CapNull,
+    /// A capability narrowed to a sub-object of what it covered.
+    ///
+    /// Only under `-fsafety-subobject`. Narrowing is what catches an overflow from one member of
+    /// a struct into the next, and it is separate because C code that walks off the end of a
+    /// member on purpose exists and a project has to be able to say so.
+    CapNarrow,
+    /// The capability for an address that arrived from outside, recovered from the planes.
+    CapRecover,
+    /// How many bytes from an address on the capability covers, asking for no more than a limit.
+    ///
+    /// Three operands, the capability, the address and how many bytes the asker wants, and one
+    /// integer result that is never more than that limit. It is what
+    /// `spec/safe-memory/07-check-elimination.md` section 7.4 needs to split a loop: the checked
+    /// part and the unchecked part are divided at `min(n, extent / sizeof(T))`, and the extent is
+    /// the half of that a compiler cannot work out on its own.
+    ///
+    /// The limit is an operand because under milestone S1 answering means walking the lifetime
+    /// plane, and a walk that stops at the number of bytes the loop was going to read anyway is
+    /// bounded by the work the loop is already doing. An answer smaller than the truth costs
+    /// iterations in the checked half and is never wrong, which is what makes stopping early
+    /// allowed. Once a capability carries its own bounds, which is milestone S2, this is a
+    /// subtraction on the capability and the limit is one `min`.
+    CapExtent,
+    /// How many bytes below an address on the capability covers, asking for no more than a limit.
+    ///
+    /// The mirror of [`Opcode::CapExtent`], with the same three operands and the same kind of
+    /// answer. What it counts is the bytes ending at the address rather than the bytes starting
+    /// there, so an answer of `n` says that `[addr - n, addr)` belongs to one thing. The address
+    /// itself is one past what is asked about, which is what a walk from high to low needs: the
+    /// question is about where the walk ends up, and where it ends up is below where it began.
+    ///
+    /// The ownership asked about is the byte below the address rather than the byte at it, since
+    /// the address may be one past the end of the object and the object is what the question is
+    /// about. Everything else, the limit operand and why an answer short of the truth is allowed,
+    /// is [`Opcode::CapExtent`]'s.
+    CapExtentBack,
+    /// The capabilities of a call's pointer arguments, handed over beside the arguments.
+    ///
+    /// Document 05 section 5.3 is the whole of why this is an instruction of its own rather than
+    /// more operands on the call. An instrumented function's calling convention is unchanged, so a
+    /// pointer argument goes in the register it always went in and `sizeof(void *)` is still eight,
+    /// which is what lets an object this compiler built link against one nobody instrumented. The
+    /// capability therefore travels out of band, in a small per thread frame the caller writes and
+    /// the callee reads, indexed by argument position.
+    ///
+    /// One operand per pointer argument, in the order the call passes them, and no operand for the
+    /// arguments that are not pointers. A call handing over more pointers than the frame has room
+    /// for describes the ones that fit and the callee recovers the rest, which is a weakening the
+    /// summary counts rather than a refusal. How many fit is the runtime's number and
+    /// `rucc_safety::frame` is where the compiler keeps it, so nothing here is a bound on the
+    /// operand count.
+    ///
+    /// It goes immediately in front of the call it is about, which is how the two are tied
+    /// together, the same way [`Opcode::MetaRelease`] is tied to the atomic it goes in front of.
+    CapPublish,
+    /// There is no frame for this call, which is what a callee that might not be instrumented gets.
+    ///
+    /// The other half of [`Opcode::CapPublish`] and not the absence of one. Publishing to a callee
+    /// that never reads the frame leaves it in place for whatever that callee calls back into, and
+    /// a callback entered from uninstrumented code holding somebody else's capabilities is worse
+    /// than one entered holding none. So a call the compiler cannot say reads frames says there is
+    /// nothing rather than saying nothing at all, and document 10 section 10.8's callback recovers
+    /// its arguments the way an entry from outside always does.
+    CapClear,
+    /// The capability of a pointer parameter, out of the frame the caller published.
+    ///
+    /// The reading end of [`Opcode::CapPublish`], in the callee rather than in the caller. Two
+    /// operands, the parameter itself and which position it is in the call, and one capability out.
+    ///
+    /// The parameter is an operand because it is the answer when there is no frame. A function
+    /// entered from code this build never compiled finds nothing published, and so does one whose
+    /// caller could not vouch for it and said `cap_clear`, and in both cases the capability has to be
+    /// worked out from the pointer the way [`Opcode::CapRecover`] does. That is the expensive answer
+    /// the frame exists to avoid, it is available whatever the caller did, and it is counted as the
+    /// weakening it is.
+    ///
+    /// The position is an operand rather than a payload for the same reason [`Opcode::CapNarrow`]'s
+    /// offset and length are: it is a number the runtime is handed. A position the frame does not
+    /// reach is not an error either, since it is the recovery again, so nothing here has to know how
+    /// many capabilities a frame holds.
+    CapArg,
+    /// The capability of the pointer this function is returning, left where its caller reads.
+    ///
+    /// One operand, the capability, and it goes immediately in front of the `ret` it is about, which
+    /// is the tie [`Opcode::CapPublish`] has with its call. A function that returns from several
+    /// places has one of these in front of each of them, because what is being said is about the
+    /// value leaving by that particular one.
+    ///
+    /// This is the only thing in the design that writes into a frame somebody else made. It is
+    /// allowed to because the frame is the caller's stack and the caller is waiting for this
+    /// function to return, and it is needed because a returned pointer is the one value that crosses
+    /// a call in the other direction.
+    CapYield,
+    /// The capability of the pointer a call gave back, out of the frame the call was published with.
+    ///
+    /// The reading end of [`Opcode::CapYield`], in the caller. One operand, the pointer that came
+    /// back, and one capability out. The operand is there for the reason [`Opcode::CapArg`]'s is: a
+    /// callee that wrote nothing leaves the bottom capability where the caller put it, and the
+    /// bottom one is the signal to work the answer out from the pointer instead.
+    ///
+    /// It goes immediately after the call it is about, and that call has to be one a `cap_publish`
+    /// goes in front of. A call that says there is no frame has no frame for a callee to have
+    /// written into, so there would be nothing for this to read.
+    CapResult,
+    /// An access is within its capability's bounds, aligned, and permitted.
+    ///
+    /// The size and the alignment are the access's, and they are in the memory payload rather
+    /// than in operands because they are what the front end knew and not what the program
+    /// computed.
+    ///
+    /// A third operand overrides how many bytes are asked about, and it exists for the one check
+    /// the front end did not write. `spec/safe-memory/07-check-elimination.md` section 7.4 replaces
+    /// the checks in a loop that runs `n` times with one check over `n * sizeof(T)` bytes, and that
+    /// is a length the program computes rather than one anybody knew when the access was parsed. The
+    /// payload still holds the alignment and the type information of the access the check came from,
+    /// and its size becomes the size of one of them rather than the size of the question.
+    CheckBounds,
+    /// The capability's provenance is still live.
+    CheckLive,
+    /// The access agrees with the type plane, which is the effective type rule of C 6.5.
+    ///
+    /// A third operand overrides how many bytes are asked about, as on [`Opcode::CheckBounds`] and
+    /// for the same reason. Agreeing with a type is a property of a range that holds of every
+    /// subrange of it, so one check over a loop's whole walk says what the loop's checks were going
+    /// to say, which is `spec/safe-memory/07-check-elimination.md` section 7.4's transformation
+    /// applied to this plane rather than to the bounds. The plane entry stays in the payload, since
+    /// the checks a hoisted one stands for all asked at the same type or it would not have been
+    /// written.
+    ///
+    /// A fourth operand is a step, and then the check is not about a range. It asks about one
+    /// access of the payload's width at the pointer and at every step along from it that still
+    /// fits in the third operand's span, which is a loop's checks over a walk that leaves gaps
+    /// written in front of it. Nothing may read one of these as saying anything about the bytes
+    /// between the accesses.
+    CheckType,
+    /// The bytes the access reads have been written.
+    ///
+    /// A third operand overrides how many bytes are asked about, and a fourth is a step, both as on
+    /// [`Opcode::CheckType`].
+    CheckInit,
+    /// A pointer derived from another stays inside the capability the first one had.
+    ///
+    /// Three operands, because the answer is about the new pointer and the question is about
+    /// the old one's capability.
+    CheckDeriv,
+    /// The metadata this access is about to consult has not been changed under it.
+    ///
+    /// Judgement J9, which document 09 section 9.5 specifies and which document 04 section 4.5
+    /// keeps out of J1 for the reason the `restrict` checks are kept out: it is a statement about
+    /// two operations rather than about one. The payload holds the size of the access, because the
+    /// question is whether any granule of the range this touches carries a write by another thread.
+    CheckRace,
+    /// This read did not reach a byte another `restrict` pointer of the same block wrote.
+    ///
+    /// Judgement J8, which document 09 section 9.6 specifies and which document 04 section 4.6
+    /// keeps out of J1 because it is a statement about a pair of accesses rather than about one.
+    /// The payload holds the size of the access and the two numbers saying which pointer it went
+    /// through, and those are the same two [`crate::Restrict`] carries on the access itself.
+    ///
+    /// Read and write are two opcodes rather than one with a flag on it, because every bit of
+    /// [`crate::Flags`] is spoken for and because the operand would then be a constant the program
+    /// does not compute, which is the thing [`Opcode::CheckBounds`] says belongs in the payload.
+    CheckRestrictRead,
+    /// The same about a write, which is the half of the pair that makes the other half a violation.
+    ///
+    /// Two accesses that both only read are not a violation of anything, so what the scope records
+    /// is which of them wrote and the check refuses a pair only when at least one did.
+    CheckRestrictWrite,
+    /// The capability this free goes through still names the instance that owns the address.
+    ///
+    /// Judgement J6, and the same two operands [`Opcode::CheckLive`] has for the same reason: a
+    /// capability and the pointer it is about, with no payload, because how many bytes are at the
+    /// address is not something a free asks. What separates it from the lifetime check is where it
+    /// goes and what it is about. This one sits in front of a call that ends a storage instance
+    /// rather than in front of an access, and the question it decides is whether the pointer being
+    /// handed over still names the instance it was made for.
+    ///
+    /// It exists because that question has no other way of being asked. `free` takes an address and
+    /// nothing else, so a second free of a block the allocator has already handed back out looks
+    /// like an ordinary free to the allocator and releases somebody else's live object.
+    /// tamnd/rucc#492 is that, and the version the capability carries is what tells the two apart.
+    ///
+    /// Nothing discharges one. A bounds fact says nothing about it and a lifetime fact about an
+    /// access says nothing about a free, so it stays where the pass put it and the cost is one
+    /// check per free rather than one per access.
+    CheckFree,
+    /// The `i1` it is given is true: the local it stands for was written before this read of it.
+    ///
+    /// Judgement Y6 for a local held in a register, which has no bytes for the init plane to keep
+    /// and so gets the answer carried beside it as a value instead, by the front end's SSA
+    /// construction. Nothing about memory: the operand is the whole question, so it touches no
+    /// plane and no program byte, and the one thing that keeps it is that it can refuse. One whose
+    /// operand is a constant true asks nothing and is deleted, which is what happens to every one
+    /// in a function that writes its locals before it reads them.
+    CheckWritten,
+    /// A storage instance begins here, over a range, with a class.
+    ///
+    /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
+    /// for an allocated one, and the range is a pointer and a length in registers rather than a
+    /// payload, because the length of a variable length array is not known when the instruction
+    /// is written down.
+    MetaBegin,
+    /// A storage instance ends here, which is judgement J5.
+    ///
+    /// Every capability for it fails from this point on and keeps failing after the address is
+    /// handed out again, which is what makes the check a use after free check rather than a use
+    /// after reallocation one.
+    MetaEnd,
+    /// The effective type of a range is now this one.
+    MetaType,
+    /// The effective types of a range are now the ones the range it was copied from had.
+    ///
+    /// Three operands, because a copy has two ranges and one length: the destination, the source,
+    /// and how many bytes moved. A `memcpy` does not store through a type, so there is no type to
+    /// name here and naming one would be wrong: C 6.5 says the copied bytes keep the effective type
+    /// they had, whatever that was, and the only place that is written down is the plane over the
+    /// source.
+    MetaTypeCopy,
+    /// The bytes of a range are now initialized.
+    MetaInit,
+    /// The bytes of a range are now initialized wherever the range they were copied from was.
+    ///
+    /// Three operands, for the reason [`Opcode::MetaTypeCopy`] has three. A copy does not write
+    /// values of its own, so whether a destination byte holds anything is whether the byte it came
+    /// from did, and the only place that is written down is the plane over the source. That is what
+    /// makes a structure filled member by member and then copied whole still have padding nothing
+    /// wrote, which is the infoleak the plane is for.
+    MetaInitCopy,
+    /// This thread wrote a range, at whatever step of its own counting it has reached.
+    ///
+    /// The epoch plane's only write, from `spec/safe-memory/09-type-init-and-races.md` section 9.5.
+    /// Two operands like the other plane writes, and the range is a pointer shaped slot rather than
+    /// whatever the access covered: the plane holds one stamp per eight bytes because that is what
+    /// a pointer comes in, and a granule two threads share is one holding no pointer.
+    ///
+    /// It carries no thread and no count. Which thread is running and how far it has counted are
+    /// both facts about the moment the program reaches this, so the runtime reads them and nothing
+    /// here could name them.
+    MetaEpoch,
+    /// Everything this thread has done so far is published at the atomic object named here.
+    ///
+    /// One half of a synchronization edge in the sense of section 9.5, and the half that goes in
+    /// front of the atomic that carries it. The operand is the object's address, because that is
+    /// the key whoever takes the other end will look the clock up under, and there is no payload:
+    /// which thread is publishing and how far it has counted are facts about the moment the program
+    /// reaches this, the same way they are for [`Opcode::MetaEpoch`].
+    ///
+    /// This exists because an atomic is not a call. Every other edge the monitor knows about is a
+    /// `pthread` function and is interposed, and a C11 release store is a machine instruction with
+    /// nothing to interpose, so the compiler is the only thing that can say the edge was there.
+    MetaRelease,
+    /// Everything published at the atomic object named here is now ordered before this thread.
+    ///
+    /// The other half of [`Opcode::MetaRelease`], and it goes after the atomic rather than in front
+    /// of it, because the ordering it takes is the ordering the atomic just read.
+    ///
+    /// A missing edge is the one kind of missing instrumentation in the whole safety pass that
+    /// costs a false report rather than a missed one: two threads that really were ordered by an
+    /// edge nobody recorded look concurrent, and a race is reported against a program doing nothing
+    /// wrong. That is why the edges go in before the race check is ever on by default.
+    MetaAcquire,
+    /// Everything this thread has done so far is published at no object in particular.
+    ///
+    /// What a release fence is, and the reason it cannot reuse [`Opcode::MetaRelease`]: a fence
+    /// orders against every other thread rather than against one object, so there is no address to
+    /// key it on and it takes no operands at all. The relaxed atomic that usually sits beside it in
+    /// the source is not the key either, because the fence orders everything, not that one word.
+    ///
+    /// The runtime pays for that with one cell shared by every fence in the program, which orders
+    /// more pairs of threads than the program really ordered. That direction is safe. A thread put
+    /// further ahead than it needed to be reports fewer races, never a wrong one.
+    MetaFenceRelease,
+    /// Everything published at any release fence is now ordered before this thread.
+    ///
+    /// The other half of [`Opcode::MetaFenceRelease`], after the fence rather than in front of it,
+    /// for the same reason [`Opcode::MetaAcquire`] goes after its atomic.
+    MetaFenceAcquire,
+    /// A range leaves the monitor's authority, or comes back, which is judgement J7.
+    MetaTransfer,
+    /// A declared exemption starts here, with the reason it was declared.
+    ///
+    /// Not an optimization hint. Everything between this and its `safe_region_end` is code the
+    /// monitor is told not to judge, so the reason it carries is a trust set entry, and
+    /// `spec/safe-memory/10-boundaries.md` section 10.2 counts them per build precisely so that
+    /// a reviewer can read what a binary's guarantee rests on.
+    SafeRegionBegin,
+    /// The end of the region the last `safe_region_begin` opened.
+    SafeRegionEnd,
+    /// A block that declares `restrict` pointers begins here, over a slot to keep its record in.
+    ///
+    /// The operand is the storage the record lives in, which is the block's own stack slot, and the
+    /// payload says how large it is. The clique the block was given is [`crate::Restrict::clique`]
+    /// of the payload and how many pointers it declares is [`crate::Restrict::base`], which is the
+    /// one place that field counts bases rather than naming one.
+    ///
+    /// A marker rather than something the front end could fold into the accesses, because the
+    /// promise is about the block's dynamic extent: a function called twice has made the promise
+    /// twice, and what the second call reached says nothing about the first.
+    RestrictEnter,
+    /// The block the last `restrict_enter` opened ends here.
+    ///
+    /// The operand is the same slot, so that the record can be unlinked from whatever encloses it
+    /// without the runtime having to keep a list of its own.
+    RestrictLeave,
+
+    // Control. Every one of these is a terminator.
+    /// An unconditional branch, `jump block1(%a, %b)`.
+    Jump,
+    /// A two-way branch on an `i1`.
+    BrIf,
+    /// A multi-way branch on an integer, with a default.
+    Switch,
+    /// A branch to an address, `indirect_br %0, block1, block2`.
+    ///
+    /// The targets are every block control can arrive at, which is what makes the edges of a
+    /// computed `goto` ordinary edges: nothing else in the compiler has to know that the
+    /// address decides which one it is. A target that is not listed is a branch that does not
+    /// happen, so a frontend that leaves one out has made a promise on the program's behalf.
+    IndirectBr,
+    /// A return, with the values the signature says.
+    Return,
+    /// A place control cannot reach, which the frontend emits after a `noreturn` call.
+    Unreachable,
+
+    // Calls.
+    /// A call to a named function.
+    Call,
+    /// A call through an address, carrying the signature it is called with.
+    CallIndirect,
+    /// A call in tail position that reuses the frame, which is a terminator.
+    TailCall,
+
+    // Intrinsics, which is the closed part. The open part is `TargetIntrinsic`.
+    /// Count leading zeroes.
+    Ctlz,
+    /// Count trailing zeroes.
+    Cttz,
+    /// Count set bits.
+    Ctpop,
+    /// Reverse the bytes.
+    Bswap,
+    /// Reverse the bits.
+    Bitreverse,
+    /// Signed addition, producing the result and whether it overflowed.
+    SAddOverflow,
+    /// Unsigned addition, producing the result and whether it overflowed.
+    UAddOverflow,
+    /// Signed subtraction, producing the result and whether it overflowed.
+    SSubOverflow,
+    /// Unsigned subtraction, producing the result and whether it overflowed.
+    USubOverflow,
+    /// Signed multiplication, producing the result and whether it overflowed.
+    SMulOverflow,
+    /// Unsigned multiplication, producing the result and whether it overflowed.
+    UMulOverflow,
+    /// `__builtin_expect`, which is the value with a hint attached.
+    Expect,
+    /// `__builtin_unreachable` as a hint on a path, distinct from the terminator.
+    UnreachableHint,
+    /// `__builtin_trap`, which stops the program where it stands.
+    ///
+    /// Not a terminator, for the reason `unreachable_hint` is not one: what ends a block here is
+    /// control going somewhere, and this goes nowhere at all. The block it is in goes on being
+    /// lowered and whatever follows it is written and never run, which costs a few bytes nothing
+    /// reaches and keeps every pass that walks a block from needing a second shape for it.
+    Trap,
+    /// `__builtin_prefetch`.
+    Prefetch,
+    /// `__builtin_frame_address`.
+    FrameAddress,
+    /// `__builtin_return_address`.
+    ReturnAddress,
+    /// `__builtin_thread_pointer`, the address of the storage the running thread has.
+    ///
+    /// It takes nothing and answers a pointer. Unlike the two above it there is no walk to do and
+    /// no frame to have kept: the machine holds the address in a place of its own, so this is one
+    /// instruction on every target that has the builtin at all.
+    ThreadPointer,
+    /// `__builtin_sponentry`, where the stack pointer was when the function was entered.
+    ///
+    /// It takes nothing and answers a pointer, and on AArch64, the one machine that has the
+    /// builtin, it is where the arguments the caller left on the stack begin. So it is one
+    /// instruction off the stack pointer, finished like a read of such an argument once the frame
+    /// is known, and there is no frame pointer to keep for it.
+    SpEntry,
+    /// `__builtin_unwind_init`, which makes the function save every register a call preserves.
+    ///
+    /// It takes nothing, answers nothing and is no instruction at all. What it does is to the
+    /// prologue: the function puts every one of those registers in its frame whether or not its
+    /// body writes it, so that the unwind table says where each of them is. libgcc's unwinder
+    /// starts every walk from such a function, reads its own registers out of that frame, and
+    /// writes the ones of the frame a handler is in back into it before `eh_return` leaves.
+    UnwindInit,
+    /// `__builtin_dwarf_cfa`, the canonical frame address of the function it is in.
+    ///
+    /// It takes nothing and answers a pointer: the stack pointer as it was before the call that
+    /// entered the function, which is the address the unwind table counts every saved register of
+    /// the frame from. That is where the caller's arguments on the stack begin on every target here,
+    /// so it is finished the way [`Opcode::SpEntry`] is once the frame is known.
+    DwarfCfa,
+    /// `__builtin_eh_return`, which leaves the function for an exception handler in another frame.
+    ///
+    /// Two operands, how far above this frame's canonical frame address the handler's stack pointer
+    /// is and the address of the handler, and no result. Every register the prologue saved is put
+    /// back from the frame, where the unwinder has written what the handler's frame holds in them,
+    /// the stack pointer is moved by the first operand and control goes to the second. It never
+    /// comes back, so the lowering puts an `unreachable_hint` behind it, and it is not a terminator
+    /// for the reason a `trap` is not one.
+    EhReturn,
+    /// `__builtin_apply_args`, the address of a block holding every argument the function it is in
+    /// was called with.
+    ///
+    /// It takes nothing and answers a pointer. What is in the block is the argument registers as
+    /// they were on the way in and the address of the arguments that came in memory, and it is the
+    /// back end that writes it, in the prologue, because that is the one place every register an
+    /// argument can arrive in still holds what the caller put there. A function holding one reads
+    /// its arguments as registers rather than as parameters, so it is never inlined and its
+    /// parameters are never taken apart, since either would change what the registers hold.
+    ApplyArgs,
+    /// `__builtin_apply`, a call to the function in the first operand with the arguments in the
+    /// block in the second, and the address of a block holding what came back.
+    ///
+    /// Three operands: the function, the block an `apply_args` answered, and a constant, which is
+    /// how many bytes of the arguments that came in memory go with the call. It is a call to
+    /// something nothing here can see, so every pass that asks about a call through an address asks
+    /// the same about this and gets the same answer.
+    Apply,
+    /// `__builtin_object_size` where the front end could not see the object, which is how many
+    /// bytes there are from the address to the end of whatever it points into.
+    ///
+    /// One operand, the address, and the question as a number from zero to three beside it: the
+    /// low bit asks about the closest member rather than the whole object and the high bit asks
+    /// for the smallest answer rather than the largest. It never reaches the back end:
+    /// `rucc_opt::objsize` answers every one before any other pass runs, from the allocations and
+    /// the arithmetic the address was built out of, and says it does not know where it cannot
+    /// see, which is the largest number there is for the first two questions and zero for the
+    /// other two.
+    ObjectSize,
+    /// `__builtin_constant_p` of a value the front end could not see to be a constant, which is
+    /// one where the optimizer may yet make it one.
+    ///
+    /// One operand, an integer or a floating point value, and an `i32` answer. It never reaches the
+    /// back end: `rucc_opt::constant_p` answers one where the operand has become a constant by the
+    /// time it runs and zero everywhere else, which is when gcc answers it too, and at `-O0` it
+    /// answers zero before any other pass runs, which is what gcc answers at that level.
+    IsConstant,
+    /// `__builtin_va_arg_pack`, which stands for every anonymous argument of the call the function
+    /// it is in was inlined into.
+    ///
+    /// No operands, and an `i32` result that is only ever the last argument of a variadic call,
+    /// which is the one place gcc lets the builtin be written. It never reaches the back end:
+    /// `rucc_opt::inline` takes the argument out of that call and puts the anonymous arguments of
+    /// the call it is inlining in its place, and a body still holding one after that is a body the
+    /// unit does not emit.
+    VaArgPack,
+    /// `__builtin_va_arg_pack_len`, which is how many anonymous arguments the call the function it
+    /// is in was inlined into had.
+    ///
+    /// No operands and an `i32` result. `rucc_opt::inline` puts the count in its place, and a body
+    /// still holding one after that is not emitted, the same as for [`Self::VaArgPack`].
+    VaArgPackLen,
+    /// What is in a machine register, for `register long x asm ("rbx");`.
+    ///
+    /// The GNU extension that puts an object in a named register rather than in the frame. The
+    /// name of the register is the payload and the result is whatever that register holds where
+    /// this stands, which is the value the object starts with. A garbage collector written in C
+    /// reads the callee saved registers this way, because a root that is only in one of those is
+    /// a root no walk of the stack finds.
+    ///
+    /// It is not pure. Two of these on the same register in one function are two different
+    /// answers, since anything in between may have written the register, so neither may be moved
+    /// to where the other is and neither may be dropped for the other.
+    RegisterValue,
+    /// A write of its one operand to a machine register, for kencc's `extern register`.
+    ///
+    /// The name of the register is the payload, as for [`Self::RegisterValue`], and there is no
+    /// result. The target keeps the register for the whole program, so the value stays there
+    /// until the next one of these, and a [`Self::RegisterValue`] after it reads it. It is not
+    /// pure, and it is ordered with every call and every read of a register.
+    SetRegister,
+    /// The start of a variable argument list.
+    VaStart,
+    /// One argument off a variable argument list, which moves the list on as it reads it. Two
+    /// of these on one list are two arguments and never one argument read twice, so whatever
+    /// decides which instructions may be folded together has to leave these alone.
+    VaArg,
+    /// One argument off a variable argument list, when that argument is an object rather than a
+    /// value, which is what a `struct` or a `union` read out of one is.
+    ///
+    /// It answers the address of the object rather than the object, because an aggregate is not
+    /// a value and there is nothing for one result to be. Where the object arrives in registers
+    /// there is no address until something makes one, so what this asks of a target is a place
+    /// to put the registers and the address of that place, which is the copy every psABI's own
+    /// description of the algorithm makes. It moves the list on for the reason [`Opcode::VaArg`]
+    /// does.
+    VaObject,
+    /// The end of a variable argument list.
+    VaEnd,
+    /// A copy of a variable argument list.
+    VaCopy,
+    /// The stack pointer, saved before a variable length array.
+    StackSave,
+    /// The stack pointer, restored after one.
+    StackRestore,
+    /// The end of the lifetime of a local whose address was taken.
+    ///
+    /// One operand, the `alloca` the local lives in, and no result. The front end writes one
+    /// where the block the local was declared in is left by falling out of it or by a `break` or
+    /// `continue`, and nothing anywhere else, so a local with none is simply one whose lifetime
+    /// nobody said anything about. What it promises is that nothing reads or writes the object
+    /// again until control comes back round to the declaration, which is what lets the frame
+    /// layout hand the same bytes to two locals whose lifetimes never meet. To everything else
+    /// it is a write of the object it names that nothing reads, which keeps a store into the
+    /// object from moving past it in either direction.
+    LifetimeEnd,
+    /// The marker a `setjmp` leaves, which pins everything live across it.
+    ///
+    /// One operand, the buffer, and one result, which is the `int` the save answers with: zero
+    /// where control went past it and one where control came back to it. That is the one
+    /// instruction here whose value depends on how control reached it, and it is one instruction
+    /// rather than a branch and a block because the edge a `longjmp` travels is not in this
+    /// function's control flow graph. It is written into the buffer and taken at run time, so a
+    /// pass that walked the edges would find a block nothing reaches and take it away.
+    SetjmpMarker,
+    /// The marker a `longjmp` leaves.
+    ///
+    /// One operand, the buffer, and no result, and not a terminator either, for the reason above:
+    /// where control goes is not a block of this function. What follows it is written and never
+    /// reached.
+    LongjmpMarker,
+    /// Whether the call just before this in its block unwound rather than returned.
+    ///
+    /// No operands and one `i1`, and nothing but the condition of the `br_if` that ends the block
+    /// reads it. That branch is the edge an exception travels to the landing pad on, written as
+    /// an ordinary edge so that every pass that walks the graph sees the pad as reachable and
+    /// keeps what the pad reads alive, which is the whole reason the answer is a value and not
+    /// something the call says about itself. Nothing computes it: the code generator writes no
+    /// instruction for it or for the branch, and the call is given the pad in the table the
+    /// unwinder reads instead. So it has to stay where it is, straight after its call, and one
+    /// with no call in front of it, which is a call something folded away, answers false.
+    ///
+    /// Under `-fnon-call-exceptions` what is in front of it can also be a load, a store or a
+    /// division, which is an instruction a signal handler may unwind out of. The code generator
+    /// covers that instruction the same way, and one that was folded away or moved leaves this
+    /// answering false the same way.
+    Unwound,
+    /// The exception an unwind arrived at a landing pad with, which is the first thing in the
+    /// block a `br_if` on [`Opcode::Unwound`] sends it to.
+    ///
+    /// No operands and one pointer, which is what the unwinder left in the first return register
+    /// and what `_Unwind_Resume` is handed at the end of the pad to carry on unwinding.
+    Landing,
+    /// A target-specific intrinsic, named rather than enumerated, for the vector builtins.
+    TargetIntrinsic,
+
+    /// Inline assembly. A terminator when it has labels, which is `asm goto`.
+    InlineAsm,
+}
+
+impl Opcode {
+    /// The textual form, which is also what the parser reads.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::IConst => "iconst",
+            Self::FConst => "fconst",
+            Self::Splat => "splat",
+            Self::GlobalAddr => "global_addr",
+            Self::BlockAddr => "block_addr",
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::SDiv => "sdiv",
+            Self::UDiv => "udiv",
+            Self::SRem => "srem",
+            Self::URem => "urem",
+            Self::UMulHigh => "umulh",
+            Self::SMulHigh => "smulh",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Shl => "shl",
+            Self::LShr => "lshr",
+            Self::AShr => "ashr",
+            Self::FAdd => "fadd",
+            Self::FSub => "fsub",
+            Self::FMul => "fmul",
+            Self::FDiv => "fdiv",
+            Self::FRem => "frem",
+            Self::FNeg => "fneg",
+            Self::Fma => "fma",
+            Self::ICmp => "icmp",
+            Self::FCmp => "fcmp",
+            Self::Select => "select",
+            Self::Trunc => "trunc",
+            Self::SExt => "sext",
+            Self::ZExt => "zext",
+            Self::FPTrunc => "fptrunc",
+            Self::FPExt => "fpext",
+            Self::FPToSI => "fptosi",
+            Self::FPToUI => "fptoui",
+            Self::SIToFP => "sitofp",
+            Self::UIToFP => "uitofp",
+            Self::PtrToInt => "ptrtoint",
+            Self::IntToPtr => "inttoptr",
+            Self::Bitcast => "bitcast",
+            Self::ExtractLane => "extractlane",
+            Self::InsertLane => "insertlane",
+            Self::Shuffle => "shuffle",
+            Self::MemEntry => "mem_entry",
+            Self::Alloca => "alloca",
+            Self::Load => "load",
+            Self::Store => "store",
+            Self::PtrAdd => "ptr_add",
+            Self::Memcpy => "memcpy",
+            Self::Memmove => "memmove",
+            Self::Memset => "memset",
+            Self::AtomicLoad => "atomic_load",
+            Self::AtomicStore => "atomic_store",
+            Self::AtomicRmw => "atomic_rmw",
+            Self::Cmpxchg => "cmpxchg",
+            Self::Fence => "fence",
+            Self::CapOf => "cap_of",
+            Self::CapLoad => "cap_load",
+            Self::CapStore => "cap_store",
+            Self::CapCopy => "cap_copy",
+            Self::CapNull => "cap_null",
+            Self::CapNarrow => "cap_narrow",
+            Self::CapRecover => "cap_recover",
+            Self::CapExtent => "cap_extent",
+            Self::CapExtentBack => "cap_extent_back",
+            Self::CapPublish => "cap_publish",
+            Self::CapClear => "cap_clear",
+            Self::CapArg => "cap_arg",
+            Self::CapYield => "cap_yield",
+            Self::CapResult => "cap_result",
+            Self::CheckBounds => "check_bounds",
+            Self::CheckLive => "check_live",
+            Self::CheckType => "check_type",
+            Self::CheckInit => "check_init",
+            Self::CheckDeriv => "check_deriv",
+            Self::CheckRace => "check_race",
+            Self::CheckRestrictRead => "check_restrict_read",
+            Self::CheckRestrictWrite => "check_restrict_write",
+            Self::CheckFree => "check_free",
+            Self::CheckWritten => "check_written",
+            Self::MetaBegin => "meta_begin",
+            Self::MetaEnd => "meta_end",
+            Self::MetaType => "meta_type",
+            Self::MetaTypeCopy => "meta_type_copy",
+            Self::MetaInit => "meta_init",
+            Self::MetaInitCopy => "meta_init_copy",
+            Self::MetaEpoch => "meta_epoch",
+            Self::MetaRelease => "meta_release",
+            Self::MetaAcquire => "meta_acquire",
+            Self::MetaFenceRelease => "meta_fence_release",
+            Self::MetaFenceAcquire => "meta_fence_acquire",
+            Self::MetaTransfer => "meta_transfer",
+            Self::SafeRegionBegin => "safe_region_begin",
+            Self::SafeRegionEnd => "safe_region_end",
+            Self::RestrictEnter => "restrict_enter",
+            Self::RestrictLeave => "restrict_leave",
+            Self::Jump => "jump",
+            Self::BrIf => "br_if",
+            Self::Switch => "switch",
+            Self::IndirectBr => "indirect_br",
+            Self::Return => "return",
+            Self::Unreachable => "unreachable",
+            Self::Call => "call",
+            Self::CallIndirect => "call_indirect",
+            Self::TailCall => "tail_call",
+            Self::Ctlz => "ctlz",
+            Self::Cttz => "cttz",
+            Self::Ctpop => "ctpop",
+            Self::Bswap => "bswap",
+            Self::Bitreverse => "bitreverse",
+            Self::SAddOverflow => "sadd_overflow",
+            Self::UAddOverflow => "uadd_overflow",
+            Self::SSubOverflow => "ssub_overflow",
+            Self::USubOverflow => "usub_overflow",
+            Self::SMulOverflow => "smul_overflow",
+            Self::UMulOverflow => "umul_overflow",
+            Self::Expect => "expect",
+            Self::UnreachableHint => "unreachable_hint",
+            Self::Trap => "trap",
+            Self::Prefetch => "prefetch",
+            Self::FrameAddress => "frame_address",
+            Self::ReturnAddress => "return_address",
+            Self::ThreadPointer => "thread_pointer",
+            Self::SpEntry => "sp_entry",
+            Self::UnwindInit => "unwind_init",
+            Self::DwarfCfa => "dwarf_cfa",
+            Self::EhReturn => "eh_return",
+            Self::ApplyArgs => "apply_args",
+            Self::Apply => "apply",
+            Self::ObjectSize => "object_size",
+            Self::IsConstant => "is_constant",
+            Self::VaArgPack => "va_arg_pack",
+            Self::VaArgPackLen => "va_arg_pack_len",
+            Self::RegisterValue => "register_value",
+            Self::SetRegister => "set_register",
+            Self::VaStart => "va_start",
+            Self::VaArg => "va_arg",
+            Self::VaObject => "va_object",
+            Self::VaEnd => "va_end",
+            Self::VaCopy => "va_copy",
+            Self::StackSave => "stacksave",
+            Self::StackRestore => "stackrestore",
+            Self::LifetimeEnd => "lifetime_end",
+            Self::SetjmpMarker => "setjmp_marker",
+            Self::LongjmpMarker => "longjmp_marker",
+            Self::Unwound => "unwound",
+            Self::Landing => "landing",
+            Self::TargetIntrinsic => "target_intrinsic",
+            Self::InlineAsm => "inline_asm",
+        }
+    }
+
+    /// Every opcode, in the order they are declared.
+    ///
+    /// The parser walks this rather than holding a second table, because a second table is a
+    /// table that can disagree with the first one.
+    pub fn all() -> impl Iterator<Item = Self> {
+        ALL.iter().copied()
+    }
+
+    /// The opcode with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        ALL.iter().copied().find(|op| op.name() == name)
+    }
+
+    /// Whether this ends a block.
+    ///
+    /// [`Opcode::InlineAsm`] is not here and is the one instruction whose answer depends on
+    /// the instruction rather than on the opcode: `asm goto` has successors and everything
+    /// else does not. Ask the instruction, not the opcode.
+    #[must_use]
+    pub const fn is_terminator(self) -> bool {
+        matches!(
+            self,
+            Self::Jump
+                | Self::BrIf
+                | Self::Switch
+                | Self::IndirectBr
+                | Self::Return
+                | Self::Unreachable
+                | Self::TailCall
+        )
+    }
+
+    /// Whether the operands can be swapped without changing the result.
+    ///
+    /// The floating point cases are commutative even under the strictest rounding, because
+    /// swapping the operands of an addition does not change which of them is a NaN, and the
+    /// sign of a NaN result is not something we promise anything about either way.
+    #[must_use]
+    pub const fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Mul
+                | Self::UMulHigh
+                | Self::SMulHigh
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::FAdd
+                | Self::FMul
+                | Self::SAddOverflow
+                | Self::UAddOverflow
+                | Self::SMulOverflow
+                | Self::UMulOverflow
+        )
+    }
+
+    /// Whether this reads or writes memory, or has an effect the optimizer has to preserve.
+    ///
+    /// An instruction that answers no can be deleted when nothing uses its result, moved
+    /// across a call, and merged with another one computing the same thing. Everything else
+    /// has to be argued about individually, so the conservative answer is the true one here
+    /// and the list of exceptions is the part that is checked.
+    #[must_use]
+    pub const fn has_effects(self) -> bool {
+        !matches!(
+            self,
+            Self::IConst
+                | Self::FConst
+                | Self::Splat
+                | Self::GlobalAddr
+                | Self::BlockAddr
+                | Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::SDiv
+                | Self::UDiv
+                | Self::SRem
+                | Self::URem
+                | Self::UMulHigh
+                | Self::SMulHigh
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::Shl
+                | Self::LShr
+                | Self::AShr
+                | Self::FAdd
+                | Self::FSub
+                | Self::FMul
+                | Self::FDiv
+                | Self::FRem
+                | Self::FNeg
+                | Self::Fma
+                | Self::ICmp
+                | Self::FCmp
+                | Self::Select
+                | Self::Trunc
+                | Self::SExt
+                | Self::ZExt
+                | Self::FPTrunc
+                | Self::FPExt
+                | Self::FPToSI
+                | Self::FPToUI
+                | Self::SIToFP
+                | Self::UIToFP
+                | Self::PtrToInt
+                | Self::IntToPtr
+                | Self::Bitcast
+                | Self::ExtractLane
+                | Self::InsertLane
+                | Self::Shuffle
+                | Self::PtrAdd
+                | Self::Ctlz
+                | Self::Cttz
+                | Self::Ctpop
+                | Self::Bswap
+                | Self::Bitreverse
+                | Self::SAddOverflow
+                | Self::UAddOverflow
+                | Self::SSubOverflow
+                | Self::USubOverflow
+                | Self::SMulOverflow
+                | Self::UMulOverflow
+                | Self::Expect
+                | Self::FrameAddress
+                | Self::ReturnAddress
+                // The same address for as long as the thread runs, and a thread cannot change
+                // which one it is part way through a function, so two of these in one function
+                // are the same value and either may be moved to where the other is.
+                | Self::ThreadPointer
+                // Where this function was entered, which is one address for the whole of the call.
+                // The canonical frame address is the same kind of fact about the same call.
+                | Self::SpEntry
+                | Self::DwarfCfa
+                // A question about an address that reads nothing: the answer is a fact about where
+                // the address came from, which is the same fact wherever the question is asked.
+                | Self::ObjectSize
+                // A question about a value, whose answer is the same wherever it is asked.
+                | Self::IsConstant
+                // Nothing yet, and something the inliner fills in before any pass asks.
+                | Self::VaArgPack
+                | Self::VaArgPackLen
+                | Self::MemEntry
+                // Three of the capability instructions are arithmetic on a pointer's
+                // provenance and touch nothing. The other four do: `cap_load`, `cap_store` and
+                // `cap_copy` are an access, and `cap_recover` reads the planes.
+                | Self::CapOf
+                | Self::CapNull
+                | Self::CapNarrow
+        )
+    }
+
+    /// Whether an instruction with this opcode touches memory.
+    ///
+    /// This is what decides whether it takes a memory operand once memory SSA is built, per
+    /// document 09 of `spec/optimizer`. It is written as the exceptions to touching memory
+    /// rather than as a list of what does, for the reason document 08.6 gives about the escape
+    /// analysis: an opcode added later has to end up on the conservative side by default, and a
+    /// list of what touches memory would silently leave a new one out.
+    ///
+    /// `mem_entry` answers no. It produces memory rather than touching it, which is the whole
+    /// of what it is for.
+    #[must_use]
+    pub const fn touches_memory(self) -> bool {
+        if !self.has_effects() {
+            return false;
+        }
+        !matches!(
+            self,
+            // Fresh storage nothing could have been reading, and the pointer that names it.
+            Self::Alloca
+                // The stack pointer, which is a register and not memory. Putting it back is a
+                // different matter and is below, because it takes storage away.
+                | Self::StackSave
+                // Two questions about how control arrived, which read the unwinder's answer
+                // rather than anything in memory.
+                | Self::Unwound
+                | Self::Landing
+                // Control, which goes somewhere rather than touching anything. A tail call is
+                // not here, because it is a call.
+                | Self::Jump
+                | Self::BrIf
+                | Self::Switch
+                | Self::IndirectBr
+                | Self::Return
+                | Self::Unreachable
+                | Self::UnreachableHint
+                // A question about a value it is handed, whose answer was carried in a register.
+                | Self::CheckWritten
+        )
+    }
+
+    /// Whether an instruction with this opcode writes memory, and so produces a new version of
+    /// it rather than only reading the version it was given.
+    ///
+    /// Everything that touches memory writes it except the ones that plainly do not. A `fence`
+    /// writes nothing and is still a write here, because document 09.5 says an atomic or a
+    /// barrier is a definition nothing walks past, and giving it one is how that is expressed
+    /// in a representation whose only ordering is the memory chain.
+    ///
+    /// The checks read the planes and change nothing, which
+    /// `spec/safe-memory/06-instrumentation.md` section 6.2.4 states as the word `readonly`. A
+    /// check that trapped is a program that stopped and there is no version of memory after it
+    /// for anything to observe, so the trap costs nothing here. What it does cost is that a
+    /// check may not be moved across a plane write, and that is the memory chain saying so
+    /// rather than this.
+    #[must_use]
+    pub const fn writes_memory(self) -> bool {
+        self.touches_memory()
+            && !matches!(
+                self,
+                Self::Load
+                    | Self::AtomicLoad
+                    | Self::Prefetch
+                    | Self::CapLoad
+                    | Self::CapRecover
+                    | Self::CapArg
+                    | Self::CapResult
+                    | Self::CapExtent
+                    | Self::CapExtentBack
+                    | Self::CheckBounds
+                    | Self::CheckLive
+                    | Self::CheckType
+                    | Self::CheckInit
+                    | Self::CheckDeriv
+                    | Self::CheckRace
+                    | Self::CheckFree
+            )
+    }
+
+    /// Whether the only memory this touches is the safety planes.
+    ///
+    /// The planes are storage the runtime keeps for itself, one entry per range of program bytes,
+    /// laid out by `spec/safe-memory/05-representation.md` section 5.2. What matters here is that
+    /// no name in the program reaches one. A plane write and a program store can never be the same
+    /// byte, and neither can a plane read and a program load, so an alias oracle that knows this
+    /// answers no to every pair with one of each.
+    ///
+    /// The aux plane sits in the same allocation as the object rather than in a map of its own, so
+    /// an address far enough outside an object does land in somebody's plane. That is an access
+    /// outside the bounds of the thing it was derived from, which is the access every check in this
+    /// list exists to refuse, and it is undefined before it is refused. An optimizer is entitled to
+    /// the assumption that the program does not make one, and this is that assumption and not a
+    /// second one.
+    ///
+    /// Nothing above can work that out by looking at the access, which is why this is here. The
+    /// address operand of one of these is a locator and not the memory it touches: `meta_init %p`
+    /// writes the entry the plane keeps for `%p` and does not write `%p`, so an oracle reading the
+    /// operand the ordinary way sees a write to exactly the bytes a load of `%p` wants.
+    ///
+    /// A list of what does rather than the exceptions to it, which is the other way round from
+    /// [`Opcode::touches_memory`] and for the same reason: an opcode added later and left out of
+    /// this one is an opcode the oracle says nothing about, which costs a missed optimization,
+    /// and an opcode added later that lands in here without anybody reading what it does would be
+    /// a wrong answer about memory in the safety pass of all places.
+    ///
+    /// Two families are deliberately not here even though their names look like they belong. The
+    /// `restrict` markers take the block's own stack slot as an operand and write their record into
+    /// it. The synchronization edges say something about the ordering of program memory rather than
+    /// only about a plane, and a wrong answer there is a false report rather than a missed one.
+    ///
+    /// The capability instructions are mostly out and not all of them, so the line between them is
+    /// worth saying plainly: it is whether every pointer the instruction takes is a locator.
+    /// `cap_load`, `cap_store` and `cap_recover` each have one that is not, because the point of
+    /// the aux pair is that a pointer written into a slot comes back out of one, so an address
+    /// handed to any of those has gone somewhere a later instruction can get it from. `cap_copy`
+    /// has no such operand. Its three are a destination, a source and a length, it writes nothing
+    /// but the slots over the destination and reads nothing but the slots over the source, and a
+    /// slot holds a displacement from the pointer beside it rather than an address, so a run of
+    /// slots that ends up saying what another run said has moved no address anywhere the copy of
+    /// the words themselves did not move it already.
+    #[must_use]
+    pub const fn touches_only_planes(self) -> bool {
+        matches!(
+            self,
+            Self::CheckBounds
+                | Self::CheckLive
+                | Self::CheckType
+                | Self::CheckInit
+                | Self::CheckDeriv
+                | Self::CheckRace
+                | Self::CheckFree
+                | Self::CapExtent
+                | Self::CapExtentBack
+                | Self::CapCopy
+                | Self::MetaBegin
+                | Self::MetaEnd
+                | Self::MetaType
+                | Self::MetaTypeCopy
+                | Self::MetaInit
+                | Self::MetaInitCopy
+                | Self::MetaEpoch
+                | Self::MetaTransfer
+        )
+    }
+
+    /// Whether this marks one end of a jump along an edge this function's control flow graph does
+    /// not have.
+    ///
+    /// The two `setjmp` markers and nothing else. It exists because an alias oracle that reasons
+    /// about a call reasons from what the call was handed, and neither of these was handed
+    /// anything. Control arrives at the instruction after a `setjmp_marker` from wherever the
+    /// matching `longjmp` sits, so the memory there is a join of the chain that flows into the
+    /// marker and the memory at every one of those points, and a `longjmp_marker` is the other end
+    /// of that join and so reads everything the landing will look at. An object whose address never
+    /// left this function is as exposed to both as anything else, because the jump comes back into
+    /// this frame and the program reads the frame's own slots afterwards. The only answer about a
+    /// reference across one of these that cannot be wrong is that it may be touched.
+    #[must_use]
+    pub const fn is_jump_marker(self) -> bool {
+        matches!(self, Self::SetjmpMarker | Self::LongjmpMarker)
+    }
+
+    /// How many values this produces, for the opcodes where the count is fixed.
+    ///
+    /// `None` means the count comes from somewhere else: a call takes it from its signature,
+    /// and inline assembly takes it from its output constraints. A tail call is not one of
+    /// them, because whatever it returns goes straight out of the function and there is no
+    /// instruction after it to use anything.
+    #[must_use]
+    pub const fn results(self) -> Option<u8> {
+        match self {
+            Self::Call | Self::CallIndirect | Self::InlineAsm => None,
+            Self::Cmpxchg
+            | Self::SAddOverflow
+            | Self::UAddOverflow
+            | Self::SSubOverflow
+            | Self::USubOverflow
+            | Self::SMulOverflow
+            | Self::UMulOverflow => Some(2),
+            Self::Store
+            | Self::Memcpy
+            | Self::Memmove
+            | Self::Memset
+            | Self::AtomicStore
+            | Self::Fence
+            | Self::Prefetch
+            | Self::VaStart
+            | Self::VaEnd
+            | Self::VaCopy
+            | Self::StackRestore
+            | Self::SetRegister
+            | Self::LifetimeEnd
+            | Self::UnreachableHint
+            | Self::Trap
+            | Self::LongjmpMarker
+            | Self::UnwindInit
+            | Self::EhReturn
+            | Self::CapStore
+            | Self::CapCopy
+            | Self::CapPublish
+            | Self::CapClear
+            | Self::CapYield
+            | Self::CheckBounds
+            | Self::CheckLive
+            | Self::CheckType
+            | Self::CheckInit
+            | Self::CheckDeriv
+            | Self::CheckRace
+            | Self::CheckRestrictRead
+            | Self::CheckRestrictWrite
+            | Self::CheckFree
+            | Self::CheckWritten
+            | Self::MetaBegin
+            | Self::MetaEnd
+            | Self::MetaType
+            | Self::MetaTypeCopy
+            | Self::MetaInit
+            | Self::MetaInitCopy
+            | Self::MetaEpoch
+            | Self::MetaRelease
+            | Self::MetaAcquire
+            | Self::MetaFenceRelease
+            | Self::MetaFenceAcquire
+            | Self::MetaTransfer
+            | Self::SafeRegionBegin
+            | Self::SafeRegionEnd
+            | Self::RestrictEnter
+            | Self::RestrictLeave => Some(0),
+            _ if self.is_terminator() => Some(0),
+            _ => Some(1),
+        }
+    }
+
+    /// Whether an instruction with this opcode produces a capability.
+    ///
+    /// Seven of the fourteen `cap` instructions. The other seven consume one instead, or none at
+    /// all: `cap_store` writes one beside a pointer, `cap_copy` moves a run of them from beside one
+    /// set of words to beside another, `cap_extent` and `cap_extent_back` ask one a
+    /// question about itself and answer with a number, `cap_publish` hands a call's worth of them
+    /// to a callee, `cap_yield` leaves one where the caller of this function will look for it, and
+    /// `cap_clear` takes no operands because saying there is no frame is not a statement about any
+    /// capability. The reason this is a question about the opcode rather than
+    /// about the result type is that the verifier asks it the other way round: it walks the results
+    /// looking for a `cap` and needs to know whether the instruction under it was entitled to make
+    /// one.
+    #[must_use]
+    pub const fn makes_capability(self) -> bool {
+        matches!(
+            self,
+            Self::CapOf
+                | Self::CapLoad
+                | Self::CapNull
+                | Self::CapNarrow
+                | Self::CapRecover
+                | Self::CapArg
+                | Self::CapResult
+        )
+    }
+
+    /// Which operand of a capability producer names the pointer the capability is about.
+    ///
+    /// Five of the seven [`Opcode::makes_capability`] lists, and they all mean the same thing by it:
+    /// the capability describes the object that pointer is in. Where they differ is only in how the
+    /// answer was arrived at, which is a walk of the lifetime plane for `cap_recover`, a read of the
+    /// slot beside the word for `cap_load`, a read of the caller's frame for `cap_arg`, a read of
+    /// the frame the caller published for `cap_result`, and whatever the back end has at hand for
+    /// `cap_of`.
+    ///
+    /// That is worth stating as one question because the optimizer asks it. A rule that discharges a
+    /// check by knowing which pointer the check's capability is about has no business caring which
+    /// producer supplied it, and while `cap_of` was the only one anything emitted, asking for the
+    /// opcode by name and taking operand zero was the same question. It stopped being the same
+    /// question when tamnd/rucc#1241 started emitting the cheap producers, and a rule that still
+    /// asked by name would quietly discharge less the better the code got.
+    ///
+    /// The two that answer nothing are the two that are not about a pointer at all. A `cap_narrow`
+    /// is about another capability and a `cap_null` is about nothing by construction.
+    ///
+    /// `cap_result` was in that group and did not belong there. The reasoning was that it is about a
+    /// pointer the callee returned, which sounds like a value this function has only as the call's
+    /// own result, and the opcode carries that pointer as operand zero for the same reason
+    /// `cap_arg` carries one: a callee that wrote nothing leaves the bottom capability in the slot,
+    /// and the pointer is what the runtime falls back to working the answer out from. So the
+    /// operand was there the whole time and this said there was none. It is the same mistake the
+    /// paragraph above is about, made once more in the place that exists to stop it, which is
+    /// exactly how much care this question wants: every producer that names a pointer has to be
+    /// here, and the way to tell is to read the opcode's operands rather than its purpose.
+    #[must_use]
+    pub const fn capability_names(self) -> Option<usize> {
+        match self {
+            Self::CapOf | Self::CapRecover | Self::CapArg | Self::CapResult => Some(0),
+            // The third, because the first two are the container's capability and the address of
+            // the word, and the pointer this one is about is the value that came out of the word.
+            Self::CapLoad => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Which payload an instruction with this opcode carries.
+    ///
+    /// The printer reads the payload it finds and does not need this. The parser has only the
+    /// opcode when it reaches the operands, so this is where the two of them agree on what
+    /// comes after them. An instruction carrying a payload of some other kind prints as text
+    /// the parser cannot read back, which is why the verifier checks it against
+    /// [`Extra::kind`](crate::Extra::kind) rather than leaving it to be found later.
+    #[must_use]
+    pub const fn extra_kind(self) -> ExtraKind {
+        match self {
+            Self::IConst | Self::FConst | Self::Splat => ExtraKind::Imm,
+            Self::GlobalAddr
+            | Self::TargetIntrinsic
+            | Self::RegisterValue
+            | Self::SetRegister => ExtraKind::Symbol,
+            Self::ICmp => ExtraKind::IntPred,
+            Self::FCmp => ExtraKind::FloatPred,
+            Self::Alloca
+            | Self::Load
+            | Self::Store
+            | Self::Memcpy
+            | Self::Memmove
+            | Self::Memset
+            | Self::AtomicLoad
+            | Self::AtomicStore
+            | Self::Cmpxchg
+            // Four of the checks are about a run of bytes and the payload is where the size
+            // of that run is, along with the alignment `check_bounds` wants and the aliasing
+            // node `check_type` compares against. The other two ask a question about a
+            // pointer and not about a range, so they carry nothing.
+            | Self::CheckBounds
+            | Self::CheckType
+            | Self::CheckInit
+            | Self::CheckRace
+            // The two `restrict` checks and the marker that opens their scope. The first two carry
+            // the size of the access and the two numbers saying which pointer it went through, and
+            // the third carries the size of the slot and the numbers describing the scope itself.
+            | Self::CheckRestrictRead
+            | Self::CheckRestrictWrite
+            | Self::RestrictEnter => ExtraKind::Mem,
+            // The plane writes. What each one needs beyond the range is different, and the range
+            // itself is operands, since the length of a variable length array is a value.
+            Self::MetaBegin => ExtraKind::Class,
+            Self::MetaTransfer => ExtraKind::Owner,
+            Self::MetaType => ExtraKind::Node,
+            Self::SafeRegionBegin => ExtraKind::Reason,
+            Self::VaObject => ExtraKind::VaObject,
+            Self::AtomicRmw => ExtraKind::Rmw,
+            Self::Fence => ExtraKind::Order,
+            Self::Prefetch => ExtraKind::Prefetch,
+            Self::ObjectSize => ExtraKind::Question,
+            // Which lane, or which lanes in which order, which is a number written in the
+            // instruction for the reason a depth is: the instructions these become take the lane
+            // as an immediate, and a lane not known until the program runs is a load from memory.
+            Self::ExtractLane | Self::InsertLane => ExtraKind::Lane,
+            Self::Shuffle => ExtraKind::Shuffle,
+            // How far up the chain of frames to walk, which is a number written in the instruction
+            // and never a value. The builtins these came from take a constant and nothing else, for
+            // the reason `prefetch` takes one: the instructions this becomes are a walk of that
+            // length, and a length not known until the program runs has nothing to walk.
+            Self::FrameAddress | Self::ReturnAddress => ExtraKind::Depth,
+            Self::Jump | Self::BrIf | Self::BlockAddr | Self::IndirectBr => ExtraKind::Targets,
+            Self::Switch => ExtraKind::Switch,
+            Self::Call | Self::CallIndirect | Self::TailCall => ExtraKind::Call,
+            Self::InlineAsm => ExtraKind::Asm,
+            _ => ExtraKind::None,
+        }
+    }
+}
+
+/// Which of [`Extra`](crate::Extra)'s shapes an instruction carries.
+///
+/// The same list of names, without any of the payloads, so that a question about an opcode can
+/// be answered without an instruction to look at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtraKind {
+    /// Nothing.
+    None,
+    /// A constant.
+    Imm,
+    /// A name.
+    Symbol,
+    /// An integer comparison predicate.
+    IntPred,
+    /// A floating point comparison predicate.
+    FloatPred,
+    /// An access.
+    Mem,
+    /// An atomic read-modify-write.
+    Rmw,
+    /// A barrier's ordering.
+    Order,
+    /// What a prefetch is a hint about.
+    Prefetch,
+    /// How many frames up to walk.
+    Depth,
+    /// Which of the four object size questions.
+    Question,
+    /// How long the member is that an address is of.
+    Member,
+    /// Which lane.
+    Lane,
+    /// Which lanes, in which order.
+    Shuffle,
+    /// Branch targets.
+    Targets,
+    /// A call.
+    Call,
+    /// A `switch`.
+    Switch,
+    /// Inline assembly.
+    Asm,
+    /// An object read off a variable argument list.
+    VaObject,
+    /// What kind of storage an instance is.
+    Class,
+    /// Who a range of memory went to.
+    Owner,
+    /// A metadata node.
+    Node,
+    /// Why a declared exemption is there.
+    Reason,
+}
+
+impl ExtraKind {
+    /// What it is, in words, for a message that names two of them and has to read as English.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "nothing",
+            Self::Imm => "a constant",
+            Self::Symbol => "a name",
+            Self::IntPred => "an integer comparison",
+            Self::FloatPred => "a floating point comparison",
+            Self::Mem => "an access",
+            Self::Rmw => "a read-modify-write",
+            Self::Order => "an ordering",
+            Self::Prefetch => "a prefetch hint",
+            Self::Depth => "a depth",
+            Self::Question => "an object size question",
+            Self::Member => "the size of a member",
+            Self::Targets => "branch targets",
+            Self::Call => "a call",
+            Self::Switch => "a switch",
+            Self::Asm => "inline assembly",
+            Self::VaObject => "an object off a variable argument list",
+            Self::Class => "a storage class",
+            Self::Owner => "an owner",
+            Self::Node => "a metadata node",
+            Self::Reason => "a reason",
+            Self::Lane => "a lane",
+            Self::Shuffle => "a list of lanes",
+        }
+    }
+}
+
+impl fmt::Display for Opcode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Every opcode, which is what [`Opcode::all`] hands out.
+///
+/// This is written out rather than derived, and the test below is what keeps it complete: it
+/// checks the count against [`Opcode::InlineAsm`], the last variant, so a new opcode that is
+/// not added here fails the build rather than going quietly missing from the parser.
+static ALL: &[Opcode] = &[
+    Opcode::IConst,
+    Opcode::FConst,
+    Opcode::Splat,
+    Opcode::GlobalAddr,
+    Opcode::BlockAddr,
+    Opcode::Add,
+    Opcode::Sub,
+    Opcode::Mul,
+    Opcode::SDiv,
+    Opcode::UDiv,
+    Opcode::SRem,
+    Opcode::URem,
+    Opcode::UMulHigh,
+    Opcode::SMulHigh,
+    Opcode::And,
+    Opcode::Or,
+    Opcode::Xor,
+    Opcode::Shl,
+    Opcode::LShr,
+    Opcode::AShr,
+    Opcode::FAdd,
+    Opcode::FSub,
+    Opcode::FMul,
+    Opcode::FDiv,
+    Opcode::FRem,
+    Opcode::FNeg,
+    Opcode::Fma,
+    Opcode::ICmp,
+    Opcode::FCmp,
+    Opcode::Select,
+    Opcode::Trunc,
+    Opcode::SExt,
+    Opcode::ZExt,
+    Opcode::FPTrunc,
+    Opcode::FPExt,
+    Opcode::FPToSI,
+    Opcode::FPToUI,
+    Opcode::SIToFP,
+    Opcode::UIToFP,
+    Opcode::PtrToInt,
+    Opcode::IntToPtr,
+    Opcode::Bitcast,
+    Opcode::ExtractLane,
+    Opcode::InsertLane,
+    Opcode::Shuffle,
+    Opcode::MemEntry,
+    Opcode::Alloca,
+    Opcode::Load,
+    Opcode::Store,
+    Opcode::PtrAdd,
+    Opcode::Memcpy,
+    Opcode::Memmove,
+    Opcode::Memset,
+    Opcode::AtomicLoad,
+    Opcode::AtomicStore,
+    Opcode::AtomicRmw,
+    Opcode::Cmpxchg,
+    Opcode::Fence,
+    Opcode::CapOf,
+    Opcode::CapLoad,
+    Opcode::CapStore,
+    Opcode::CapCopy,
+    Opcode::CapNull,
+    Opcode::CapNarrow,
+    Opcode::CapRecover,
+    Opcode::CapExtent,
+    Opcode::CapExtentBack,
+    Opcode::CapPublish,
+    Opcode::CapClear,
+    Opcode::CapArg,
+    Opcode::CapYield,
+    Opcode::CapResult,
+    Opcode::CheckBounds,
+    Opcode::CheckLive,
+    Opcode::CheckType,
+    Opcode::CheckInit,
+    Opcode::CheckDeriv,
+    Opcode::CheckRace,
+    Opcode::CheckRestrictRead,
+    Opcode::CheckRestrictWrite,
+    Opcode::CheckFree,
+    Opcode::CheckWritten,
+    Opcode::MetaBegin,
+    Opcode::MetaEnd,
+    Opcode::MetaType,
+    Opcode::MetaTypeCopy,
+    Opcode::MetaInit,
+    Opcode::MetaInitCopy,
+    Opcode::MetaEpoch,
+    Opcode::MetaRelease,
+    Opcode::MetaAcquire,
+    Opcode::MetaFenceRelease,
+    Opcode::MetaFenceAcquire,
+    Opcode::MetaTransfer,
+    Opcode::SafeRegionBegin,
+    Opcode::SafeRegionEnd,
+    Opcode::RestrictEnter,
+    Opcode::RestrictLeave,
+    Opcode::Jump,
+    Opcode::BrIf,
+    Opcode::Switch,
+    Opcode::IndirectBr,
+    Opcode::Return,
+    Opcode::Unreachable,
+    Opcode::Call,
+    Opcode::CallIndirect,
+    Opcode::TailCall,
+    Opcode::Ctlz,
+    Opcode::Cttz,
+    Opcode::Ctpop,
+    Opcode::Bswap,
+    Opcode::Bitreverse,
+    Opcode::SAddOverflow,
+    Opcode::UAddOverflow,
+    Opcode::SSubOverflow,
+    Opcode::USubOverflow,
+    Opcode::SMulOverflow,
+    Opcode::UMulOverflow,
+    Opcode::Expect,
+    Opcode::UnreachableHint,
+    Opcode::Trap,
+    Opcode::Prefetch,
+    Opcode::FrameAddress,
+    Opcode::ReturnAddress,
+    Opcode::ThreadPointer,
+    Opcode::SpEntry,
+    Opcode::UnwindInit,
+    Opcode::DwarfCfa,
+    Opcode::EhReturn,
+    Opcode::ApplyArgs,
+    Opcode::Apply,
+    Opcode::ObjectSize,
+    Opcode::IsConstant,
+    Opcode::VaArgPack,
+    Opcode::VaArgPackLen,
+    Opcode::RegisterValue,
+    Opcode::SetRegister,
+    Opcode::VaStart,
+    Opcode::VaArg,
+    Opcode::VaObject,
+    Opcode::VaEnd,
+    Opcode::VaCopy,
+    Opcode::StackSave,
+    Opcode::StackRestore,
+    Opcode::LifetimeEnd,
+    Opcode::SetjmpMarker,
+    Opcode::LongjmpMarker,
+    Opcode::Unwound,
+    Opcode::Landing,
+    Opcode::TargetIntrinsic,
+    Opcode::InlineAsm,
+];
+
+/// The ten integer comparisons.
+///
+/// Signedness is on the predicate rather than on the type, for the same reason it is on
+/// `sdiv` and `udiv`: the type space is halved and the operation says what it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IntPred {
+    /// Equal.
+    Eq,
+    /// Not equal.
+    Ne,
+    /// Signed less than.
+    Slt,
+    /// Signed less than or equal.
+    Sle,
+    /// Signed greater than.
+    Sgt,
+    /// Signed greater than or equal.
+    Sge,
+    /// Unsigned less than.
+    Ult,
+    /// Unsigned less than or equal.
+    Ule,
+    /// Unsigned greater than.
+    Ugt,
+    /// Unsigned greater than or equal.
+    Uge,
+}
+
+impl IntPred {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Slt => "slt",
+            Self::Sle => "sle",
+            Self::Sgt => "sgt",
+            Self::Sge => "sge",
+            Self::Ult => "ult",
+            Self::Ule => "ule",
+            Self::Ugt => "ugt",
+            Self::Uge => "uge",
+        }
+    }
+
+    /// The predicate with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|pred| pred.name() == name)
+    }
+
+    /// Every predicate.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::Eq,
+            Self::Ne,
+            Self::Slt,
+            Self::Sle,
+            Self::Sgt,
+            Self::Sge,
+            Self::Ult,
+            Self::Ule,
+            Self::Ugt,
+            Self::Uge,
+        ]
+        .into_iter()
+    }
+
+    /// The predicate that holds exactly when this one does not.
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        match self {
+            Self::Eq => Self::Ne,
+            Self::Ne => Self::Eq,
+            Self::Slt => Self::Sge,
+            Self::Sge => Self::Slt,
+            Self::Sle => Self::Sgt,
+            Self::Sgt => Self::Sle,
+            Self::Ult => Self::Uge,
+            Self::Uge => Self::Ult,
+            Self::Ule => Self::Ugt,
+            Self::Ugt => Self::Ule,
+        }
+    }
+
+    /// The predicate that holds when the operands are given the other way round.
+    #[must_use]
+    pub const fn swapped(self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::Ne => Self::Ne,
+            Self::Slt => Self::Sgt,
+            Self::Sgt => Self::Slt,
+            Self::Sle => Self::Sge,
+            Self::Sge => Self::Sle,
+            Self::Ult => Self::Ugt,
+            Self::Ugt => Self::Ult,
+            Self::Ule => Self::Uge,
+            Self::Uge => Self::Ule,
+        }
+    }
+
+    /// Whether this reads its operands as signed. Equality reads them as neither.
+    #[must_use]
+    pub const fn is_signed(self) -> bool {
+        matches!(self, Self::Slt | Self::Sle | Self::Sgt | Self::Sge)
+    }
+
+    /// The predicate that asks the same question with the bits read as unsigned.
+    ///
+    /// Each ordering has a counterpart the other way round and equality is the same question at
+    /// both readings, so every predicate has one and nothing here is a refusal. What it is for is
+    /// operands known not to be negative: the two readings agree on those, so a signed comparison
+    /// of two of them is the unsigned comparison of them, and the unsigned one is the one that
+    /// still holds when the same values are looked at in fewer bits.
+    #[must_use]
+    pub const fn unsigned(self) -> Self {
+        match self {
+            Self::Slt => Self::Ult,
+            Self::Sle => Self::Ule,
+            Self::Sgt => Self::Ugt,
+            Self::Sge => Self::Uge,
+            other => other,
+        }
+    }
+}
+
+impl fmt::Display for IntPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The floating point comparisons, ordered and unordered.
+///
+/// An ordered predicate is false if either operand is a NaN, and an unordered one is true. C's
+/// `<` is `olt` and C's `!=` is `une`, which is the whole of why both families are here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FloatPred {
+    /// Always false.
+    False,
+    /// Ordered and equal.
+    Oeq,
+    /// Ordered and greater than.
+    Ogt,
+    /// Ordered and greater than or equal.
+    Oge,
+    /// Ordered and less than.
+    Olt,
+    /// Ordered and less than or equal.
+    Ole,
+    /// Ordered and not equal.
+    One,
+    /// Ordered, which is to say neither operand is a NaN.
+    Ord,
+    /// Unordered, which is to say one of them is.
+    Uno,
+    /// Unordered or equal.
+    Ueq,
+    /// Unordered or greater than.
+    Ugt,
+    /// Unordered or greater than or equal.
+    Uge,
+    /// Unordered or less than.
+    Ult,
+    /// Unordered or less than or equal.
+    Ule,
+    /// Unordered or not equal.
+    Une,
+    /// Always true.
+    True,
+}
+
+impl FloatPred {
+    /// The textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::False => "false",
+            Self::Oeq => "oeq",
+            Self::Ogt => "ogt",
+            Self::Oge => "oge",
+            Self::Olt => "olt",
+            Self::Ole => "ole",
+            Self::One => "one",
+            Self::Ord => "ord",
+            Self::Uno => "uno",
+            Self::Ueq => "ueq",
+            Self::Ugt => "ugt",
+            Self::Uge => "uge",
+            Self::Ult => "ult",
+            Self::Ule => "ule",
+            Self::Une => "une",
+            Self::True => "true",
+        }
+    }
+
+    /// The predicate with that name, if there is one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|pred| pred.name() == name)
+    }
+
+    /// Every predicate.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::False,
+            Self::Oeq,
+            Self::Ogt,
+            Self::Oge,
+            Self::Olt,
+            Self::Ole,
+            Self::One,
+            Self::Ord,
+            Self::Uno,
+            Self::Ueq,
+            Self::Ugt,
+            Self::Uge,
+            Self::Ult,
+            Self::Ule,
+            Self::Une,
+            Self::True,
+        ]
+        .into_iter()
+    }
+
+    /// The predicate that holds exactly when this one does not.
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        match self {
+            Self::False => Self::True,
+            Self::Oeq => Self::Une,
+            Self::Ogt => Self::Ule,
+            Self::Oge => Self::Ult,
+            Self::Olt => Self::Uge,
+            Self::Ole => Self::Ugt,
+            Self::One => Self::Ueq,
+            Self::Ord => Self::Uno,
+            Self::Uno => Self::Ord,
+            Self::Ueq => Self::One,
+            Self::Ugt => Self::Ole,
+            Self::Uge => Self::Olt,
+            Self::Ult => Self::Oge,
+            Self::Ule => Self::Ogt,
+            Self::Une => Self::Oeq,
+            Self::True => Self::False,
+        }
+    }
+
+    /// The predicate that holds when the operands are given the other way round.
+    #[must_use]
+    pub const fn swapped(self) -> Self {
+        match self {
+            Self::Ogt => Self::Olt,
+            Self::Olt => Self::Ogt,
+            Self::Oge => Self::Ole,
+            Self::Ole => Self::Oge,
+            Self::Ugt => Self::Ult,
+            Self::Ult => Self::Ugt,
+            Self::Uge => Self::Ule,
+            Self::Ule => Self::Uge,
+            same => same,
+        }
+    }
+
+    /// Whether this is false when either operand is a NaN.
+    ///
+    /// [`FloatPred::False`] and [`FloatPred::True`] are neither ordered nor unordered, since
+    /// they do not look at their operands at all, and both answer no here.
+    #[must_use]
+    pub const fn is_ordered(self) -> bool {
+        matches!(
+            self,
+            Self::Oeq | Self::Ogt | Self::Oge | Self::Olt | Self::Ole | Self::One | Self::Ord
+        )
+    }
+}
+
+impl fmt::Display for FloatPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_opcode_is_in_the_table() {
+        // `InlineAsm` is the last variant, so its discriminant plus one is how many there are.
+        // A new opcode declared after it moves this number, and a new opcode declared before
+        // it and not added to `ALL` moves the length, so either mistake fails here.
+        assert_eq!(ALL.len(), Opcode::InlineAsm as usize + 1);
+        for (position, &op) in ALL.iter().enumerate() {
+            assert_eq!(op as usize, position, "{op} is out of order in ALL");
+        }
+    }
+
+    #[test]
+    fn every_opcode_name_is_one_word_the_reader_can_take() {
+        // The textual form keeps the dot for the type suffix and the flags, so an opcode with a
+        // dot in it reads back as a shorter opcode with a suffix that is not a type. The safety
+        // instructions are spelled `cap_of` and not `cap.of` for this reason, and the
+        // specification says so at `spec/safe-memory/06-instrumentation.md` section 6.2.2.
+        for opcode in Opcode::all() {
+            let name = opcode.name();
+            assert!(!name.is_empty(), "an opcode with no name");
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{name} is not one word"
+            );
+        }
+    }
+
+    #[test]
+    fn every_opcode_has_its_own_name_and_finds_it_again() {
+        let mut names: Vec<&str> = Opcode::all().map(Opcode::name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two opcodes share a name");
+        for op in Opcode::all() {
+            assert_eq!(Opcode::from_name(op.name()), Some(op));
+        }
+        assert_eq!(Opcode::from_name("phi"), None);
+        assert_eq!(Opcode::from_name("getelementptr"), None);
+        assert_eq!(Opcode::from_name(""), None);
+    }
+
+    #[test]
+    fn the_terminators_are_the_ones_control_leaves_by() {
+        let terminators: Vec<&str> =
+            Opcode::all().filter(|op| op.is_terminator()).map(Opcode::name).collect();
+        assert_eq!(
+            terminators,
+            ["jump", "br_if", "switch", "indirect_br", "return", "unreachable", "tail_call"]
+        );
+    }
+
+    #[test]
+    fn a_terminator_produces_nothing() {
+        for op in Opcode::all().filter(|op| op.is_terminator()) {
+            assert_eq!(op.results(), Some(0), "{op}");
+        }
+    }
+
+    #[test]
+    fn the_pair_producing_opcodes_are_the_ones_with_a_flag_beside_the_value() {
+        let pairs: Vec<&str> =
+            Opcode::all().filter(|op| op.results() == Some(2)).map(Opcode::name).collect();
+        assert_eq!(
+            pairs,
+            [
+                "cmpxchg",
+                "sadd_overflow",
+                "uadd_overflow",
+                "ssub_overflow",
+                "usub_overflow",
+                "smul_overflow",
+                "umul_overflow"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_capability_instructions_are_the_ones_that_make_a_capability() {
+        let makers: Vec<Opcode> = Opcode::all().filter(|op| op.makes_capability()).collect();
+        assert_eq!(
+            makers,
+            vec![
+                Opcode::CapOf,
+                Opcode::CapLoad,
+                Opcode::CapNull,
+                Opcode::CapNarrow,
+                Opcode::CapRecover,
+                Opcode::CapArg,
+                Opcode::CapResult
+            ]
+        );
+        // The other three read a capability rather than making one. `cap_store` writes it out and
+        // produces nothing at all, and the two extent queries answer with a number.
+        assert!(!Opcode::CapStore.makes_capability());
+        assert_eq!(Opcode::CapStore.results(), Some(0));
+        assert!(!Opcode::CapExtent.makes_capability());
+        assert_eq!(Opcode::CapExtent.results(), Some(1));
+        assert!(!Opcode::CapExtentBack.makes_capability());
+        assert_eq!(Opcode::CapExtentBack.results(), Some(1));
+        for opcode in makers {
+            assert_eq!(opcode.results(), Some(1), "{}", opcode.name());
+        }
+    }
+
+    #[test]
+    fn a_producer_says_which_of_its_operands_is_the_pointer_it_is_about() {
+        // Five of the seven, and the one that is not operand zero is the one whose first two
+        // operands are the container and the word rather than the value that came out of it.
+        assert_eq!(Opcode::CapOf.capability_names(), Some(0));
+        assert_eq!(Opcode::CapRecover.capability_names(), Some(0));
+        assert_eq!(Opcode::CapArg.capability_names(), Some(0));
+        assert_eq!(Opcode::CapResult.capability_names(), Some(0));
+        assert_eq!(Opcode::CapLoad.capability_names(), Some(2));
+
+        // The two that are about something other than a pointer this function has an operand for.
+        assert_eq!(Opcode::CapNarrow.capability_names(), None);
+        assert_eq!(Opcode::CapNull.capability_names(), None);
+
+        // Nothing that is not a producer answers, since the question is what a capability describes
+        // and those have no capability to describe anything with.
+        assert_eq!(Opcode::CapStore.capability_names(), None);
+        assert_eq!(Opcode::Load.capability_names(), None);
+        assert_eq!(Opcode::CheckLive.capability_names(), None);
+    }
+
+    #[test]
+    fn a_check_reads_the_planes_and_writes_nothing() {
+        let checks = [
+            Opcode::CheckBounds,
+            Opcode::CheckLive,
+            Opcode::CheckType,
+            Opcode::CheckInit,
+            Opcode::CheckDeriv,
+            Opcode::CheckRace,
+            Opcode::CheckFree,
+        ];
+        for opcode in checks {
+            let name = opcode.name();
+            // It traps, so it stays where it was put and nothing deletes it for having no
+            // result. It reads a plane, so it takes a memory operand. It writes nothing, so
+            // the access after it reads the version the check was given.
+            assert!(opcode.has_effects(), "{name}");
+            assert!(opcode.touches_memory(), "{name}");
+            assert!(!opcode.writes_memory(), "{name}");
+            assert_eq!(opcode.results(), Some(0), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_restrict_check_writes_memory_because_it_records_what_it_saw() {
+        // The one place the sentence above does not hold. Every other check reads a plane and
+        // leaves it alone, so the optimizer may hoist one out of a loop or keep the later of two
+        // identical ones. These record the range they were asked about into the block's own slot,
+        // so a check that ran twice saw two accesses and a check that was hoisted saw one, and
+        // either rewrite changes what the next one answers. Saying they write memory is how the
+        // memory chain refuses both.
+        let recording = [
+            Opcode::CheckRestrictRead,
+            Opcode::CheckRestrictWrite,
+            Opcode::RestrictEnter,
+            Opcode::RestrictLeave,
+        ];
+        for opcode in recording {
+            let name = opcode.name();
+            assert!(opcode.has_effects(), "{name}");
+            assert!(opcode.touches_memory(), "{name}");
+            assert!(opcode.writes_memory(), "{name}");
+            assert_eq!(opcode.results(), Some(0), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_capability_instructions_that_touch_memory_are_the_five_that_have_to() {
+        // `cap_load` and `cap_store` are an access to the slot beside a pointer, and `cap_recover`
+        // and the two extent queries read the planes. The other three are arithmetic on a
+        // provenance the program already had, so the optimizer may treat them as it treats
+        // `ptr_add`.
+        assert!(!Opcode::CapOf.has_effects());
+        assert!(!Opcode::CapNull.has_effects());
+        assert!(!Opcode::CapNarrow.has_effects());
+        assert!(Opcode::CapLoad.touches_memory() && !Opcode::CapLoad.writes_memory());
+        assert!(Opcode::CapRecover.touches_memory() && !Opcode::CapRecover.writes_memory());
+        assert!(Opcode::CapExtent.touches_memory() && !Opcode::CapExtent.writes_memory());
+        assert!(Opcode::CapExtentBack.touches_memory() && !Opcode::CapExtentBack.writes_memory());
+        assert!(Opcode::CapStore.writes_memory());
+    }
+
+    #[test]
+    fn what_only_touches_a_plane_touches_memory_and_is_not_an_access() {
+        // Two halves. Everything in the list is on the memory chain, because an instruction the
+        // chain does not carry is one the walk never sees and saying anything about it would be
+        // saying it about nothing. And everything in the list comes from the safety lowering,
+        // because the planes are the lowering's own storage and an opcode from somewhere else
+        // claiming to touch only them is the claim being made about the wrong memory.
+        for opcode in Opcode::all() {
+            if !opcode.touches_only_planes() {
+                continue;
+            }
+            let name = opcode.name();
+            assert!(opcode.touches_memory(), "{name}");
+            let instrumentation = name.starts_with("check_")
+                || name.starts_with("meta_")
+                || name.starts_with("cap_extent")
+                || name == "cap_copy";
+            assert!(instrumentation, "{name}");
+        }
+        for opcode in [Opcode::MetaInit, Opcode::MetaType, Opcode::CheckBounds, Opcode::CapExtent] {
+            assert!(opcode.touches_only_planes(), "{opcode}");
+        }
+    }
+
+    #[test]
+    fn what_goes_through_a_frame_slot_is_not_a_plane_access() {
+        // What the list leaves out on purpose. The three capability instructions here each take a
+        // pointer that is not a locator, since a pointer written into a slot is one a later
+        // instruction reads back out, and the `restrict` markers write their record into the
+        // block's own slot. The synchronization edges are left out for a different reason, which is
+        // that they say something about the ordering of program memory and not only about a plane.
+        let outside = [
+            Opcode::CapLoad,
+            Opcode::CapStore,
+            Opcode::CapRecover,
+            Opcode::CheckRestrictRead,
+            Opcode::CheckRestrictWrite,
+            Opcode::RestrictEnter,
+            Opcode::RestrictLeave,
+            Opcode::MetaRelease,
+            Opcode::MetaAcquire,
+            Opcode::MetaFenceRelease,
+            Opcode::MetaFenceAcquire,
+        ];
+        for opcode in outside {
+            assert!(!opcode.touches_only_planes(), "{opcode}");
+        }
+        // And nothing ordinary is in it either, since a store answering yes would be the whole
+        // optimizer told that program memory is unreachable.
+        for opcode in [Opcode::Load, Opcode::Store, Opcode::Call, Opcode::Memcpy, Opcode::Fence] {
+            assert!(!opcode.touches_only_planes(), "{opcode}");
+        }
+    }
+
+    #[test]
+    fn memory_has_effects_and_arithmetic_does_not() {
+        for op in [Opcode::Load, Opcode::Store, Opcode::Call, Opcode::Alloca, Opcode::Fence] {
+            assert!(op.has_effects(), "{op}");
+        }
+        for op in [Opcode::Add, Opcode::FDiv, Opcode::ICmp, Opcode::PtrAdd, Opcode::IConst] {
+            assert!(!op.has_effects(), "{op}");
+        }
+    }
+
+    #[test]
+    fn commuting_is_only_claimed_where_it_holds() {
+        assert!(Opcode::Add.is_commutative());
+        assert!(Opcode::FAdd.is_commutative());
+        assert!(!Opcode::Sub.is_commutative());
+        assert!(!Opcode::FDiv.is_commutative());
+        assert!(!Opcode::Shl.is_commutative());
+    }
+
+    #[test]
+    fn an_integer_predicate_inverts_and_swaps_back_to_itself() {
+        for pred in IntPred::all() {
+            assert_eq!(pred.inverse().inverse(), pred);
+            assert_eq!(pred.swapped().swapped(), pred);
+            assert_eq!(IntPred::from_name(pred.name()), Some(pred));
+        }
+        assert_eq!(IntPred::Slt.inverse(), IntPred::Sge);
+        assert_eq!(IntPred::Slt.swapped(), IntPred::Sgt);
+        assert_eq!(IntPred::from_name("lt"), None);
+    }
+
+    #[test]
+    fn an_integer_predicate_has_an_unsigned_counterpart_that_asks_the_same_way_round() {
+        for pred in IntPred::all() {
+            let unsigned = pred.unsigned();
+            assert!(!unsigned.is_signed(), "{pred}");
+            assert_eq!(unsigned.unsigned(), unsigned, "{pred}");
+            // The same way round, so inverting or swapping either first gives the same answer.
+            assert_eq!(pred.inverse().unsigned(), unsigned.inverse(), "{pred}");
+            assert_eq!(pred.swapped().unsigned(), unsigned.swapped(), "{pred}");
+        }
+        assert_eq!(IntPred::Slt.unsigned(), IntPred::Ult);
+        assert_eq!(IntPred::Sge.unsigned(), IntPred::Uge);
+        // Equality is the same question at both readings, so it is already its own counterpart.
+        assert_eq!(IntPred::Eq.unsigned(), IntPred::Eq);
+        assert_eq!(IntPred::Ne.unsigned(), IntPred::Ne);
+    }
+
+    #[test]
+    fn a_floating_predicate_inverts_across_the_ordered_line() {
+        for pred in FloatPred::all() {
+            assert_eq!(pred.inverse().inverse(), pred);
+            assert_eq!(pred.swapped().swapped(), pred);
+            assert_eq!(FloatPred::from_name(pred.name()), Some(pred));
+        }
+        // Inverting has to cross the line, because the negation of an ordered comparison is
+        // true when an operand is a NaN. This is where `!(a < b)` stops being `a >= b`. The
+        // two constants are outside it: neither of them looks at its operands.
+        for pred in FloatPred::all().filter(|p| !matches!(p, FloatPred::False | FloatPred::True)) {
+            assert_ne!(pred.is_ordered(), pred.inverse().is_ordered(), "{pred}");
+        }
+        assert_eq!(FloatPred::Olt.inverse(), FloatPred::Uge);
+        assert_eq!(FloatPred::Olt.swapped(), FloatPred::Ogt);
+    }
+
+    #[test]
+    fn swapping_a_predicate_keeps_it_ordered_or_unordered() {
+        for pred in FloatPred::all() {
+            assert_eq!(pred.is_ordered(), pred.swapped().is_ordered(), "{pred}");
+        }
+        for pred in IntPred::all() {
+            assert_eq!(pred.is_signed(), pred.swapped().is_signed(), "{pred}");
+        }
+    }
+
+    #[test]
+    fn no_two_predicates_share_a_name_within_their_family() {
+        for names in [
+            IntPred::all().map(IntPred::name).collect::<Vec<_>>(),
+            FloatPred::all().map(FloatPred::name).collect::<Vec<_>>(),
+        ] {
+            let total = names.len();
+            let mut names = names;
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), total);
+        }
+    }
+}

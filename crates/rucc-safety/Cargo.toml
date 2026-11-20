@@ -1,0 +1,31 @@
+[package]
+name = "rucc-safety"
+description = "The memory safety monitor: check insertion over the IR."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Rank 9, so everything here is of lower rank, per spec/18-package-layout.md section 18.2. The
+# short list is the point: this pass reads IR and writes IR, and there is nothing else it needs.
+[dependencies]
+rucc-ir = { workspace = true }
+# The name table, because turning a check into a call means interning the name it calls.
+rucc-base = { workspace = true }
+# For `Subobject` and nothing else, the way `rucc-opt` takes this crate for the optimization level.
+# Whether a store asks the type plane anything is a decision the command line makes and this pass
+# is told, per the note on `run`.
+rucc-session = { workspace = true }
+
+# Only needed to build a module to run the pass over.
+[dev-dependencies]
+rucc-target = { workspace = true }

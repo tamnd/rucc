@@ -1,0 +1,229 @@
+/* stdatomic.h, the C11 atomic names.
+ *
+ * Everything here is spelled in terms of the `__atomic_` builtins, which is how gcc writes this
+ * header too. The standard calls the operations generic functions and none of them can be one:
+ * the type of the object decides the width of the access, so a function would need a prototype
+ * per type and there is no way to write that. So they are macros and nothing else. gcc declares
+ * a function beside each macro, so that a program parenthesising the name to stop the expansion
+ * still has something to call, and those calls go to libatomic. There is no libatomic here, so a
+ * declaration would promise a function that nothing can ever provide and this header declares
+ * none: it adds no name to a translation unit that includes it.
+ *
+ * Two of these are not what gcc's header says, and both are written out where they appear. The
+ * signal fence is a thread fence, which is stronger than it has to be. `kill_dependency` is its
+ * argument, which is what it means anywhere that does not track a consume dependency.
+ *
+ * The arithmetic on an atomic pointer object does not scale by the pointee here, so
+ * `atomic_fetch_add(&p, 1)` on an `int * _Atomic` moves the pointer one byte and not four. That
+ * is what gcc's header does as well, because these expand to the same builtins and the builtins
+ * take a number of bytes. A plain `p += 1` on the same object does scale, since that is the
+ * language and not a builtin. */
+
+#ifndef __RUCC_STDATOMIC_H
+#define __RUCC_STDATOMIC_H
+
+typedef enum {
+  memory_order_relaxed = __ATOMIC_RELAXED,
+  memory_order_consume = __ATOMIC_CONSUME,
+  memory_order_acquire = __ATOMIC_ACQUIRE,
+  memory_order_release = __ATOMIC_RELEASE,
+  memory_order_acq_rel = __ATOMIC_ACQ_REL,
+  memory_order_seq_cst = __ATOMIC_SEQ_CST
+} memory_order;
+
+typedef _Atomic _Bool atomic_bool;
+typedef _Atomic char atomic_char;
+typedef _Atomic signed char atomic_schar;
+typedef _Atomic unsigned char atomic_uchar;
+typedef _Atomic short atomic_short;
+typedef _Atomic unsigned short atomic_ushort;
+typedef _Atomic int atomic_int;
+typedef _Atomic unsigned int atomic_uint;
+typedef _Atomic long atomic_long;
+typedef _Atomic unsigned long atomic_ulong;
+typedef _Atomic long long atomic_llong;
+typedef _Atomic unsigned long long atomic_ullong;
+
+#ifdef __CHAR8_TYPE__
+typedef _Atomic __CHAR8_TYPE__ atomic_char8_t;
+#endif
+typedef _Atomic __CHAR16_TYPE__ atomic_char16_t;
+typedef _Atomic __CHAR32_TYPE__ atomic_char32_t;
+typedef _Atomic __WCHAR_TYPE__ atomic_wchar_t;
+
+typedef _Atomic __INT_LEAST8_TYPE__ atomic_int_least8_t;
+typedef _Atomic __UINT_LEAST8_TYPE__ atomic_uint_least8_t;
+typedef _Atomic __INT_LEAST16_TYPE__ atomic_int_least16_t;
+typedef _Atomic __UINT_LEAST16_TYPE__ atomic_uint_least16_t;
+typedef _Atomic __INT_LEAST32_TYPE__ atomic_int_least32_t;
+typedef _Atomic __UINT_LEAST32_TYPE__ atomic_uint_least32_t;
+typedef _Atomic __INT_LEAST64_TYPE__ atomic_int_least64_t;
+typedef _Atomic __UINT_LEAST64_TYPE__ atomic_uint_least64_t;
+
+typedef _Atomic __INT_FAST8_TYPE__ atomic_int_fast8_t;
+typedef _Atomic __UINT_FAST8_TYPE__ atomic_uint_fast8_t;
+typedef _Atomic __INT_FAST16_TYPE__ atomic_int_fast16_t;
+typedef _Atomic __UINT_FAST16_TYPE__ atomic_uint_fast16_t;
+typedef _Atomic __INT_FAST32_TYPE__ atomic_int_fast32_t;
+typedef _Atomic __UINT_FAST32_TYPE__ atomic_uint_fast32_t;
+typedef _Atomic __INT_FAST64_TYPE__ atomic_int_fast64_t;
+typedef _Atomic __UINT_FAST64_TYPE__ atomic_uint_fast64_t;
+
+typedef _Atomic __INTPTR_TYPE__ atomic_intptr_t;
+typedef _Atomic __UINTPTR_TYPE__ atomic_uintptr_t;
+typedef _Atomic __SIZE_TYPE__ atomic_size_t;
+typedef _Atomic __PTRDIFF_TYPE__ atomic_ptrdiff_t;
+typedef _Atomic __INTMAX_TYPE__ atomic_intmax_t;
+typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
+
+/* C17 deprecated this one and C23 took it out, so it is defined only where a program can still
+ * be written against it. It never did anything: an atomic object is initialized from a value
+ * like any other object. */
+#if !(defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L)
+#define ATOMIC_VAR_INIT(value) (value)
+#endif
+
+/* Initialization is not an atomic operation, and 7.17.2.2 says so: an object being initialized
+ * is not one another thread can be reading. Relaxed rather than nothing at all because the store
+ * still has to be the width of the object, which is what makes it a store and not two. */
+#define atomic_init(object, value) atomic_store_explicit(object, value, __ATOMIC_RELAXED)
+
+#define kill_dependency(value) (value)
+
+#define atomic_thread_fence(order) __atomic_thread_fence(order)
+
+/* A signal fence keeps the compiler from moving accesses across it and asks nothing of the
+ * machine, which is what the builtin of the same name is. */
+#define atomic_signal_fence(order) __atomic_signal_fence(order)
+
+/* The width decides it, so the builtin is asked rather than the answer being written down here.
+ * An object the machine reaches in a single instruction is lock free and one wider than that is a
+ * lock out of the runtime's table, and both are types this compiler accepts. The object is passed
+ * along as well as measured, because a program may have written a side effect in there and
+ * because the alignment is part of the question the builtin answers. */
+#define atomic_is_lock_free(object) __atomic_is_lock_free(sizeof(*(object)), (object))
+
+#define ATOMIC_BOOL_LOCK_FREE __GCC_ATOMIC_BOOL_LOCK_FREE
+#define ATOMIC_CHAR_LOCK_FREE __GCC_ATOMIC_CHAR_LOCK_FREE
+#ifdef __GCC_ATOMIC_CHAR8_T_LOCK_FREE
+#define ATOMIC_CHAR8_T_LOCK_FREE __GCC_ATOMIC_CHAR8_T_LOCK_FREE
+#endif
+#define ATOMIC_CHAR16_T_LOCK_FREE __GCC_ATOMIC_CHAR16_T_LOCK_FREE
+#define ATOMIC_CHAR32_T_LOCK_FREE __GCC_ATOMIC_CHAR32_T_LOCK_FREE
+#define ATOMIC_WCHAR_T_LOCK_FREE __GCC_ATOMIC_WCHAR_T_LOCK_FREE
+#define ATOMIC_SHORT_LOCK_FREE __GCC_ATOMIC_SHORT_LOCK_FREE
+#define ATOMIC_INT_LOCK_FREE __GCC_ATOMIC_INT_LOCK_FREE
+#define ATOMIC_LONG_LOCK_FREE __GCC_ATOMIC_LONG_LOCK_FREE
+#define ATOMIC_LLONG_LOCK_FREE __GCC_ATOMIC_LLONG_LOCK_FREE
+#define ATOMIC_POINTER_LOCK_FREE __GCC_ATOMIC_POINTER_LOCK_FREE
+
+/* These four go through the builtins that take every value by address, because an atomic object
+ * may be a structure or a union and a structure is not something the `_n` forms can take or give
+ * back. Each is a statement expression holding a temporary of the object's type with the
+ * qualifier taken off, which is what `__typeof__` over a comma expression gives, since the result
+ * of a comma is a value and a value has no qualifiers. The pointer is read into a variable of its
+ * own first so that an argument with a side effect is evaluated once, and `__extension__` is what
+ * keeps a program built with -pedantic-errors from being told off about a header it did not
+ * write. For an integer or a pointer the temporary costs nothing once the optimizer has seen it,
+ * and a size no instruction reaches becomes a call to the runtime either way. */
+#define atomic_store_explicit(object, desired, order)          \
+  __extension__({                                              \
+    __auto_type __rucc_obj = (object);                         \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);   \
+    __atomic_store(__rucc_obj, &__rucc_new, (order));          \
+  })
+#define atomic_store(object, desired) \
+  atomic_store_explicit(object, desired, __ATOMIC_SEQ_CST)
+
+#define atomic_load_explicit(object, order)                    \
+  __extension__({                                              \
+    __auto_type __rucc_obj = (object);                         \
+    __typeof__((void)0, *__rucc_obj) __rucc_old;               \
+    __atomic_load(__rucc_obj, &__rucc_old, (order));           \
+    __rucc_old;                                                \
+  })
+#define atomic_load(object) atomic_load_explicit(object, __ATOMIC_SEQ_CST)
+
+#define atomic_exchange_explicit(object, desired, order)             \
+  __extension__({                                                    \
+    __auto_type __rucc_obj = (object);                               \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);         \
+    __typeof__((void)0, *__rucc_obj) __rucc_old;                     \
+    __atomic_exchange(__rucc_obj, &__rucc_new, &__rucc_old, (order)); \
+    __rucc_old;                                                      \
+  })
+#define atomic_exchange(object, desired) \
+  atomic_exchange_explicit(object, desired, __ATOMIC_SEQ_CST)
+
+/* The value expected already arrives through a pointer, and a failed exchange writes what it
+ * found back through that pointer, so only the value to put there needs a temporary. */
+#define atomic_compare_exchange_strong_explicit(object, expected, desired, success, failure) \
+  __extension__({                                                                          \
+    __auto_type __rucc_obj = (object);                                                     \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);                               \
+    __atomic_compare_exchange(__rucc_obj, (expected), &__rucc_new, 0, (success),           \
+                              (failure));                                                  \
+  })
+#define atomic_compare_exchange_strong(object, expected, desired)                 \
+  atomic_compare_exchange_strong_explicit(object, expected, desired,              \
+                                          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+
+#define atomic_compare_exchange_weak_explicit(object, expected, desired, success, failure) \
+  __extension__({                                                                        \
+    __auto_type __rucc_obj = (object);                                                   \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);                             \
+    __atomic_compare_exchange(__rucc_obj, (expected), &__rucc_new, 1, (success),         \
+                              (failure));                                                \
+  })
+#define atomic_compare_exchange_weak(object, expected, desired)                 \
+  atomic_compare_exchange_weak_explicit(object, expected, desired,              \
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+
+#define atomic_fetch_add_explicit(object, operand, order) \
+  __atomic_fetch_add(object, operand, order)
+#define atomic_fetch_add(object, operand) \
+  atomic_fetch_add_explicit(object, operand, __ATOMIC_SEQ_CST)
+
+#define atomic_fetch_sub_explicit(object, operand, order) \
+  __atomic_fetch_sub(object, operand, order)
+#define atomic_fetch_sub(object, operand) \
+  atomic_fetch_sub_explicit(object, operand, __ATOMIC_SEQ_CST)
+
+#define atomic_fetch_and_explicit(object, operand, order) \
+  __atomic_fetch_and(object, operand, order)
+#define atomic_fetch_and(object, operand) \
+  atomic_fetch_and_explicit(object, operand, __ATOMIC_SEQ_CST)
+
+#define atomic_fetch_or_explicit(object, operand, order) \
+  __atomic_fetch_or(object, operand, order)
+#define atomic_fetch_or(object, operand) \
+  atomic_fetch_or_explicit(object, operand, __ATOMIC_SEQ_CST)
+
+#define atomic_fetch_xor_explicit(object, operand, order) \
+  __atomic_fetch_xor(object, operand, order)
+#define atomic_fetch_xor(object, operand) \
+  atomic_fetch_xor_explicit(object, operand, __ATOMIC_SEQ_CST)
+
+/* One byte, whatever the type says, which is what the two builtins below reach. gcc wraps that
+ * byte in a structure so that nothing but the four names here can touch it. The byte is named
+ * directly here instead, which is a smaller type and the same one byte object, and the standard
+ * already says a program may do nothing with one of these but pass it to the four names below.
+ *
+ * An unsigned char rather than a `_Bool` because the two builtins work on a byte and neither of
+ * them ever puts anything but a zero or a one in it, so nothing can tell the difference, and
+ * because a `_Bool` object in memory is one this compiler cannot generate code for yet. That is
+ * `tamnd/rucc#352` and it is what `atomic_bool` above is waiting on as well. */
+typedef _Atomic unsigned char atomic_flag;
+#define ATOMIC_FLAG_INIT { 0 }
+
+#define atomic_flag_test_and_set(object) __atomic_test_and_set(object, __ATOMIC_SEQ_CST)
+#define atomic_flag_test_and_set_explicit(object, order) __atomic_test_and_set(object, order)
+
+#define atomic_flag_clear(object) __atomic_clear(object, __ATOMIC_SEQ_CST)
+#define atomic_flag_clear_explicit(object, order) __atomic_clear(object, order)
+
+#if defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L
+#define __STDC_VERSION_STDATOMIC_H__ 202311L
+#endif
+
+#endif

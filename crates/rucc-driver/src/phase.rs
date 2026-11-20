@@ -1,0 +1,1480 @@
+//! The phase graph: what has to happen to each input file, in what order, and where the
+//! result goes.
+//!
+//! Design: `spec/04-driver-and-cli.md` section 4.2.
+//!
+//! The plan is computed before anything runs and is a plain data structure with no side
+//! effects, which is what makes `-###` possible and what makes this testable without a file
+//! system. Nothing in here reads a file or spawns a process. Executing the plan is M3, when
+//! there is something for the phases to do.
+
+use std::fmt::Write as _;
+
+use rucc_session::{EmitKind, Options, SaveTemps};
+use rucc_target::{Env, Os};
+
+use crate::link::Item;
+
+/// A step in the compilation of one input.
+///
+/// The order of the variants is the order of the pipeline, and the derived `Ord` is relied on
+/// when a mode flag truncates a sequence. `Compile` covers parsing through code generation,
+/// which is one phase from the driver's point of view because nothing between them can be
+/// stopped at from the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Phase {
+    /// Translation phases 1 to 4, producing preprocessed source.
+    Preprocess,
+    /// Parse, check, optimize and generate code, producing assembly.
+    Compile,
+    /// Assemble, producing an object file.
+    Assemble,
+    /// Collect the objects into a static library.
+    ///
+    /// In front of the link rather than after it because the derived `Ord` is what truncates a
+    /// sequence, and every phase an archive needs is a phase a link needs too. No input's sequence
+    /// has this in it: an archive is one step for the whole command line, the way a link is, and
+    /// what each input contributes to it is an object.
+    Archive,
+    /// Link the objects into an executable or a shared library.
+    Link,
+}
+
+impl Phase {
+    /// The name used in `-###` output and in diagnostics.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Preprocess => "preprocess",
+            Phase::Compile => "compile",
+            Phase::Assemble => "assemble",
+            Phase::Archive => "archive",
+            Phase::Link => "link",
+        }
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What an input file is, which decides where in the pipeline it enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InputKind {
+    /// C source. Extension `.c`, or `-x c`.
+    C,
+    /// A header compiled on its own. Extension `.h` with `-x c-header`, or `-x c-header`.
+    CHeader,
+    /// Already preprocessed C. Extension `.i`, or `-x cpp-output`.
+    PreprocessedC,
+    /// The IR this compiler prints. Extension `.ir`, or `-x ir`.
+    ///
+    /// Not a GCC input kind, because GCC has no textual IR. It is here because the IR's
+    /// printer and its parser are a pair, and a pair is only known to agree if something reads
+    /// back what was written: `rucc --emit=ir a.c -o a.ir` and then `rucc --emit=ir a.ir` are
+    /// two files a byte comparison has an opinion about, over whatever code is at hand rather
+    /// than over the modules a test happens to build.
+    Ir,
+    /// Assembly. Extension `.s`, or `-x assembler`.
+    Assembler,
+    /// Assembly that still needs the preprocessor. Extension `.S` or `.sx`, or
+    /// `-x assembler-with-cpp`.
+    AssemblerWithCpp,
+    /// An object file, an archive or a shared library. Anything the linker takes directly.
+    LinkerInput,
+}
+
+impl InputKind {
+    /// The name `-x` uses for this kind, where one exists.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InputKind::C => "c",
+            InputKind::CHeader => "c-header",
+            InputKind::PreprocessedC => "cpp-output",
+            InputKind::Ir => "ir",
+            InputKind::Assembler => "assembler",
+            InputKind::AssemblerWithCpp => "assembler-with-cpp",
+            InputKind::LinkerInput => "linker-input",
+        }
+    }
+
+    /// Parses the argument of `-x`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending name when it is not one we accept. C++ gets its own message,
+    /// because "unknown language c++" reads like an oversight and it is a decision.
+    pub fn from_x_arg(name: &str) -> Result<InputKind, XError> {
+        match name {
+            "c" => Ok(InputKind::C),
+            "c-header" => Ok(InputKind::CHeader),
+            "cpp-output" | "c-cpp-output" => Ok(InputKind::PreprocessedC),
+            "ir" => Ok(InputKind::Ir),
+            "assembler" => Ok(InputKind::Assembler),
+            "assembler-with-cpp" => Ok(InputKind::AssemblerWithCpp),
+            "c++" | "c++-header" | "c++-cpp-output" | "objective-c" | "objective-c++" => {
+                Err(XError::Unsupported(name.to_owned()))
+            }
+            _ => Err(XError::Unknown(name.to_owned())),
+        }
+    }
+
+    /// Classifies an input by its extension, the way `spec/04-driver-and-cli.md` section 4.2
+    /// tabulates it.
+    ///
+    /// An unrecognized extension is a linker input, which is GCC's behavior and is what makes
+    /// `rucc foo.o bar.builtin-suffix` work. The exception is a C++ extension, which is a
+    /// hard error rather than a confusing link failure later.
+    ///
+    /// # Errors
+    ///
+    /// Returns the extension when it names a language that is permanently out of scope.
+    pub fn from_path(path: &str) -> Result<InputKind, XError> {
+        let ext = extension(path);
+        match ext {
+            // Matched case-sensitively on purpose: `.S` and `.s` are different languages and
+            // conflating them is a real bug on case-insensitive file systems that GCC also
+            // has. The comment is here so the next person does not "fix" it.
+            "c" => Ok(InputKind::C),
+            "i" => Ok(InputKind::PreprocessedC),
+            "ir" => Ok(InputKind::Ir),
+            "h" => Ok(InputKind::CHeader),
+            "s" => Ok(InputKind::Assembler),
+            "S" | "sx" => Ok(InputKind::AssemblerWithCpp),
+            "cc" | "cpp" | "cxx" | "c++" | "C" | "hpp" | "hxx" | "ii" | "m" | "mm" => {
+                Err(XError::Unsupported(ext.to_owned()))
+            }
+            _ => Ok(InputKind::LinkerInput),
+        }
+    }
+
+    /// The full phase sequence for this kind, before any mode flag truncates it.
+    fn full_sequence(self) -> &'static [Phase] {
+        use Phase::{Assemble, Compile, Link, Preprocess};
+        match self {
+            InputKind::C | InputKind::CHeader => &[Preprocess, Compile, Assemble, Link],
+            InputKind::PreprocessedC | InputKind::Ir => &[Compile, Assemble, Link],
+            // Note the gap: assembly with a preprocessor skips `Compile` entirely. This is why
+            // the sequence is a list rather than a range over the enum.
+            InputKind::AssemblerWithCpp => &[Preprocess, Assemble, Link],
+            InputKind::Assembler => &[Assemble, Link],
+            InputKind::LinkerInput => &[Link],
+        }
+    }
+}
+
+/// Why an input or an `-x` argument was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XError {
+    /// A language we do not know at all.
+    Unknown(String),
+    /// A language we know and will not implement.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for XError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            XError::Unknown(name) => {
+                write!(
+                    f,
+                    "unknown language `{name}`; \
+                     accepted: c, c-header, cpp-output, ir, assembler, assembler-with-cpp, none"
+                )
+            }
+            XError::Unsupported(name) => {
+                write!(
+                    f,
+                    "`{name}` is not C, and this compiler is only ever going to compile C; \
+                     see the not-in-scope list in spec/00-README.md"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for XError {}
+
+/// What one entry of the input list was written as.
+///
+/// Three things share the list because all three are positional and the position is what they mean.
+/// An archive is searched for what is undefined at the moment the linker reaches it, so a library
+/// named before the object that needs it contributes nothing. A great many of the linker's own
+/// options are a bracket around the files after them, so an option moved away from what it brackets
+/// says nothing at all. Keeping a list of files, a list of libraries and a list of linker words
+/// apart would lose the one fact each of them depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A path, which is a file this command line may have something to do to.
+    File,
+    /// `-l<name>`, which the linker resolves against its search path.
+    Library,
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    Linker,
+}
+
+/// One input file, with the `-x` setting that was in effect where it appeared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Input {
+    /// The path as it was written on the command line, the name of a `-l` library, or one word
+    /// handed straight to the linker.
+    pub path: String,
+    /// The language forced by an earlier `-x`, if any. `-x none` clears it.
+    pub forced: Option<InputKind>,
+    /// Which of the three this is, and so what its position means.
+    pub role: Role,
+}
+
+impl Input {
+    /// An input with no `-x` in effect.
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Input {
+        Input { path: path.into(), forced: None, role: Role::File }
+    }
+
+    /// `-l<name>`, which is an input to the link and to nothing else.
+    #[must_use]
+    pub fn library(name: impl Into<String>) -> Input {
+        Input { path: name.into(), forced: None, role: Role::Library }
+    }
+
+    /// One word of `-Wl,` or `-Xlinker`, which is read by the linker and by nothing here.
+    #[must_use]
+    pub fn linker(arg: impl Into<String>) -> Input {
+        Input { path: arg.into(), forced: None, role: Role::Linker }
+    }
+
+    /// How this input is named in a message about it.
+    #[must_use]
+    pub fn named(&self) -> String {
+        match self.role {
+            Role::File => self.path.clone(),
+            Role::Library => format!("-l{}", self.path),
+            Role::Linker => format!("-Wl,{}", self.path),
+        }
+    }
+
+    /// What this input is, taking `-x` into account.
+    ///
+    /// # Errors
+    ///
+    /// Returns the extension when it names a language that is out of scope.
+    pub fn kind(&self) -> Result<InputKind, XError> {
+        if self.role != Role::File {
+            return Ok(InputKind::LinkerInput);
+        }
+        match self.forced {
+            Some(k) => Ok(k),
+            None => InputKind::from_path(&self.path),
+        }
+    }
+}
+
+/// Where the result of a job goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    /// Standard output, which is where `-E` writes when there is no `-o`.
+    Stdout,
+    /// A path the user can see and named, or that we derived from the input name.
+    File(String),
+    /// A file the link step consumes and nothing else ever sees. The name is a hint for
+    /// `-###` output; the real path is chosen in a temporary directory at execution time.
+    Temporary(String),
+}
+
+impl Output {
+    fn render(&self) -> String {
+        match self {
+            Output::Stdout => "-".to_owned(),
+            Output::File(p) => p.clone(),
+            Output::Temporary(p) => format!("{p} (temporary)"),
+        }
+    }
+
+    /// The path the link step reads, for an output that feeds it.
+    fn as_link_input(&self) -> Option<&str> {
+        match self {
+            Output::File(p) | Output::Temporary(p) => Some(p),
+            Output::Stdout => None,
+        }
+    }
+}
+
+/// Everything that has to happen to one input file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    /// The input path as written.
+    pub input: String,
+    /// What we decided it is.
+    pub kind: InputKind,
+    /// The phases to run, in order. Empty when the input goes straight to the linker.
+    pub phases: Vec<Phase>,
+    /// Where the last phase writes.
+    pub output: Output,
+    /// What the files `-save-temps` keeps are called, without the suffix that says which one it
+    /// is, or `None` when there is nothing to keep.
+    ///
+    /// Nothing to keep is the usual case: the flag was not given, or it was and this job has no
+    /// step whose result the compilation would have thrown away. `-E -save-temps` is the second
+    /// of those, since the preprocessed text is the output and is already being written.
+    pub aux_base: Option<String>,
+    /// Where `-fstack-usage` writes this job's report, or `None` when it was not asked for or the
+    /// job does not compile C.
+    ///
+    /// gcc's auxiliary base name with `.su` on the end, the same name `-save-temps` builds its
+    /// files from: `-c a.c -o out/x.o` writes `out/x.su`, a bare `-c sub/a.c` writes `a.su` in the
+    /// working directory, and `a.c` linked into `out/prog` writes `out/prog-a.su`. The rest of the
+    /// rules are on `aux_base` in this file.
+    pub stack_usage: Option<String>,
+    /// Where the instrumented program writes its arc counts, from `-fprofile-arcs`, or `None`.
+    ///
+    /// The same auxiliary base as `stack_usage` with `.gcda` on the end, as the path is written
+    /// into the object; the driver makes it absolute before the compile sees it.
+    pub counts: Option<String>,
+    /// Where the graph of the counters goes, from `-ftest-coverage`, or `None`.
+    ///
+    /// The same auxiliary base again, with `.gcno` on the end, and left as it is since it is a
+    /// file this compilation writes rather than one it names for a program to write later.
+    pub note: Option<String>,
+}
+
+impl Job {
+    /// Where the preprocessed text goes when `-save-temps` asked for it to be kept.
+    ///
+    /// `None` when the flag was not given, when the input arrives preprocessed already and there
+    /// is no phase 4 to keep the result of, or when the text is this job's own output and is
+    /// being written anyway.
+    #[must_use]
+    pub fn saved_text(&self) -> Option<String> {
+        let base = self.aux_base.as_ref()?;
+        self.phases.contains(&Phase::Preprocess).then(|| format!("{base}.i"))
+    }
+
+    /// Where the assembly goes when `-save-temps` asked for it to be kept.
+    ///
+    /// `None` for the same reasons, the last of them being `-S`: the assembly is the output
+    /// there, and a copy of it under a second name is a file nobody asked for.
+    #[must_use]
+    pub fn saved_asm(&self) -> Option<String> {
+        let base = self.aux_base.as_ref()?;
+        let past = self.phases.last().is_some_and(|last| *last > Phase::Compile);
+        (past && self.phases.contains(&Phase::Compile)).then(|| format!("{base}.s"))
+    }
+}
+
+/// The link step, when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkJob {
+    /// Objects and libraries, in command line order, because link order is semantic.
+    pub inputs: Vec<Item>,
+    /// The executable.
+    pub output: String,
+}
+
+/// The archive step, when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveJob {
+    /// What the members are called inside the archive, in command line order.
+    ///
+    /// Command line order is the order they are written in, which is the stated order
+    /// `spec/cross-compile/13-distribution.md` section 13.6 asks for: the caller chose it and the
+    /// same command line produces the same archive. The names are the object file names, because
+    /// that is what `ar t` over anybody else's archive shows.
+    pub members: Vec<String>,
+    /// The archive.
+    pub output: String,
+}
+
+/// The whole plan for one invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// One per input, in command line order.
+    pub jobs: Vec<Job>,
+    /// The link step, or `None` when a mode flag stopped short of it.
+    pub link: Option<LinkJob>,
+    /// The archive step, which is there only under `--emit=archive` and is never there beside a
+    /// link: one command line produces one of the two.
+    pub archive: Option<ArchiveJob>,
+    /// Things worth saying under `-v` that are not errors, such as an object file passed on a
+    /// command line that is not linking.
+    pub notes: Vec<String>,
+    /// The argument of `-o` as it was written, if it was given.
+    ///
+    /// Kept alongside the paths it produced because the `-M` family needs the name rather than
+    /// the path: a make rule whose target is the object the build asked for is one the build
+    /// can read back, and a rule naming a temporary directory is one nothing will ever match.
+    pub output: Option<String>,
+}
+
+/// Why a command line could not be turned into a plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanError {
+    /// Lowercase, no trailing period, the same shape as every other diagnostic.
+    pub message: String,
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+fn plan_err(message: impl Into<String>) -> PlanError {
+    PlanError { message: message.into() }
+}
+
+/// The last phase that runs, given what the user asked to be emitted.
+///
+/// `--emit=tast` and the other intermediate dumps stop where `-S` stops, because they are
+/// produced inside the compile phase and there is nothing after them to run.
+#[must_use]
+pub fn last_phase(emit: EmitKind) -> Phase {
+    match emit {
+        EmitKind::Preprocessed => Phase::Preprocess,
+        EmitKind::Asm
+        | EmitKind::Tast
+        | EmitKind::Ir
+        | EmitKind::MirFinal
+        | EmitKind::WasmTree
+        | EmitKind::SafetySummary
+        | EmitKind::TypeGranules
+        | EmitKind::Acid
+        | EmitKind::AcidMain
+        | EmitKind::SyntaxOnly => Phase::Compile,
+        EmitKind::Object => Phase::Assemble,
+        EmitKind::Archive => Phase::Archive,
+        EmitKind::Executable => Phase::Link,
+    }
+}
+
+/// What an input written on the command line is when it means standard input rather than a file.
+pub const STDIN: &str = "-";
+
+/// What a file reads as in a message, in a line marker and in `__FILE__`.
+///
+/// Standard input has no name, so it gets the one gcc gives it. A build that pipes a file in and
+/// then greps the output for a name is reading gcc's name for it, and `-` is not that name.
+#[must_use]
+pub fn source_name(path: &str) -> &str {
+    if path == STDIN { "<stdin>" } else { path }
+}
+
+/// The extension of a path, without the dot, or the empty string when there is none.
+fn extension(path: &str) -> &str {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match name.rfind('.') {
+        // A leading dot is a hidden file, not an extension, and `.` and `..` are not inputs.
+        Some(0) | None => "",
+        Some(i) => &name[i + 1..],
+    }
+}
+
+/// The last component of a path, which is the whole of it when there is no directory in it.
+fn file_part(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The path with its extension taken off and its directory left on.
+///
+/// This is what a name derived from `-o` is built on, since `-o out/a.o` puts the files that go
+/// beside the object in `out` and not in the working directory.
+fn without_extension(path: &str) -> &str {
+    let start = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    match path[start..].rfind('.') {
+        // A leading dot is a hidden file, not an extension, and `.` and `..` are not inputs.
+        Some(0) | None => path,
+        Some(i) => &path[..start + i],
+    }
+}
+
+/// The path without its extension, keeping any directory part off, because GCC writes the
+/// output into the current directory rather than next to the source.
+fn stem(path: &str) -> &str {
+    file_part(without_extension(path))
+}
+
+/// The name the files `-save-temps` and `-fstack-usage` keep beside an output are built from,
+/// without the suffix that says which one it is.
+///
+/// GCC calls this the auxiliary base name, and it is the name of the file the compilation
+/// produces with the extension taken off: `-c a.c -o out/a.o` keeps `out/a.i`, `out/a.s` and
+/// `out/a.su`. A command line that links has one output for however many inputs, so the input's
+/// own name goes on the end and `a.c` under `-o out/prog` becomes `out/prog-a`. The output keeps
+/// its extension there, since it is not the name of an object, and only an `.exe` comes off, so
+/// `-o lib.so` gives `lib.so-a`. A link with no `-o` and one input has nothing to tell apart and
+/// uses the input's name alone, and with more than one it uses `a-`, from `a.out`.
+/// `-save-temps=cwd` is the same name with the directory taken off, which is the only thing the
+/// two spellings disagree about.
+///
+/// `-dumpdir` replaces everything in front of the input's name, or of the output's in a compile
+/// that names one, and is a directory when it ends in a slash and the start of a name when it
+/// does not. `-dumpbase` replaces the name, still with the input's on the end when linking, and
+/// keeps the directory of the output or of `-dumpdir` unless it has one of its own.
+/// `-dumpbase-ext` is taken off the end of `-dumpbase`. Every case here was measured against gcc
+/// 16.
+///
+/// `collecting` is that one output, which is the link and the archive both, and `alone` is
+/// whether the command line has a single input. `output` is `None` for an `-o -`, which names no
+/// file.
+fn aux_base(
+    opts: &Options,
+    input: &str,
+    output: Option<&str>,
+    collecting: bool,
+    alone: bool,
+) -> String {
+    let own = stem(input);
+    let named = if let Some(base) = opts.dump_base.as_deref() {
+        let ext = opts.dump_base_ext.as_deref().filter(|ext| !ext.is_empty());
+        let stripped = ext.and_then(|ext| base.strip_suffix(ext)).filter(|b| !b.is_empty());
+        let base = stripped.unwrap_or(base);
+        let base = if collecting { format!("{base}-{own}") } else { base.to_owned() };
+        if base.contains(['/', '\\']) {
+            base
+        } else {
+            let dir = opts.dump_dir.as_deref().unwrap_or_else(|| output.map_or("", directory));
+            format!("{dir}{base}")
+        }
+    } else if let Some(dir) = &opts.dump_dir {
+        let name = match output {
+            Some(o) if !collecting => file_part(without_extension(o)),
+            _ => own,
+        };
+        format!("{dir}{name}")
+    } else if collecting {
+        match output {
+            Some(o) => format!("{}-{own}", o.strip_suffix(".exe").unwrap_or(o)),
+            None if alone => own.to_owned(),
+            None => format!("{}-{own}", stem(default_exe(opts))),
+        }
+    } else {
+        output.map_or(own, without_extension).to_owned()
+    };
+    if opts.save_temps == SaveTemps::Cwd { file_part(&named).to_owned() } else { named }
+}
+
+/// The directory part of a path with the slash that ends it, or nothing when there is none.
+fn directory(path: &str) -> &str {
+    path.rfind(['/', '\\']).map_or("", |i| &path[..=i])
+}
+
+/// The suffix a phase's output carries, for this target.
+fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
+    match phase {
+        Phase::Preprocess => "i",
+        // The compile phase is where every intermediate dump comes out, and each of them is a
+        // different language, so each gets a name of its own. `rucc --emit=tast a.c` writing
+        // `a.s` would be a file that neither an assembler nor a reader could make sense of.
+        Phase::Compile => match opts.emit {
+            EmitKind::Tast => "tast",
+            EmitKind::Ir => "ir",
+            EmitKind::MirFinal => "mir",
+            EmitKind::WasmTree => "wasm-tree",
+            // Two extensions rather than one, because the content is JSON and a tool that reads
+            // JSON should be able to tell by looking, and because `a.json` next to `a.c` says
+            // nothing about which of a build's several JSON files it is.
+            EmitKind::SafetySummary => "safety.json",
+            // Two extensions for the same reason, and text rather than JSON because this one
+            // is read by a person once and not by a build every time.
+            EmitKind::TypeGranules => "granules.txt",
+            // The name that kencc gives the file under `-a -n`.
+            EmitKind::Acid | EmitKind::AcidMain => "acid",
+            _ => "s",
+        },
+        // MSVC-targeted builds expect `.obj`, and build systems written for that target look
+        // for it by name.
+        Phase::Assemble => {
+            if opts.target.os == Os::Windows {
+                "obj"
+            } else {
+                "o"
+            }
+        }
+        // Neither of the last two is a suffix anything derives: both write one file for the whole
+        // command line and both take its name from `-o`, and the archive requires one.
+        Phase::Archive | Phase::Link => "",
+    }
+}
+
+/// The default name of the linked output, which is GCC's `a.out` everywhere but Windows.
+fn default_exe(opts: &Options) -> &'static str {
+    if opts.target.os == Os::Windows { "a.exe" } else { "a.out" }
+}
+
+/// What a link writes when `-o` named `output`, which on a MinGW target is the name with `.exe`
+/// on it when its last component has no extension at all.
+///
+/// That is MinGW gcc's rule, `convert_filename` in its driver, and clang's for the same target, so
+/// `-o foo` writes `foo.exe` and `-o foo.bin` and `-o foo.` are left alone. It applies to every
+/// link, `-shared` and `-r` included, which gcc does as well. Standard output and the bit bucket
+/// are not files to name. Both slashes end a directory, which is what they do where MinGW gcc runs.
+fn exe_name(opts: &Options, output: &str) -> String {
+    let mingw = opts.target.os == Os::Windows && opts.target.env == Env::Gnu;
+    let last = &output[directory(output).len()..];
+    if !mingw || last.contains('.') || output == STDIN || output == "/dev/null" {
+        return output.to_owned();
+    }
+    format!("{output}.exe")
+}
+
+impl Plan {
+    /// Builds the plan for one invocation.
+    ///
+    /// `output` is the argument of `-o`, if it was given.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the inputs and the mode flags do not describe a compilation:
+    /// an out of scope language, `-o` naming one file for several outputs, or nothing to do.
+    pub fn new(opts: &Options, inputs: &[Input], output: Option<&str>) -> Result<Plan, PlanError> {
+        if inputs.is_empty() {
+            return Err(plan_err("no input files"));
+        }
+        let last = last_phase(opts.emit);
+        let linking = last == Phase::Link;
+        let archiving = last == Phase::Archive;
+        // An archive has no default name. `a.out` is a convention old enough that a build which
+        // gets one knows what happened, and a `libwhatever.a` this made up would be a file the
+        // build then fails to find under the name it asked for.
+        if archiving && output.is_none() {
+            return Err(plan_err("an archive has no default name, so `--emit=archive` needs `-o`"));
+        }
+        // One output for however many inputs, which both of the collecting steps are. What it
+        // decides below is that no input names the output and that the objects are temporary.
+        let collecting = linking || archiving;
+
+        let mut kinds = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            // Standard input has no extension to read a language out of, so either `-x` said what
+            // it is or `-E` did, and gcc refuses the rest rather than guessing. The refusal is
+            // worth keeping: `rucc -` on a terminal with nothing else on the line would otherwise
+            // sit there waiting for a program to be typed at it.
+            if input.role == Role::File && input.path == STDIN && input.forced.is_none() {
+                if opts.emit != EmitKind::Preprocessed {
+                    return Err(plan_err("-E or -x required when input is from standard input"));
+                }
+                kinds.push(InputKind::C);
+                continue;
+            }
+            kinds.push(input.kind().map_err(|e| plan_err(format!("{}: {e}", input.path)))?);
+        }
+
+        // How many inputs actually write an output of their own. A `.o` on a `-c` line
+        // produces nothing, and neither does a `.s` on an `-E` line, so neither may count
+        // toward the `-o` check below. When linking there is exactly one output and it is the
+        // executable, so nothing counts.
+        let producing = if collecting {
+            0
+        } else {
+            kinds
+                .iter()
+                .filter(|k| **k != InputKind::LinkerInput)
+                .filter(|k| k.full_sequence().iter().any(|p| *p <= last))
+                .count()
+        };
+        if output.is_some() && !collecting && producing > 1 {
+            return Err(plan_err("cannot specify -o with multiple inputs when not linking"));
+        }
+
+        // Whether there is one input, which decides whether the files kept beside a link's output
+        // need the input's name on them to tell them apart. A library or a word for the linker is
+        // not an input here and an object is, which is how gcc counts.
+        let alone = inputs.iter().filter(|input| input.role == Role::File).count() == 1;
+
+        let mut notes = Vec::new();
+        let mut jobs = Vec::with_capacity(inputs.len());
+        let mut link_inputs = Vec::new();
+        let mut members = Vec::new();
+
+        for (input, kind) in inputs.iter().zip(kinds) {
+            // A word the user handed the linker is not a file and nothing here does anything to it,
+            // so it is neither a job nor something an archive could hold. It is in this list rather
+            // than beside the other link flags so that it reaches the linker among the files it was
+            // written among, which is the note on [`Role`]. On a command line that does not link it
+            // is dropped without a word, which is what GCC does with one.
+            if input.role == Role::Linker {
+                if linking {
+                    link_inputs.push(Item::Linker(input.path.clone()));
+                }
+                continue;
+            }
+
+            // An object, an archive or a shared library has nothing done to it. It reaches the
+            // linker under the name it was written with, and its name is not derived from
+            // anything, which is why this case is separate rather than falling out of the
+            // sequence below. Deriving it would rewrite `libm.a` into `libm.o`.
+            if kind == InputKind::LinkerInput {
+                // An object, an archive or a library on an archive command line is refused rather
+                // than noted and dropped. The symbol index is why: it needs the names each member
+                // defines, and this compiler knows those for a file it compiled and not for one it
+                // was handed, since nothing here reads an object file back. Carrying on and
+                // leaving the file out would be an archive that is quietly missing half of what
+                // was asked for, which a link finds out about much later.
+                if archiving {
+                    let named = input.named();
+                    return Err(plan_err(format!(
+                        "{named}: an archive is written from the objects this command line \
+                         compiles, and the symbol index in it needs the names each member \
+                         defines, which this compiler knows for a file it compiled and not for \
+                         one it was handed"
+                    )));
+                }
+                if linking {
+                    link_inputs.push(if input.role == Role::Library {
+                        Item::Library(input.path.clone())
+                    } else {
+                        Item::File(input.path.clone())
+                    });
+                } else {
+                    // GCC warns and carries on here, and configure scripts rely on that, so
+                    // this is a note rather than an error.
+                    notes.push(format!(
+                        "{}: linker input unused because linking was not requested",
+                        input.named()
+                    ));
+                }
+                // A library is not a file this compilation does anything to, so it gets no job.
+                // One would print a line under `-###` saying nothing happens to it, next to the
+                // note above already saying so.
+                if input.role == Role::Library {
+                    continue;
+                }
+                jobs.push(Job {
+                    input: input.path.clone(),
+                    kind,
+                    phases: Vec::new(),
+                    output: Output::File(input.path.clone()),
+                    aux_base: None,
+                    stack_usage: None,
+                    counts: None,
+                    note: None,
+                });
+                continue;
+            }
+
+            let phases: Vec<Phase> =
+                kind.full_sequence().iter().copied().filter(|p| *p <= last).collect();
+            // `rucc -E a.s` lands here: assembly enters at `Assemble`, which is past where
+            // `-E` stops, so there is no phase left to run. GCC carries on rather than
+            // failing, and so do we.
+            let Some(&final_phase) = phases.last() else {
+                notes.push(format!(
+                    "{}: input unused because it enters the pipeline after the last phase \
+                     the mode flags asked for",
+                    input.path
+                ));
+                jobs.push(Job {
+                    input: input.path.clone(),
+                    kind,
+                    phases,
+                    output: Output::File(input.path.clone()),
+                    aux_base: None,
+                    stack_usage: None,
+                    counts: None,
+                    note: None,
+                });
+                continue;
+            };
+            let named = if producing == 1 { output } else { None };
+            // A job that stops at the preprocessed text has nothing to keep, since that text is
+            // what it writes. Everything past it does: the text and, once there is a back end
+            // step after it, the assembly.
+            let aux = (opts.save_temps.wanted() && final_phase > Phase::Preprocess)
+                .then(|| aux_base(opts, &input.path, output, collecting, alone));
+            let out = if final_phase == Phase::Link || archiving {
+                // The job stops at the object, and the step below takes it from here. Under
+                // `-save-temps` the object is one of the files being kept, so it is written where
+                // the person can see it rather than in a directory that goes away.
+                let ext = suffix_for(Phase::Assemble, opts);
+                match &aux {
+                    Some(base) => Output::File(format!("{base}.{ext}")),
+                    None => Output::Temporary(format!("{}.{ext}", stem(&input.path))),
+                }
+            } else if opts.emit == EmitKind::SyntaxOnly {
+                // Nothing is produced, so nothing is written, and an `-o` is ignored the way gcc
+                // ignores it. Standard output takes the empty artifact without leaving a file.
+                Output::Stdout
+            } else if let Some(o) = named {
+                // `-o -` is standard output rather than a file of that name, which is what gcc
+                // does for everything it compiles, the object file included. Its link step is
+                // the exception and writes a file called `-`, because the name goes to the
+                // linker and the linker takes it literally.
+                if o == "-" { Output::Stdout } else { Output::File(o.to_owned()) }
+            } else if final_phase == Phase::Preprocess {
+                // `-E` writes to standard output unless it was given a name, which is the one
+                // place where the default is not a file.
+                Output::Stdout
+            } else {
+                Output::File(format!("{}.{}", stem(&input.path), suffix_for(final_phase, opts)))
+            };
+            // An input whose output has the name it has itself would be read and then written
+            // over, and what it held would be gone. GCC compares the two names the way they
+            // were written and so does this, which catches `rucc --emit=ir a.ir` and leaves
+            // the same file reached by two different paths to the file system. `/dev/null` is
+            // left out, as gcc leaves out its bit bucket: nothing is lost by writing to it, and
+            // kbuild's cc-option asks whether a flag is taken by compiling `-xc /dev/null` with
+            // `-o /dev/null`, so refusing it refused every flag busybox probed for.
+            if let Output::File(path) = &out {
+                if *path == input.path && path != "/dev/null" {
+                    return Err(plan_err(format!(
+                        "input file `{}` is the same as the output file",
+                        input.path
+                    )));
+                }
+            }
+
+            if linking {
+                if let Some(p) = out.as_link_input() {
+                    link_inputs.push(Item::File(p.to_owned()));
+                }
+            }
+            if archiving {
+                // The name inside the archive rather than the path the object is written to, which
+                // under `-save-temps` is a path with a directory on it and otherwise is a
+                // temporary. What `ar t` shows is a file name, so that is what goes in.
+                members.push(format!(
+                    "{}.{}",
+                    stem(&input.path),
+                    suffix_for(Phase::Assemble, opts)
+                ));
+            }
+            // Only for a job that compiles C, since the numbers are the frames the back end laid
+            // out. An input of assembly has no compile phase and an input of IR is only ever
+            // printed back, so neither has a frame to report, and gcc writes nothing under `-E`.
+            // `-fsyntax-only` gets a file with nothing in it, which is what gcc gives it, named
+            // the way a link's would be since nothing on the command line said to stop at an
+            // object.
+            let syntax = opts.emit == EmitKind::SyntaxOnly;
+            let backed = syntax
+                || matches!(
+                    opts.emit,
+                    EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable
+                );
+            let stack_usage = (opts.stack_usage
+                && backed
+                && kind != InputKind::Ir
+                && phases.contains(&Phase::Compile))
+            .then(|| {
+                let named = output.filter(|o| *o != "-");
+                format!("{}.su", aux_base(opts, &input.path, named, collecting || syntax, alone))
+            });
+            // With `-ftest-coverage` alone as well, since the note carries the stamp the record would
+            // and the two are made from this name.
+            let counted = opts.profile_data.arcs || opts.profile_data.notes;
+            let counts = (counted
+                && backed
+                && !syntax
+                && kind != InputKind::Ir
+                && phases.contains(&Phase::Compile))
+            .then(|| {
+                let named = output.filter(|o| *o != "-");
+                format!("{}.gcda", aux_base(opts, &input.path, named, collecting, alone))
+            });
+            let note = counts
+                .as_ref()
+                .filter(|_| opts.profile_data.notes)
+                .map(|counts| format!("{}.gcno", counts.strip_suffix(".gcda").unwrap_or(counts)));
+            jobs.push(Job {
+                input: input.path.clone(),
+                kind,
+                phases,
+                output: out,
+                aux_base: aux,
+                stack_usage,
+                counts,
+                note,
+            });
+        }
+
+        let link = linking.then(|| LinkJob {
+            inputs: link_inputs,
+            output: output.map_or_else(|| default_exe(opts).to_owned(), |o| exe_name(opts, o)),
+        });
+        let archive = archiving.then(|| ArchiveJob {
+            members,
+            // Checked at the top, so there is an `-o` here. Saying so is cheaper than an unwrap
+            // that would have to be explained.
+            output: output.unwrap_or_default().to_owned(),
+        });
+
+        Ok(Plan { jobs, link, archive, notes, output: output.map(str::to_owned) })
+    }
+
+    /// Renders the plan the way `-###` prints it.
+    ///
+    /// One line per job, then the link line. This is meant to be read next to `gcc -###`
+    /// output when a build behaves differently under the two compilers, so it says what will
+    /// happen rather than how it is represented.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for note in &self.notes {
+            let _ = writeln!(out, "note: {note}");
+        }
+        for job in &self.jobs {
+            // A linker input has no phases of its own. It shows up in the link line below, or
+            // in a note above when there is no link line, and repeating it here would suggest
+            // something happens to it.
+            if job.phases.is_empty() {
+                continue;
+            }
+            let names: Vec<&str> = job.phases.iter().map(|p| p.as_str()).collect();
+            let _ = writeln!(out, "{}: {} -> {}", job.input, names.join(", "), job.output.render());
+            // The files `-save-temps` keeps, which are as much a part of what will happen as the
+            // output is and are the only reason the flag was passed.
+            let kept: Vec<String> =
+                [job.saved_text(), job.saved_asm()].into_iter().flatten().collect();
+            if !kept.is_empty() {
+                let _ = writeln!(out, "{}: keeping {}", job.input, kept.join(", "));
+            }
+        }
+        if let Some(link) = &self.link {
+            let names: Vec<String> = link.inputs.iter().map(ToString::to_string).collect();
+            let _ = writeln!(out, "link: {} -> {}", names.join(" "), link.output);
+        }
+        if let Some(archive) = &self.archive {
+            let _ = writeln!(out, "archive: {} -> {}", archive.members.join(" "), archive.output);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_session::Options;
+
+    use super::*;
+
+    fn opts(triple: &str) -> Options {
+        Options::new(triple.parse().expect("test triple"))
+    }
+
+    fn linux() -> Options {
+        opts("x86_64-unknown-linux-gnu")
+    }
+
+    fn plan(o: &Options, paths: &[&str], output: Option<&str>) -> Plan {
+        let inputs: Vec<Input> = paths.iter().map(|p| Input::new(*p)).collect();
+        Plan::new(o, &inputs, output).expect("expected a plan")
+    }
+
+    #[test]
+    fn extensions_map_to_the_table_in_the_spec() {
+        assert_eq!(InputKind::from_path("a.c").unwrap(), InputKind::C);
+        assert_eq!(InputKind::from_path("a.i").unwrap(), InputKind::PreprocessedC);
+        assert_eq!(InputKind::from_path("a.ir").unwrap(), InputKind::Ir);
+        assert_eq!(InputKind::from_path("a.h").unwrap(), InputKind::CHeader);
+        assert_eq!(InputKind::from_path("a.s").unwrap(), InputKind::Assembler);
+        assert_eq!(InputKind::from_path("a.S").unwrap(), InputKind::AssemblerWithCpp);
+        assert_eq!(InputKind::from_path("a.sx").unwrap(), InputKind::AssemblerWithCpp);
+        assert_eq!(InputKind::from_path("a.o").unwrap(), InputKind::LinkerInput);
+        assert_eq!(InputKind::from_path("libm.a").unwrap(), InputKind::LinkerInput);
+        assert_eq!(InputKind::from_path("libm.so.6").unwrap(), InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn standard_input_is_c_under_dash_e_and_wants_telling_otherwise() {
+        // `$(CPP) $(CFLAGS) -` is how a generated header gets preprocessed in a Makefile, and
+        // there is no extension on `-` to read a language out of. Under `-E` gcc takes it as C
+        // and otherwise it refuses, which is the difference between a build that works and one
+        // that sits waiting for a program to be typed at a terminal.
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        let plan = plan(&o, &["-"], None);
+        assert_eq!(plan.jobs.len(), 1);
+        assert_eq!(plan.jobs[0].kind, InputKind::C);
+        assert_eq!(plan.jobs[0].phases, [Phase::Preprocess]);
+        assert_eq!(plan.jobs[0].output, Output::Stdout);
+
+        let o = linux();
+        let error = Plan::new(&o, &[Input::new("-")], None).expect_err("expected this refused");
+        assert_eq!(error.message, "-E or -x required when input is from standard input");
+
+        // `-x` is the other way of saying it, and then the whole pipeline runs and the object
+        // is named after the dash, which is the name gcc derives too.
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let inputs = [Input { path: "-".to_owned(), forced: Some(InputKind::C), role: Role::File }];
+        let plan = Plan::new(&o, &inputs, None).expect("expected a plan");
+        assert_eq!(plan.jobs[0].kind, InputKind::C);
+        assert_eq!(plan.jobs[0].output, Output::File("-.o".to_owned()));
+    }
+
+    #[test]
+    fn standard_input_is_named_the_way_gcc_names_it_and_a_file_is_named_after_itself() {
+        assert_eq!(source_name("-"), "<stdin>");
+        assert_eq!(source_name("a.c"), "a.c");
+        assert_eq!(source_name("sub/-"), "sub/-");
+    }
+
+    #[test]
+    fn ir_enters_where_preprocessed_c_does_and_needs_no_preprocessor() {
+        // It is the compiler's own output coming back in, so the phases in front of the walk
+        // have already happened to it and the ones after it are the ones still to run.
+        assert_eq!(InputKind::from_x_arg("ir").unwrap(), InputKind::Ir);
+        assert_eq!(InputKind::Ir.as_str(), "ir");
+        assert_eq!(InputKind::Ir.full_sequence(), InputKind::PreprocessedC.full_sequence());
+        assert!(!InputKind::Ir.full_sequence().contains(&Phase::Preprocess));
+    }
+
+    #[test]
+    fn an_input_whose_output_has_its_own_name_is_refused_rather_than_written_over() {
+        // `rucc --emit=ir a.ir` would read the file and then write the result over it, and
+        // what it held would be gone.
+        let mut o = linux();
+        o.emit = EmitKind::Ir;
+        let inputs = [Input::new("a.ir")];
+        let error = Plan::new(&o, &inputs, None).expect_err("expected this to be refused");
+        assert!(error.message.contains("is the same as the output file"), "{error}");
+        // Naming it something else is fine, and so is the same name reached through `-o`
+        // being refused for the same reason.
+        assert!(Plan::new(&o, &inputs, Some("b.ir")).is_ok());
+        assert!(Plan::new(&o, &inputs, Some("a.ir")).is_err());
+        // The bit bucket is not a file anything is kept in, which is how kbuild asks whether a
+        // flag is taken.
+        let null = Input { forced: Some(InputKind::C), ..Input::new("/dev/null") };
+        assert!(Plan::new(&linux(), &[null], Some("/dev/null")).is_ok());
+    }
+
+    #[test]
+    fn capital_s_and_small_s_are_different_languages() {
+        // On a case-insensitive file system it is tempting to fold these together. They are
+        // not the same: one runs the preprocessor and one does not.
+        let hi = InputKind::from_path("a.S").unwrap();
+        let lo = InputKind::from_path("a.s").unwrap();
+        assert_ne!(hi, lo);
+        assert!(hi.full_sequence().contains(&Phase::Preprocess));
+        assert!(!lo.full_sequence().contains(&Phase::Preprocess));
+    }
+
+    #[test]
+    fn a_cplusplus_source_says_why_rather_than_failing_at_link_time() {
+        let e = InputKind::from_path("a.cpp").unwrap_err();
+        assert!(format!("{e}").contains("only ever going to compile C"), "{e}");
+        let e = InputKind::from_x_arg("c++").unwrap_err();
+        assert!(matches!(e, XError::Unsupported(_)), "{e:?}");
+    }
+
+    #[test]
+    fn a_file_with_no_extension_goes_to_the_linker() {
+        assert_eq!(InputKind::from_path("crt1").unwrap(), InputKind::LinkerInput);
+        assert_eq!(InputKind::from_path(".bashrc").unwrap(), InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn the_default_line_compiles_and_links_to_a_out() {
+        let p = plan(&linux(), &["a.c"], None);
+        assert_eq!(
+            p.jobs[0].phases,
+            vec![Phase::Preprocess, Phase::Compile, Phase::Assemble, Phase::Link]
+        );
+        assert_eq!(p.jobs[0].output, Output::Temporary("a.o".into()));
+        let link = p.link.expect("expected a link step");
+        assert_eq!(link.inputs, vec![Item::File("a.o".into())]);
+        assert_eq!(link.output, "a.out");
+    }
+
+    #[test]
+    fn dash_c_stops_at_the_object_and_names_it_after_the_source() {
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let p = plan(&o, &["src/a.c", "src/b.c"], None);
+        assert!(p.link.is_none());
+        assert_eq!(p.jobs[0].output, Output::File("a.o".into()));
+        assert_eq!(p.jobs[1].output, Output::File("b.o".into()));
+        // Next to the source is what people expect and it is not what GCC does. The object
+        // lands in the current directory.
+        assert_eq!(p.jobs[0].phases.last(), Some(&Phase::Assemble));
+    }
+
+    #[test]
+    fn dash_e_writes_to_stdout_unless_it_is_given_a_name() {
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        assert_eq!(plan(&o, &["a.c"], None).jobs[0].output, Output::Stdout);
+        assert_eq!(plan(&o, &["a.c"], Some("a.i")).jobs[0].output, Output::File("a.i".into()));
+    }
+
+    #[test]
+    fn a_name_of_one_dash_is_standard_output_and_not_a_file_called_that() {
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        assert_eq!(plan(&o, &["a.c"], Some("-")).jobs[0].output, Output::Stdout);
+        o.emit = EmitKind::Object;
+        assert_eq!(plan(&o, &["a.c"], Some("-")).jobs[0].output, Output::Stdout);
+        // The linker is handed the name and makes a file of it, which is gcc's behaviour and
+        // is the one place the dash is not standard output.
+        let p = plan(&linux(), &["a.c"], Some("-"));
+        assert_eq!(p.link.expect("a link step").output, "-");
+    }
+
+    #[test]
+    fn dash_s_produces_assembly_named_after_the_source() {
+        let mut o = linux();
+        o.emit = EmitKind::Asm;
+        let p = plan(&o, &["dir/a.c"], None);
+        assert_eq!(p.jobs[0].output, Output::File("a.s".into()));
+        assert_eq!(p.jobs[0].phases, vec![Phase::Preprocess, Phase::Compile]);
+    }
+
+    #[test]
+    fn an_already_preprocessed_file_skips_the_preprocessor() {
+        let p = plan(&linux(), &["a.i"], None);
+        assert_eq!(p.jobs[0].phases, vec![Phase::Compile, Phase::Assemble, Phase::Link]);
+    }
+
+    #[test]
+    fn assembly_with_a_capital_s_is_preprocessed_but_not_compiled() {
+        let p = plan(&linux(), &["a.S"], None);
+        assert_eq!(p.jobs[0].phases, vec![Phase::Preprocess, Phase::Assemble, Phase::Link]);
+        assert!(!p.jobs[0].phases.contains(&Phase::Compile));
+    }
+
+    #[test]
+    fn objects_on_the_line_reach_the_linker_in_the_order_they_were_written() {
+        // Link order is semantic. A plan that reorders it is a plan that produces a different
+        // program, and the failure would be a missing symbol nobody could explain.
+        let p = plan(&linux(), &["a.o", "b.c", "libm.a"], None);
+        let link = p.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![Item::File("a.o".into()), Item::File("b.o".into()), Item::File("libm.a".into()),]
+        );
+    }
+
+    #[test]
+    fn an_object_on_a_dash_c_line_is_a_note_rather_than_an_error() {
+        // Configure scripts do this. Erroring here fails builds that work under GCC.
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let p = plan(&o, &["a.c", "b.o"], None);
+        assert!(p.jobs[1].phases.is_empty());
+        assert_eq!(p.notes.len(), 1);
+        assert!(p.notes[0].contains("linker input unused"), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn dash_o_with_several_compilations_is_rejected() {
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let inputs = [Input::new("a.c"), Input::new("b.c")];
+        let e = Plan::new(&o, &inputs, Some("out.o")).unwrap_err();
+        assert!(e.message.contains("multiple inputs"), "{}", e.message);
+    }
+
+    #[test]
+    fn dash_o_with_one_compilation_and_some_objects_is_fine() {
+        // `rucc -c -o out.o a.c b.o` has exactly one thing to write, so the check above must
+        // not count the object.
+        let mut o = linux();
+        o.emit = EmitKind::Object;
+        let inputs = [Input::new("a.c"), Input::new("b.o")];
+        let p = Plan::new(&o, &inputs, Some("out.o")).expect("expected a plan");
+        assert_eq!(p.jobs[0].output, Output::File("out.o".into()));
+    }
+
+    #[test]
+    fn dash_x_overrides_the_extension() {
+        let inputs = [Input { path: "a.txt".into(), forced: Some(InputKind::C), role: Role::File }];
+        let p = Plan::new(&linux(), &inputs, None).expect("expected a plan");
+        assert_eq!(p.jobs[0].kind, InputKind::C);
+        assert_eq!(p.jobs[0].phases.first(), Some(&Phase::Preprocess));
+    }
+
+    #[test]
+    fn windows_gets_obj_and_a_exe() {
+        let o = opts("x86_64-pc-windows-msvc");
+        let p = plan(&o, &["a.c"], None);
+        assert_eq!(p.jobs[0].output, Output::Temporary("a.obj".into()));
+        assert_eq!(p.link.expect("expected a link step").output, "a.exe");
+    }
+
+    #[test]
+    fn a_mingw_link_puts_exe_on_a_name_with_no_extension() {
+        // What x86_64-w64-mingw32-gcc does with each of these, measured, and clang does the same.
+        // tamnd/rucc#2152.
+        let exe = |triple: &str, output: &str| {
+            plan(&opts(triple), &["a.c"], Some(output)).link.expect("expected a link step").output
+        };
+        let mingw = "x86_64-windows-gnu";
+        assert_eq!(exe(mingw, "foo"), "foo.exe");
+        assert_eq!(exe(mingw, "sub.d/foo"), "sub.d/foo.exe", "only the last component counts");
+        assert_eq!(exe(mingw, r"sub.d\foo"), r"sub.d\foo.exe");
+        assert_eq!(exe(mingw, "foo.exe"), "foo.exe");
+        assert_eq!(exe(mingw, "a.b"), "a.b");
+        assert_eq!(exe(mingw, "foo."), "foo.", "any dot at all is an extension to gcc");
+        assert_eq!(exe(mingw, "-"), "-");
+        assert_eq!(exe(mingw, "/dev/null"), "/dev/null");
+        // Neither MSVC's linker nor anything but Windows does this.
+        assert_eq!(exe("x86_64-pc-windows-msvc", "foo"), "foo");
+        assert_eq!(exe("x86_64-unknown-linux-gnu", "foo"), "foo");
+        // Nothing is linked, so the name is the object's or the assembly's as written.
+        for emit in [EmitKind::Object, EmitKind::Asm] {
+            let mut o = opts(mingw);
+            o.emit = emit;
+            assert_eq!(plan(&o, &["a.c"], Some("foo")).jobs[0].output, Output::File("foo".into()));
+        }
+    }
+
+    /// The archive is the link's shape rather than `-c`'s: one file out of however many inputs.
+    #[test]
+    fn an_archive_is_one_file_however_many_inputs_there_are() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let p = plan(&o, &["a.c", "sub/b.c"], Some("out/libx.a"));
+        assert_eq!(p.jobs.len(), 2);
+        for job in &p.jobs {
+            // Each input stops at its object, which is where `-c` stops, and the object is a file
+            // nobody asked for and nobody sees: what was asked for is the archive.
+            assert_eq!(job.phases.last(), Some(&Phase::Assemble), "{}", job.input);
+            assert!(matches!(job.output, Output::Temporary(_)), "{:?}", job.output);
+        }
+        let archive = p.archive.expect("an archive step");
+        assert_eq!(archive.members, ["a.o", "b.o"]);
+        assert_eq!(archive.output, "out/libx.a");
+        assert!(p.link.is_none(), "one command line produces one of the two and not both");
+    }
+
+    #[test]
+    fn a_member_is_called_what_an_object_is_called_on_this_target() {
+        let mut o = opts("x86_64-pc-windows-msvc");
+        o.emit = EmitKind::Archive;
+        let p = plan(&o, &["a.c"], Some("x.lib"));
+        assert_eq!(p.archive.expect("an archive step").members, ["a.obj"]);
+    }
+
+    /// `a.out` is a convention old enough that a build which gets one knows what happened. A
+    /// `libsomething.a` invented here would be a file the build then fails to find.
+    #[test]
+    fn an_archive_has_no_default_name() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let inputs = [Input::new("a.c")];
+        let error = Plan::new(&o, &inputs, None).expect_err("no name for the archive");
+        assert!(error.message.contains("needs `-o`"), "{error}");
+    }
+
+    /// An `ar` would take these. This cannot, and says so rather than writing an archive with
+    /// half of what was asked for in it.
+    #[test]
+    fn something_this_compilation_did_not_produce_cannot_go_into_an_archive() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        for handed in [Input::new("b.o"), Input::library("m")] {
+            let inputs = [Input::new("a.c"), handed];
+            let error = Plan::new(&o, &inputs, Some("libx.a")).expect_err("not ours to index");
+            assert!(error.message.contains("names each member"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_plan_says_what_goes_into_the_archive() {
+        let mut o = linux();
+        o.emit = EmitKind::Archive;
+        let text = plan(&o, &["a.c", "b.c"], Some("libx.a")).render();
+        assert!(text.contains("archive: a.o b.o -> libx.a"), "{text}");
+        assert!(!text.contains("link:"), "{text}");
+    }
+
+    #[test]
+    fn the_intermediate_dumps_stop_where_dash_s_stops() {
+        for emit in [
+            EmitKind::Tast,
+            EmitKind::Ir,
+            EmitKind::MirFinal,
+            EmitKind::WasmTree,
+            EmitKind::SafetySummary,
+            EmitKind::TypeGranules,
+            EmitKind::Acid,
+            EmitKind::AcidMain,
+        ] {
+            assert_eq!(last_phase(emit), Phase::Compile, "{emit:?}");
+        }
+    }
+
+    #[test]
+    fn each_intermediate_dump_is_a_language_of_its_own_and_gets_a_suffix_of_its_own() {
+        // They all come out of the compile phase and none of them is assembly, so writing any
+        // of them to `a.s` would leave a file that neither an assembler nor a reader can use.
+        for (emit, name) in [
+            (EmitKind::Asm, "a.s"),
+            (EmitKind::Tast, "a.tast"),
+            (EmitKind::Ir, "a.ir"),
+            (EmitKind::MirFinal, "a.mir"),
+            (EmitKind::WasmTree, "a.wasm-tree"),
+            (EmitKind::SafetySummary, "a.safety.json"),
+            (EmitKind::TypeGranules, "a.granules.txt"),
+            (EmitKind::Acid, "a.acid"),
+            (EmitKind::AcidMain, "a.acid"),
+        ] {
+            let mut o = linux();
+            o.emit = emit;
+            assert_eq!(plan(&o, &["a.c"], None).jobs[0].output, Output::File(name.into()));
+        }
+    }
+
+    #[test]
+    fn syntax_only_writes_no_file_even_when_given_a_name() {
+        let mut o = linux();
+        o.emit = EmitKind::SyntaxOnly;
+        assert_eq!(last_phase(o.emit), Phase::Compile);
+        let p = plan(&o, &["a.c", "b.c"], None);
+        assert!(p.jobs.iter().all(|job| job.output == Output::Stdout), "{:?}", p.jobs);
+        assert_eq!(plan(&o, &["a.c"], Some("a.o")).jobs[0].output, Output::Stdout);
+        assert!(!plan(&o, &["a.c"], None).render().contains("link:"));
+    }
+
+    #[test]
+    fn an_input_that_enters_after_the_last_phase_is_a_note_rather_than_an_error() {
+        // `rucc -E a.s` has nothing to preprocess. GCC carries on, and a configure script
+        // that probes with a mixed input list depends on that.
+        let mut o = linux();
+        o.emit = EmitKind::Preprocessed;
+        let p = plan(&o, &["a.c", "b.s"], None);
+        assert!(p.jobs[1].phases.is_empty());
+        assert_eq!(p.notes.len(), 1);
+        assert!(p.notes[0].contains("after the last phase"), "{:?}", p.notes);
+        // And it must not count against `-o`, because only one file is being written.
+        let inputs = [Input::new("a.c"), Input::new("b.s")];
+        assert!(Plan::new(&o, &inputs, Some("out.i")).is_ok());
+    }
+
+    #[test]
+    fn no_inputs_is_an_error() {
+        assert!(Plan::new(&linux(), &[], None).is_err());
+    }
+
+    /// The plan for `paths` under `-save-temps` in the spelling `kind`.
+    fn keeping(kind: SaveTemps, emit: EmitKind, paths: &[&str], output: Option<&str>) -> Plan {
+        let mut o = linux();
+        o.emit = emit;
+        o.save_temps = kind;
+        plan(&o, paths, output)
+    }
+
+    /// What one job of that plan keeps, in the order the files are produced.
+    fn kept(plan: &Plan, at: usize) -> Vec<String> {
+        [plan.jobs[at].saved_text(), plan.jobs[at].saved_asm()].into_iter().flatten().collect()
+    }
+
+    #[test]
+    fn the_files_that_are_kept_land_beside_the_output_and_not_where_the_manual_says() {
+        // gcc 16's bare `-save-temps` is `-save-temps=obj`, whatever its manual says, so
+        // `-o out/t.o` puts them in `out` and not in the working directory. Both spellings are
+        // here because the whole of the difference between them is the directory.
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.c"], Some("out/t.o"));
+        assert_eq!(kept(&p, 0), vec!["out/t.i", "out/t.s"]);
+        let p = keeping(SaveTemps::Cwd, EmitKind::Object, &["t.c"], Some("out/t.o"));
+        assert_eq!(kept(&p, 0), vec!["t.i", "t.s"]);
+    }
+
+    #[test]
+    fn the_name_comes_off_the_output_rather_than_off_the_input_that_produced_it() {
+        // `-o out/x.o` keeps `x.i` and not `t.i`, and an output with no extension on it keeps
+        // the whole of the name it was given.
+        let p = keeping(SaveTemps::Cwd, EmitKind::Object, &["t.c"], Some("out/x.o"));
+        assert_eq!(kept(&p, 0), vec!["x.i", "x.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.c"], Some("out/noext"));
+        assert_eq!(kept(&p, 0), vec!["out/noext.i", "out/noext.s"]);
+    }
+
+    #[test]
+    fn without_a_name_they_are_called_after_the_input_and_are_where_the_object_would_be() {
+        // The object of `sub/u.c` is `u.o` in the working directory, so what is kept beside it
+        // is in the working directory as well, under both spellings.
+        for kind in [SaveTemps::Object, SaveTemps::Cwd] {
+            let p = keeping(kind, EmitKind::Object, &["sub/u.c"], None);
+            assert_eq!(kept(&p, 0), vec!["u.i", "u.s"], "{kind:?}");
+            assert_eq!(p.jobs[0].output, Output::File("u.o".into()), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_line_that_links_names_them_after_the_executable_and_the_input() {
+        // One output for however many inputs, so the input's own name goes on the end and two
+        // files that would otherwise both be `prog.i` are two files.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c", "sub/u.c"], Some("o/p"));
+        assert_eq!(kept(&p, 0), vec!["o/p-t.i", "o/p-t.s"]);
+        assert_eq!(kept(&p, 1), vec!["o/p-u.i", "o/p-u.s"]);
+        // With no `-o` the executable is `a.out`, and the `a` of it is what the files are named
+        // from, which is where `a-t.i` comes from on a command line nobody wrote an `a` on. With
+        // one input there is nothing to tell apart and gcc uses the input's name alone.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c", "u.c"], None);
+        assert_eq!(kept(&p, 0), vec!["a-t.i", "a-t.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], None);
+        assert_eq!(kept(&p, 0), vec!["t.i", "t.s"]);
+        // The executable's name is not an object's, so it keeps its extension, all but `.exe`.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("o/p.so"));
+        assert_eq!(kept(&p, 0), vec!["o/p.so-t.i", "o/p.so-t.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("o/p.exe"));
+        assert_eq!(kept(&p, 0), vec!["o/p-t.i", "o/p-t.s"]);
+    }
+
+    #[test]
+    fn the_object_a_link_reads_is_kept_rather_than_written_where_it_will_be_removed() {
+        // Without the flag it goes in a directory that is gone by the end of the run, and that
+        // is the one thing `-save-temps` cannot leave true: the object is one of the files it
+        // was asked to keep.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("out/prog"));
+        assert_eq!(p.jobs[0].output, Output::File("out/prog-t.o".into()));
+        let plain = plan(&linux(), &["t.c"], Some("out/prog"));
+        assert_eq!(plain.jobs[0].output, Output::Temporary("t.o".into()));
+    }
+
+    #[test]
+    fn a_step_whose_result_is_already_being_written_is_not_kept_a_second_time() {
+        // `-E` writes the preprocessed text, so there is nothing left over to keep, and `-S`
+        // writes the assembly and keeps only the text that came before it.
+        let p = keeping(SaveTemps::Object, EmitKind::Preprocessed, &["t.c"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+        assert_eq!(kept(&p, 0), Vec::<String>::new());
+        let p = keeping(SaveTemps::Object, EmitKind::Asm, &["t.c"], None);
+        assert_eq!(kept(&p, 0), vec!["t.i"]);
+    }
+
+    #[test]
+    fn an_input_that_arrives_preprocessed_has_no_text_of_its_own_to_keep() {
+        // There is no phase 4 to keep the result of, and the file the compilation read is the
+        // one that would have been written, which is already on the disk under its own name.
+        let p = keeping(SaveTemps::Object, EmitKind::Object, &["t.i"], None);
+        assert_eq!(kept(&p, 0), vec!["t.s"]);
+        // And an input the linker takes directly goes through no step at all.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.o"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+    }
+
+    #[test]
+    fn nothing_is_kept_when_the_flag_was_not_given() {
+        let p = plan(&linux(), &["t.c"], None);
+        assert_eq!(p.jobs[0].aux_base, None);
+        assert_eq!(kept(&p, 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_rendering_says_what_will_happen() {
+        let p = plan(&linux(), &["a.c", "b.o"], None);
+        let text = p.render();
+        assert!(
+            text.contains("a.c: preprocess, compile, assemble, link -> a.o (temporary)"),
+            "{text}"
+        );
+        assert!(text.contains("link: a.o b.o -> a.out"), "{text}");
+        // The object has nothing done to it, so it appears once, in the link line.
+        assert_eq!(text.matches("b.o").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn the_rendering_names_the_files_that_will_be_kept() {
+        // `-###` is what will happen, and under `-save-temps` two more files being written is
+        // part of that. It is also the only way to see the names without running a compilation.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["a.c", "b.c"], None);
+        let text = p.render();
+        assert!(text.contains("a.c: keeping a-a.i, a-a.s"), "{text}");
+        assert!(!plan(&linux(), &["a.c"], None).render().contains("keeping"));
+    }
+}

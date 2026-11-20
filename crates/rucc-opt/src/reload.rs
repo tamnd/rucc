@@ -1,0 +1,1723 @@
+//! A load walks back over memory to the store it sees, and takes the value that store wrote.
+//!
+//! Design: `spec/optimizer/16-gvn-and-pre.md` section 16.2. That section asks for two redundant
+//! load eliminators and this is the second of them. The first is [`crate::load`], which keeps one
+//! table per block, compares addresses by identity, and throws everything away at the end of the
+//! block, because what reaches a block from its predecessors is a question it does not ask. This is
+//! the one that asks it.
+//!
+//! # What the difference buys
+//!
+//! A store in a block that dominates the load rather than in the same block, which is every field
+//! read after a loop that wrote it. A load reached through a join where every path agrees about
+//! which store it sees. A load inside a loop whose body writes nothing that could reach it, where
+//! the store is above the loop and the walk cuts the back edge and says so.
+//!
+//! None of those is something the restricted version could be extended to do. They are the walk.
+//!
+//! # The walk
+//!
+//! [`crate::memssa`] is where it lives, and it was written, tested and documented long before
+//! anything called it. What stopped anything calling it was tamnd/rucc#1467: the walk needs an alias
+//! oracle at every step and an oracle wanted the module, and a pass is handed one function. It does
+//! not want the module any more.
+//!
+//! [`Walk::clobber`] answers with five variants rather than two, and the shape of that is what this
+//! pass rests on. [`Clobber::Exact`] is a write that covered exactly the bytes the load reads, and
+//! it is the only one worth acting on. [`Clobber::Partial`] covered some of them, which is a shift
+//! and a truncate away from being the value and is document 16's decision rather than this one's.
+//! [`Clobber::Maybe`] is a write the oracle could not rule out and could not pin down.
+//! [`Clobber::Unknown`] is a walk that ran out of budget or a join whose paths disagreed, and it is
+//! not a no, which is why it has a name rather than being the absence of an answer.
+//!
+//! # Why the store it names dominates the load
+//!
+//! Because the walk only ever gives one instruction back. A join combines the answers from every
+//! path into it and a disagreement is [`Clobber::Unknown`], so an `Exact` naming a store is a store
+//! on every path from the entry to the load, and an instruction on every path to another one
+//! dominates it. That is the whole argument, and it is why this pass does not compute dominance and
+//! does not need to: the value the store wrote dominates the store, the store dominates the load,
+//! and a use put where the load was is a use inside the value's dominance region.
+//!
+//! # The width, which is where the miscompilation would be
+//!
+//! Section 16.6 names a load forwarded from a store of a different size as the most likely wrong
+//! answer in that document, and `Exact` is about bytes rather than about types. Two runs that are
+//! the same bytes can still be two different readings of them, a four byte integer and a four byte
+//! float being the obvious pair, so the types have to be equal as well and a load whose type is not
+//! the stored value's stays and is counted.
+//!
+//! # The same address read twice
+//!
+//! A load is not a def of memory, so the walk goes straight past an earlier load of the same
+//! address and arrives at whatever wrote it last, which is often nothing it can name. That leaves
+//! the easiest redundant load of all in place: two loads of the same address at the same version of
+//! memory read the same bytes, and the version of memory is exactly the statement that nothing
+//! wrote them in between.
+//!
+//! So there is a table alongside the walk, keyed by the version of memory, the address and the
+//! type, holding what the first load of that key is known to be equal to, and a later load whose
+//! key is in it takes that value. It is value numbering over memory rather than a walk, which is
+//! why it is a table here and not another [`Clobber`] variant in [`crate::memssa`].
+//!
+//! Two things make it right. Memory is threaded through every instruction that touches it, so two
+//! loads carrying the same version have no write between them on any path from the one to the
+//! other. That is a statement about paths through the earlier load, so the earlier load has to be
+//! on every path to the later one, and that is dominance and is the one thing this pass computes
+//! that the walk did not need. On a safety build the two are usually separated by a check, and a
+//! check reads the planes and writes nothing, so the version survives it.
+//!
+//! What goes in the table is the value the load is equal to rather than the load's own result. A
+//! load that was itself forwarded is about to be removed, [`substitute`] does not chase a rewrite
+//! through another rewrite, and a later load of the same key can still reach the table when its own
+//! walk was the one that ran out of budget.
+//!
+//! # A load followed through a copy
+//!
+//! A struct assignment lowers to a copy, so a field read after one is a load whose walk stops at a
+//! `memcpy` with the value it wants sitting in the copy's source. Section 9.2's answer to that is
+//! `translate`: the walk hands the reference and the def in the way to the caller, and a caller
+//! that can see past the def rewrites the reference and the walk carries on with the new one.
+//! [`Walk::clobber_with`] has taken the callback since it was written and this is what fills it in,
+//! by asking about the same distance into the copy's source instead. `through` says what has to be
+//! known for that to be the same bytes rather than a guess.
+//!
+//! # A copy of a fill
+//!
+//! A compound literal of zeros assigned to a structure lowers to a fill of a temporary and a copy
+//! of the temporary into the structure, and so does any initializer the front end builds in a
+//! temporary first. The copy's walk asks about the source the way a load's does, and when it stops
+//! at a `memset` that covered the whole of what the copy reads, what the copy puts in the
+//! destination is that byte at every place. So the copy becomes a fill of the destination with
+//! the same byte, and the temporary is left with a fill nothing reads, which is dead store
+//! elimination's to remove. gcc writes four stores for `*d = (block){ { 0 } }` of a 64 byte block,
+//! and before this rucc filled a temporary and copied it, sixteen moves where four would do
+//! (tamnd/rucc#3586).
+//!
+//! The byte is the fill's own operand, and it is defined above the fill, which is above the copy
+//! on every path for the reason a store the walk names is above the load.
+//!
+//! # What is not here
+//!
+//! Phi translation, which is asking about a load whose address is a block parameter in the terms of
+//! the predecessor the walk is going into. It was built and measured, and over four libraries at
+//! `-O2` with and without `-fsafety=detect` it forwarded not one load that was not already being
+//! forwarded and emitted the same bytes. Section 9.2 of `spec/optimizer/09-memory-ssa.md` has the
+//! numbers and the reason, so the numbers are what this repository keeps rather than the code.
+//!
+//! # The chain goes on and comes off again
+//!
+//! [`memssa::build`] before and [`memssa::strip`] after, per function. The back end has never seen
+//! memory SSA and is not going to, and nothing in the pipeline keeps the chain across passes,
+//! because that would mean every edit to the control flow graph anywhere in the optimizer had to
+//! keep the memory parameters in step with the blocks. Two linear walks per function is the price
+//! of not making that claim.
+//!
+//! It has one consequence worth naming. An instruction cannot grow or lose a result, so putting the
+//! chain on and taking it off again replaces every instruction that touches memory with an
+//! equivalent one, even in a function where not a single load was forwarded. The shape of the
+//! function is untouched, so every control flow answer still stands, and the liveness is about
+//! values and does not, which is why this pass drops it whether or not it changed anything.
+
+use rucc_base::hash::Map;
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Restrict, Type, Value};
+
+use crate::alias::{Access, Alias, Origin, origin};
+use crate::dom::Dominators;
+use crate::loops::Loops;
+use crate::memssa::{Clobber, Step, Walk};
+use crate::uses::substitute;
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, discharge, memssa};
+
+/// What this pass is called, which the pipeline matches on to decide whether to build the module
+/// facts the oracle asks for.
+pub const NAME: &str = "redundant-load";
+
+/// Recorded for a load that took the value of the store the walk said it sees.
+const FORWARDED: &str = "load replaced by the value of the store the walk found";
+
+/// Recorded for a load that took the value an earlier load of the same address already had.
+const REUSED: &str = "load replaced by the value an earlier load of the same address already had";
+
+/// Recorded for a load the walk placed on a write that covered only part of it.
+const PARTIAL: &str = "load kept, what wrote it covers only part of what it reads";
+
+/// Recorded for a load the walk placed on a write it could not pin down.
+const MAYBE: &str = "load kept, something that may have written it could not be pinned down";
+
+/// Recorded for a load whose walk ran out of budget or reached a join whose paths disagreed.
+const UNKNOWN: &str = "load kept, the walk back over memory established nothing";
+
+/// Recorded for a load whose every byte a fill of one constant byte wrote.
+const SPLATTED: &str = "load replaced by the constant a fill wrote at every byte of it";
+
+/// Recorded for a load whose store covered the same bytes at a different type.
+const WIDTH: &str = "load kept, the store that covers it wrote a different type";
+
+/// Recorded for a load the walk placed on a write that is not a store of one value.
+const NOT_A_STORE: &str = "load kept, what covers it writes memory without storing one value";
+
+/// Recorded for a load that would have gone if there had been fuel for it.
+const NO_FUEL: &str = "redundant load kept, the pass ran out of fuel";
+
+/// Recorded for a copy whose whole source was a fill, which became a fill of its destination.
+const REFILLED: &str = "copy of a fill replaced by the same fill of the destination";
+
+/// Recorded for a copy of a fill that would have become a fill if there had been fuel for it.
+const COPY_NO_FUEL: &str = "copy of a fill kept, the pass ran out of fuel";
+
+/// The pass.
+#[derive(Debug)]
+pub struct RedundantLoad;
+
+impl Pass for RedundantLoad {
+    fn name(&self) -> &'static str {
+        NAME
+    }
+
+    fn describe(&self) -> &'static str {
+        "a load takes the value of the store it sees, wherever in the function that store is"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
+    fn preserves(&self) -> Preserved {
+        // The shape of the function, for the reason `crate::load` gives: no block is added, none
+        // is removed, no edge moves, and the instructions that go are loads, which are never
+        // terminators. The memory parameters this puts on the joins come back off before the pass
+        // returns, so no block ends with a parameter it did not start with.
+        Preserved::ALL.without(Analysis::Liveness)
+    }
+
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        if !an.timed(|| memssa::build(func)) {
+            return stats;
+        }
+        // What each removed load's result is read as, applied to the whole function once at the
+        // end, for the reason `crate::load` gives: rewriting each one where it is found would be a
+        // walk over the function per load and there is nothing to gain by it.
+        let mut forward: Map<Value, Value> = Map::default();
+        let mut gone: Vec<Inst> = Vec::new();
+        // Each copy whose source was a fill, with the byte the fill wrote.
+        let mut refills: Vec<(Inst, Value)> = Vec::new();
+        // Each load a fill wrote all of, with what it reads, which becomes a constant above it.
+        let mut splats: Vec<(Inst, Value, i128)> = Vec::new();
+
+        // The walk borrows the function, so it is a scope of its own and every edit happens after
+        // it. Built once, because the alias oracle inside it holds an escape analysis that is one
+        // walk over the function and every step of every walk may ask it.
+        {
+            // The walk holds the function and so does the callback it is handed, so there is a name
+            // for the shared borrow of it rather than two reborrows of the same `&mut` written
+            // where a reader has to work out that they are both reads.
+            let body: &Func = func;
+            let dom = an.dominators(body);
+            let loops = an.loops(body);
+            let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
+            // Each address read at a version of memory, with every block a load of it was in that
+            // no earlier one dominates and the value that load is known to be equal to. Reverse
+            // postorder puts a block after every block that dominates it, which layout order does
+            // not: an inlined body laid out before the test that guards it would otherwise take
+            // the key first and leave every load below the test without the one above it.
+            let mut seen: Seen = Map::default();
+            let order: Vec<Block> = an.cfg(body).reverse_postorder().collect();
+            for block in order {
+                for inst in func.insts(block).collect::<Vec<Inst>>() {
+                    if let Some(byte) = filled(body, &mut walk, inst) {
+                        if fuel.take() {
+                            refills.push((inst, byte));
+                            stats.optimized(REFILLED);
+                        } else {
+                            stats.missed(COPY_NO_FUEL);
+                        }
+                        continue;
+                    }
+                    let Some((result, ty)) = reads(func, walk.alias(), inst) else {
+                        continue;
+                    };
+                    let segment = func[inst].flags.intersection(Flags::SEG_FS.union(Flags::SEG_GS));
+                    let key = walk
+                        .settled(inst)
+                        .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty, segment));
+                    // Whether the walk went on through a copy, after which the write it names is
+                    // about the copy's source and not about the bytes the load reads.
+                    let mut moved = false;
+                    let clobber = walk.clobber_with(inst, &mut |reference, def| {
+                        let next = through(body, reference, def);
+                        moved |= next.is_some();
+                        next.map_or(Step::Stop, Step::Retry)
+                    });
+                    let fill = |wrote| {
+                        if moved { None } else { splat(body, walk.alias(), inst, wrote, ty) }
+                    };
+                    let found = match clobber {
+                        Clobber::Exact(wrote) => match (stored(func, wrote), fill(wrote)) {
+                            (_, Some(bits)) => Found::Fill(bits),
+                            (None, None) => Found::Kept(Some(NOT_A_STORE)),
+                            (Some(value), _) if func[value].ty != ty => Found::Kept(Some(WIDTH)),
+                            (Some(value), _) => Found::Store(value),
+                        },
+                        Clobber::Partial(wrote) => match fill(wrote) {
+                            Some(bits) => Found::Fill(bits),
+                            None => Found::Kept(Some(PARTIAL)),
+                        },
+                        Clobber::Maybe(_) => Found::Kept(Some(MAYBE)),
+                        Clobber::Unknown => Found::Kept(Some(UNKNOWN)),
+                        // Nothing in the function wrote it, so the load reads whatever was there
+                        // when the function started. There is no value here to take and nothing
+                        // was missed either, so it is not counted as one.
+                        Clobber::NoClobber => Found::Kept(None),
+                    };
+                    // The walk had nothing, so ask whether an earlier load of the same address at
+                    // this version of memory had something. The dominance is what the walk did not
+                    // have to compute and this does: two arms of the same branch share a version of
+                    // memory and neither of them runs before the other.
+                    let found = match found {
+                        Found::Kept(reason) => match earlier(&seen, key, (dom, loops), block) {
+                            Some(value) => Found::Earlier(value),
+                            None => Found::Kept(reason),
+                        },
+                        taken => taken,
+                    };
+                    let (value, why) = match found {
+                        Found::Fill(bits) if fuel.take() => {
+                            splats.push((inst, result, bits));
+                            gone.push(inst);
+                            stats.optimized(SPLATTED);
+                            remember(&mut seen, key, (dom, loops), block, result);
+                            continue;
+                        }
+                        Found::Fill(_) => {
+                            stats.missed(NO_FUEL);
+                            remember(&mut seen, key, (dom, loops), block, result);
+                            continue;
+                        }
+                        Found::Store(value) => (value, FORWARDED),
+                        Found::Earlier(value) => (value, REUSED),
+                        Found::Kept(reason) => {
+                            if let Some(reason) = reason {
+                                stats.missed(reason);
+                            }
+                            remember(&mut seen, key, (dom, loops), block, result);
+                            continue;
+                        }
+                    };
+                    if !fuel.take() {
+                        // Out of fuel is a request to stop transforming and not to stop looking, so
+                        // the walk goes on and the count of what could have gone is the same at
+                        // every setting, which is what makes a bisection over it monotonic.
+                        stats.missed(NO_FUEL);
+                        remember(&mut seen, key, (dom, loops), block, result);
+                        continue;
+                    }
+                    forward.insert(result, value);
+                    gone.push(inst);
+                    stats.optimized(why);
+                    remember(&mut seen, key, (dom, loops), block, value);
+                }
+            }
+            let counts = walk.counts();
+            if counts.walks() > 0 {
+                stats.record(crate::stats::Kind::Note, WALKS, count(counts.walks()));
+                stats.record(crate::stats::Kind::Note, STEPS, count(counts.steps()));
+                if counts.exhausted() > 0 {
+                    stats.record(crate::stats::Kind::Note, EXHAUSTED, count(counts.exhausted()));
+                }
+                if counts.rewritten() > 0 {
+                    stats.record(crate::stats::Kind::Note, REWRITTEN, count(counts.rewritten()));
+                }
+            }
+        }
+
+        // Above the load, which is below the fill on every path, and before the load goes.
+        for (inst, result, bits) in splats {
+            let ty = func[result].ty;
+            let at = func.add_imm(Imm::int(bits, ty));
+            let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+            let made = func.create_inst(data, &[ty], func.span(inst));
+            func.insert_before(made, inst);
+            forward.insert(result, func[made].first_result.expect("a constant is one value"));
+        }
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+        // In place, so the copy keeps its place on the chain. A fill and a copy carry the same
+        // operands but the second, and the same results.
+        for (inst, byte) in refills {
+            let mut args = func[func[inst].args].to_vec();
+            args[1] = byte;
+            let args = func.push_values(&args);
+            let data = &mut func[inst];
+            data.opcode = Opcode::Memset;
+            data.args = args;
+        }
+        if !forward.is_empty() {
+            substitute(func, &forward);
+        }
+        memssa::strip(func);
+        // Said here rather than left to `preserves`, because the manager takes a pass that changed
+        // nothing to have preserved everything and this one has not: the chain going on and coming
+        // off gives every instruction that touches memory a new name whatever the pass did with
+        // them.
+        an.settle(func, self.preserves(), false);
+        stats
+    }
+}
+
+/// The bytes a copy took its answer from, for a load the copy covered all of.
+///
+/// Section 9.2's `translate`, and the one case that section says is worth having it for. A copy
+/// moves a run of bytes, so the value at a place inside the destination is the value that was at
+/// the same distance into the source when the copy ran, and asking the walk to carry on from the
+/// copy about that place is asking what the source held then.
+///
+/// Everything has to be known or the answer is nothing, which is what keeps this from being a
+/// guess. Both ends have to be an object the walk could name at a fixed distance into it. The load
+/// has to be inside what the copy wrote rather than across its edge, since a load half covered by a
+/// copy is half the source and half whatever the destination held before. And the reference has to
+/// be about the object the copy wrote rather than one the oracle merely could not tell apart from
+/// it, because a `may` is the reason to stop rather than a reason to follow.
+///
+/// `memmove` is here alongside `memcpy`. An overlapping move puts the bytes that were in the source
+/// into the destination the same way a copy does, and what this asks for is what the source held
+/// before the move, which is the version of memory the walk carries on from.
+///
+/// The new reference carries neither the type node nor the `restrict` scope. A copy moves bytes and
+/// says nothing about what they are, so the load's type node is about the destination, and letting
+/// it rule out a write to the source is exactly the rewrite section 9.6 calls the subtlest bug in
+/// that document.
+fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
+    let data = func[inst];
+    if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
+        || data.flags.intersects(Flags::KEEP)
+    {
+        return None;
+    }
+    let Extra::Mem(info) = data.extra else {
+        return None;
+    };
+    let args = &func[data.args];
+    let (&to, &from) = (args.first()?, args.get(1)?);
+    let (to_origin, Some(to_offset)) = origin(func, to) else {
+        return None;
+    };
+    let (from_origin, Some(from_offset)) = origin(func, from) else {
+        return None;
+    };
+    if reference.origin != to_origin {
+        return None;
+    }
+    let (start, end) = reference.range()?;
+    let (wrote, length) = (i128::from(to_offset), i128::from(func[info].size));
+    if start < wrote || end > wrote + length {
+        return None;
+    }
+    Some(Access {
+        origin: from_origin,
+        offset: Some(i64::try_from(i128::from(from_offset) + (start - wrote)).ok()?),
+        size: reference.size,
+        tbaa: None,
+        restrict: Restrict::NONE,
+        volatile: reference.volatile,
+    })
+}
+
+/// The byte a copy's whole source held because a fill wrote it, when that is what it held.
+///
+/// The walk is asked about the copy the way it is asked about a load, since what a copy reads is
+/// its source. It has to stop at a `memset` that wrote every byte the copy reads, which is an
+/// `Exact` when the two are the same size and a `Partial` when the fill was wider. A `Partial`
+/// that left some of the source to something older is not that, so the bytes the fill wrote are
+/// checked to cover the source rather than taken on the walk's word. Neither side may carry its
+/// length as an operand, be `volatile`, or be one the program asked to keep, since a fill of the
+/// destination is then not the same thing as the copy.
+fn filled(func: &Func, walk: &mut Walk<'_>, inst: Inst) -> Option<Value> {
+    let data = func[inst];
+    if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
+        || data.flags.intersects(Flags::KEEP)
+        || func.bulk(inst)?.length.is_some()
+    {
+        return None;
+    }
+    let read = walk.alias().reads(inst)?;
+    if read.volatile {
+        return None;
+    }
+    let (start, end) = read.range()?;
+    let (Clobber::Exact(wrote) | Clobber::Partial(wrote)) = walk.clobber(inst) else {
+        return None;
+    };
+    if func[wrote].opcode != Opcode::Memset || func[wrote].flags.intersects(Flags::KEEP) {
+        return None;
+    }
+    let fill = func.bulk(wrote)?;
+    let written = walk.alias().writes(wrote)?;
+    if fill.length.is_some() || written.volatile || written.origin != read.origin {
+        return None;
+    }
+    let (low, high) = written.range()?;
+    (low <= start && end <= high).then_some(fill.with)
+}
+
+/// Where a load reads, as two loads can be equal on.
+///
+/// The address itself is not enough. [`crate::number`] only makes two computations of one address
+/// one value inside a block, so a field tested in one block and read again in a block below it is
+/// two `ptr_add`s of the same pointer and the same constant, which are two values. That is every
+/// `BUG_ON` in an inlined helper that tests a field its caller already tested, `dl_task_of` in
+/// kernel/sched/deadline.c being the one written most often. So the address is followed back to
+/// where it came from and how far past that it is, and two addresses that agree on both are the
+/// same place.
+///
+/// An address with a step on the way back that is not a constant has no distance from where it
+/// came from, and it used to be only the same place as itself. That is the field of an array
+/// element: `&atts[i]` is a `ptr_add` of `i` times the size, and `atts[i].attlen` read in one
+/// block and again in a block below it is two `ptr_add`s of that by the same constant. The tuple
+/// deforming loop in PostgreSQL's `slot_deform_heap_tuple` tests `attlen` three times a turn and
+/// read it from memory each time (tamnd/rucc#1994). So such an address is followed back only as
+/// far as the constant steps go, and two that reach the same value at the same distance past it
+/// are the same place.
+///
+/// Where the one step that is not a constant is the last one before the walk would reach where
+/// the address came from, the two are told apart by that step instead. `a[i]` on a local array
+/// read in one block and again in a block below it is the array's address plus `i` times four in
+/// each, and the multiply is one value across the function where the two additions are not.
+/// `uncore_pmu_event_add` in arch/x86/events/intel/uncore.c reads `assign[i]` twice like that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Place {
+    /// So many bytes past where this came from.
+    At(Origin, i64),
+    /// So many bytes past where this came from and this value further on.
+    Indexed(Origin, Value, i64),
+    /// So many bytes past a value the address was a constant step from, where some step behind
+    /// that value was not a constant.
+    Past(Value, i64),
+}
+
+impl Place {
+    /// Where this address points.
+    fn of(func: &Func, address: Value) -> Self {
+        if let (from, Some(offset)) = origin(func, address) {
+            return Self::At(from, offset);
+        }
+        let (mut base, mut offset) = (address, 0i64);
+        while let Def::Result { inst, .. } = func[base].def {
+            let data = func[inst];
+            match data.opcode {
+                Opcode::PtrAdd => {
+                    let &[from, by] = &func[data.args] else { break };
+                    let Some(by) = discharge::constant(func, by)
+                        .and_then(|by| i64::try_from(by).ok())
+                        .and_then(|by| offset.checked_add(by))
+                    else {
+                        if let (from, Some(past)) = origin(func, from) {
+                            if let Some(offset) = offset.checked_add(past) {
+                                return Self::Indexed(from, by, offset);
+                            }
+                        }
+                        break;
+                    };
+                    (base, offset) = (from, by);
+                }
+                // A cast between two pointers is the same address, as it is to `origin`.
+                Opcode::Bitcast => base = func[data.args][0],
+                _ => break,
+            }
+        }
+        Self::Past(base, offset)
+    }
+}
+
+/// What there is to put in place of a load, and where it came from.
+enum Found {
+    /// The store the walk arrived at wrote this.
+    Store(Value),
+    /// An earlier load of the same address at the same version of memory already had this.
+    Earlier(Value),
+    /// A fill wrote every byte of it, and these are the bits that makes.
+    Fill(i128),
+    /// The load stays, with the reason when there is one worth recording.
+    Kept(Option<&'static str>),
+}
+
+/// Each address read at a version of memory, with the blocks loads of it were in and their values.
+/// A load's version of memory, its address, its type and the segment it reads through.
+type Key = (Value, Place, Type, Flags);
+
+type Seen = Map<Key, Vec<(Block, Value)>>;
+
+/// Records what a load of this address at this version of memory is equal to.
+///
+/// A load an earlier one reaches was forwarded from it, so there is nothing new to record. One
+/// that no earlier one reaches is kept beside them, because the blocks it reaches are not the ones
+/// theirs do: the two arms of a branch each read the same address at the same version and each
+/// answers only for what is below it, and a load below a loop answers for what is below it where
+/// the one above the loop does not.
+fn remember(
+    seen: &mut Seen,
+    key: Option<Key>,
+    shape: (&Dominators, &Loops),
+    block: Block,
+    value: Value,
+) {
+    if let Some(key) = key {
+        let found = seen.entry(key).or_default();
+        if !found.iter().any(|&(at, _)| reaches(shape, at, block)) {
+            found.push((block, value));
+        }
+    }
+}
+
+/// The value an earlier load of this address at this version of memory had, from a block that
+/// reaches this one.
+fn earlier(
+    seen: &Seen,
+    key: Option<Key>,
+    shape: (&Dominators, &Loops),
+    block: Block,
+) -> Option<Value> {
+    let found = seen.get(&key?)?;
+    found.iter().find(|&&(at, _)| reaches(shape, at, block)).map(|&(_, value)| value)
+}
+
+/// Whether a load in `at` may hand its value to a load of the same bytes in `block`.
+///
+/// It has to dominate it, and there must not be a whole loop between them. A loop that holds
+/// neither load and that every way from one to the other goes through is one the value would be
+/// carried across in a register, for every turn of it, to save one load after it. That is a bad
+/// trade where the loop is the busy part of the function: libsodium's salsa20_8 reads its sixteen
+/// words, runs eight rounds over copies of them, and adds them back in, and taking the second
+/// read away kept sixteen more values live through the rounds than there are registers, so all
+/// of them went to the stack in the prologue (tamnd/rucc#2795). A load inside the loop still takes
+/// the value from above it, which reads once where the loop read on every turn.
+fn reaches((dom, loops): (&Dominators, &Loops), at: Block, block: Block) -> bool {
+    dom.dominates(at, block)
+        && !loops.all().any(|id| {
+            let header = loops.header(id);
+            !loops.contains(id, at)
+                && !loops.contains(id, block)
+                && dom.dominates(at, header)
+                && dom.dominates(header, block)
+        })
+}
+
+/// Recorded as a note: how many walks were made.
+const WALKS: &str = "walks back over memory";
+
+/// Recorded as a note: how many defs those walks looked at, which is one alias query each.
+const STEPS: &str = "memory defs the walks looked at";
+
+/// Recorded as a note: how many walks gave up rather than answering.
+///
+/// Section 9.3 of `spec/optimizer/09-memory-ssa.md` says this number decides whether the walk gets
+/// a cache. Above one percent of walks and the budget is too small or the alias analysis is too
+/// weak, and both of those are better fixed than cached around.
+const EXHAUSTED: &str = "walks that ran out of budget";
+
+/// Recorded as a note: how many times a walk carried on with the reference `through` rewrote.
+///
+/// Next to the step count because a rewrite starts a walk again and the steps are where that
+/// shows, and on its own because it is the only thing that says whether following a load through
+/// a copy is reaching anything on this build at all.
+const REWRITTEN: &str = "references rewritten to what a copy took them from";
+
+/// A count as the record holds them, which is narrower than the counters are.
+fn count(of: u64) -> u32 {
+    u32::try_from(of).unwrap_or(u32::MAX)
+}
+
+/// The result and the type of a load worth asking about, and nothing for anything else.
+///
+/// Narrow on purpose, and the same shape [`crate::load`] uses. A plain non-volatile `Load` with one
+/// address and one result. `AtomicLoad` is a separate opcode in this IR and is not this one, so an
+/// ordering never reaches here as something to forward.
+///
+/// A load through `%fs` or `%gs` of a global declared `const` is the one exception to the flags,
+/// since nothing writes it and so two of them read the same thing. That is `current` in the kernel.
+fn reads(func: &Func, alias: &Alias<'_>, inst: Inst) -> Option<(Value, Type)> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Load {
+        return None;
+    }
+    if data.flags.intersects(Flags::KEEP)
+        && (data.flags.contains(Flags::VOLATILE)
+            || !alias.reads(inst).is_some_and(|read| alias.invariant(&read)))
+    {
+        return None;
+    }
+    let mut results = data.results();
+    let (Some(result), None) = (results.next(), results.next()) else {
+        return None;
+    };
+    Some((result, func[result].ty))
+}
+
+/// What an integer load reads out of a fill of one constant byte that wrote every byte of it.
+///
+/// That byte at every place, which is what a load of a field of a structure set to zeros a few
+/// lines above reads. `kmalloc` in mm/slub.c fills a 32 byte guard with zeros, stores two of its
+/// fields and reads a third, and gcc reads none of it. The fill can be `Exact` or `Partial`,
+/// since a fill wider than the load is the usual case and the walk calls that partial. Both have
+/// to be about the same object at known places, and the fill a known length that is not one the
+/// program asked to keep. A pointer or a float is left alone, since its bits are not an integer
+/// constant the way an integer's are.
+fn splat(func: &Func, alias: &Alias<'_>, inst: Inst, wrote: Inst, ty: Type) -> Option<i128> {
+    let data = func[wrote];
+    if data.opcode != Opcode::Memset
+        || data.flags.intersects(Flags::KEEP)
+        || !ty.is_int()
+        || !ty.is_scalar()
+        || ty.bits() % 8 != 0
+    {
+        return None;
+    }
+    let fill = func.bulk(wrote)?;
+    let (read, written) = (alias.reads(inst)?, alias.writes(wrote)?);
+    if fill.length.is_some() || written.volatile || written.origin != read.origin {
+        return None;
+    }
+    let ((start, end), (low, high)) = (read.range()?, written.range()?);
+    if start < low || high < end {
+        return None;
+    }
+    let Def::Result { inst: byte, .. } = func[fill.with].def else { return None };
+    let (Opcode::IConst, Extra::Imm(at)) = (func[byte].opcode, func[byte].extra) else {
+        return None;
+    };
+    let byte = func[at].unsigned() & 0xff;
+    Some((0..ty.bits() / 8).fold(0u128, |bits, _| bits << 8 | byte) as i128)
+}
+
+/// What a store wrote, and nothing for anything else that writes memory.
+///
+/// The walk answers `Exact` for any write that covered exactly the bytes the load reads, and a
+/// `memcpy` or a `memset` can do that without there being one value anywhere to take.
+fn stored(func: &Func, inst: Inst) -> Option<Value> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Store || data.flags.intersects(Flags::KEEP) {
+        return None;
+    }
+    func[data.args].first().copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rucc_base::Interner;
+    use rucc_ir::{Module, parse, verify_func};
+
+    use super::*;
+    use crate::outside::Outside;
+
+    const HEADER: &str = "\
+; ModuleID = 'mem.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+";
+
+    fn wrap(signature: &str, body: &str) -> String {
+        format!("{HEADER}\nfunc @f{signature}, linkage(external) {{\n{body}}}\n")
+    }
+
+    /// Runs the pass over the one function in the text and insists the result verifies, which is
+    /// where most of the strength of these tests is: the chain goes on and comes off again, and a
+    /// half removed chain is exactly the kind of thing a shape assertion would let through.
+    fn run(text: &str) -> (Module, Stats) {
+        let mut names = Interner::new();
+        let mut module = parse(text, &mut names).expect("the text parses");
+        let id = module.funcs().next().expect("one function");
+        let outside = Arc::new(Outside::of(&module));
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        let stats = RedundantLoad.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("{errors:#?}");
+        }
+        (module, stats)
+    }
+
+    fn one(module: &Module) -> &Func {
+        &module[module.funcs().next().expect("one function")]
+    }
+
+    /// How many instructions with that opcode the function has left.
+    fn count_of(func: &Func, opcode: Opcode) -> usize {
+        func.blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == opcode)
+            .count()
+    }
+
+    /// Nothing anywhere in the function is on the chain.
+    fn off(func: &Func) {
+        for block in func.blocks() {
+            assert!(func[block].params.iter().all(|&param| !func[param].ty.is_mem()));
+            for inst in func.insts(block) {
+                assert_ne!(func[inst].opcode, Opcode::MemEntry);
+                assert!(!func.carries_mem(inst));
+            }
+        }
+    }
+
+    #[test]
+    fn a_store_in_a_block_above_the_load_reaches_it() {
+        // The case the one block version was built not to handle, and the reason this pass is
+        // worth its two walks.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    br_if %1, block1, block2
+
+block1:
+    jump block2
+
+block2:
+    %3 = load.i32 %0, align 4
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0, "the load is still there");
+        // What the function returns is now the constant the store wrote.
+        let ret = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Return)
+            .expect("a return");
+        let returned = func[func[ret].args][0];
+        let seven = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::IConst)
+            .expect("the constant");
+        assert_eq!(returned, func[seven].results().next().expect("a result"));
+    }
+
+    #[test]
+    fn a_swap_down_one_arm_is_not_an_answer_for_the_join_below_it() {
+        // Issue 1568, and the shape is the swap in `runtime/builtins/quad.c`: three copies down one
+        // arm that exchange two objects, and a read of one of them below the join. Down the arm
+        // that swapped, the first object holds what the second one held, and down the other arm it
+        // holds what it was given, so the two paths disagree and the load has to stay.
+        //
+        // What made it an answer was the visited set. The walk over the arm that swapped rewrites
+        // the question at each copy, and it used to carry the set across the rewrite, so it marked
+        // versions in the block above the branch as seen while asking about somewhere else. The
+        // walk over the other arm then reached those same versions, was told it had been there,
+        // and gave nothing back, and nothing on one path into a join is whatever the other path
+        // said. The join came back holding the swapped arm's answer alone.
+        let text = wrap(
+            "(i1) -> i64",
+            "block0(%0: i1):
+    %1 = alloca, size 16, align 8
+    %2 = alloca, size 16, align 8
+    %3 = alloca, size 16, align 8
+    %4 = iconst.i64 11
+    store %4 -> %1, align 8
+    %5 = iconst.i64 22
+    store %5 -> %2, align 8
+    br_if %0, block1, block2
+
+block1:
+    memcpy %3, %1, size 16, align 8
+    memcpy %1, %2, size 16, align 8
+    memcpy %2, %3, size 16, align 8
+    jump block3
+
+block2:
+    jump block3
+
+block3:
+    %6 = load.i64 %1, align 8
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_store_down_only_one_arm_is_not_an_answer() {
+        // One path into the join wrote it and the other did not, and a disagreement is `Unknown`
+        // rather than the weaker of the two, because there is no order on these to act on.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    jump block3
+
+block2:
+    jump block3
+
+block3:
+    %3 = load.i32 %0, align 4
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed(), "a store on one path is not the value on both");
+        assert_eq!(stats.count(crate::stats::Kind::Missed, UNKNOWN), 1);
+        off(one(&module));
+    }
+
+    #[test]
+    fn both_arms_storing_the_same_way_is_still_two_stores() {
+        // Two stores of the same value are two instructions, so the paths name two different
+        // clobbers and disagree. Taking this one wants value numbering over the stores rather
+        // than a better walk, and it is worth a test saying which of the two it needs.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    br_if %1, block1, block2
+
+block1:
+    store %2 -> %0, align 4
+    jump block3
+
+block2:
+    store %2 -> %0, align 4
+    jump block3
+
+block3:
+    %3 = load.i32 %0, align 4
+    return %3
+",
+        );
+        let (_, stats) = run(&text);
+        assert!(!stats.changed());
+    }
+
+    #[test]
+    fn a_loop_that_writes_nothing_keeps_the_store_above_it() {
+        // The back edge leads to the parameter the walk started from, which is how a cycle is cut
+        // and contributes nothing, so what is left is the one path that wrote it.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    jump block1
+
+block1:
+    %3 = load.i32 %0, align 4
+    br_if %1, block1, block2
+
+block2:
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 0);
+    }
+
+    #[test]
+    fn a_load_below_a_loop_reads_again_rather_than_carry_the_one_above() {
+        // The shape of salsa20_8: the words are read, a loop works on what was read and writes
+        // nothing, and the words are read again below it. Taking the second read away would carry
+        // the first across every turn of the loop.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    jump block1(%2)
+
+block1(%3: i32):
+    %4 = add %3, %3
+    br_if %1, block1(%4), block2
+
+block2:
+    %5 = load.i32 %0, align 4
+    %6 = add %4, %5
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_load_inside_a_loop_still_takes_the_one_above_it() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    jump block1(%2)
+
+block1(%3: i32):
+    %4 = load.i32 %0, align 4
+    %5 = add %3, %4
+    br_if %1, block1(%5), block2
+
+block2:
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_store_inside_the_loop_stops_it() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    jump block1
+
+block1:
+    %3 = load.i32 %0, align 4
+    %4 = add %3, %3
+    store %4 -> %0, align 4
+    br_if %1, block1, block2
+
+block2:
+    return %3
+",
+        );
+        let (_, stats) = run(&text);
+        assert!(!stats.changed(), "the body writes what the load reads");
+    }
+
+    #[test]
+    fn the_bytes_being_the_same_is_not_the_type_being_the_same() {
+        // Section 16.6's most likely wrong answer. Four bytes stored and four bytes read is the
+        // same run of memory and two different readings of it, and this pass takes neither.
+        let text = wrap(
+            "(ptr) -> f32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    store %1 -> %0, align 4
+    %2 = load.f32 %0, align 4
+    return %2
+",
+        );
+        let (_, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(crate::stats::Kind::Missed, WIDTH), 1);
+    }
+
+    #[test]
+    fn the_same_address_read_twice_over_is_read_once() {
+        // Nothing in the function writes memory at all, so the walk says nobody wrote it for both
+        // of these and has no value for either. The two of them are still the same value.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    %2 = load.i32 %0, align 4
+    %3 = add %1, %2
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_check_between_them_is_not_a_write() {
+        // What this is worth on a safety build, which is the shape above with the check the
+        // instrumentation puts in front of the second access. A check reads the planes and writes
+        // nothing, so the version of memory the second load carries is the first one's.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    %2 = cap_of %0
+    check_bounds %2, %0, size 4, align 4
+    %3 = load.i32 %0, align 4
+    %4 = add %1, %3
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+        assert_eq!(count_of(func, Opcode::CheckBounds), 1);
+    }
+
+    #[test]
+    fn a_write_that_may_be_the_same_address_ends_it() {
+        // The two pointers are two parameters and neither of them is restrict, so the store may be
+        // to the same place. The store is a def of memory, so the second load carries a version the
+        // first one never had and the table cannot match it, which is the check being the version
+        // rather than a list of what the pass thinks is in the way.
+        let text = wrap(
+            "(ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr):
+    %2 = load.i32 %0, align 4
+    %3 = iconst.i32 7
+    store %3 -> %1, align 4
+    %4 = load.i32 %0, align 4
+    %5 = add %2, %4
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_setjmp_between_them_ends_it_even_for_a_local_nobody_else_can_see() {
+        // Issue 1503. The alloca is private, so every argument about what a call can reach says
+        // this store reaches this load, and for a call every one of them would be right. The
+        // marker is not a call. Control reaches the load from wherever the matching `longjmp` was
+        // as well as from the store above it, and what the jump left in the slot is the whole
+        // point of the program, so forwarding the store here is the miscompilation where a
+        // function returns the value it started with instead of the one it was jumped back with.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 0
+    store %2 -> %1, align 4
+    %3 = setjmp_marker.i32 %0
+    %4 = load.i32 %1, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn one_arm_reading_it_is_not_the_other_arm_having_read_it() {
+        // Nothing here writes memory, so both loads carry the version the function started with and
+        // the table matches. Neither block runs before the other, which is what the dominance is
+        // there to say, and without it this is a use of a value that is not in scope.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block1, block2
+
+block1:
+    %2 = load.i32 %0, align 4
+    jump block3(%2)
+
+block2:
+    %3 = load.i32 %0, align 4
+    jump block3(%3)
+
+block3(%4: i32):
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_block_laid_out_above_the_load_that_dominates_it_still_reuses_it() {
+        // An inlined body ends up laid out before the test that guards it, as `skb_frag_page`
+        // does in `skb_gro_reset_offset`. Block one is only reached through block two, so its
+        // load is block two's, wherever the blocks were put.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block2, block3
+
+block1:
+    %2 = load.i32 %0, align 4
+    return %2
+
+block2:
+    %3 = load.i32 %0, align 4
+    %4 = iconst.i32 0
+    %5 = icmp ne %3, %4
+    br_if %5, block1, block3
+
+block3:
+    %6 = iconst.i32 0
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_load_above_the_branch_reaches_both_arms() {
+        // The same shape the other way up, where the first load is on every path to the other two.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    br_if %1, block1, block2
+
+block1:
+    %3 = load.i32 %0, align 4
+    jump block3(%3)
+
+block2:
+    %4 = load.i32 %0, align 4
+    jump block3(%4)
+
+block3(%5: i32):
+    %6 = add %2, %5
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 2);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_field_of_an_element_at_an_index_tested_again_below_is_read_once() {
+        // `atts[i].attlen` in the deforming loop, tested in one block and again in the block the
+        // first test falls through to. The element is at no constant distance from the array, so
+        // the two `ptr_add`s of four are told apart only by being two values.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 3
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = iconst.i64 4
+    %6 = ptr_add %4, %5
+    %7 = load.i16 %6, align 2
+    %8 = iconst.i16 1
+    %9 = icmp eq %7, %8
+    br_if %9, block1, block2
+
+block1:
+    %10 = iconst.i32 1
+    return %10
+
+block2:
+    %11 = iconst.i64 4
+    %12 = ptr_add %4, %11
+    %13 = load.i16 %12, align 2
+    %14 = sext.i32 %13
+    return %14
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn an_element_at_an_index_worked_out_again_below_is_read_once() {
+        // `assign[i]` read in one block and again in the block the first test falls through to.
+        // The shift is one value, but each block adds it to the array again, so the two addresses
+        // are two values that are the same distance past the same index.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 2
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = load.i32 %4, align 4
+    %6 = iconst.i32 1
+    %7 = icmp eq %5, %6
+    br_if %7, block1, block2
+
+block1:
+    return %6
+
+block2:
+    %8 = ptr_add %0, %3
+    %9 = load.i32 %8, align 4
+    return %9
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn another_field_of_the_same_element_is_another_place() {
+        // The same element at a distance of six rather than four is the next field, and the
+        // element of the index one further on is the next element.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 3
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = iconst.i64 4
+    %6 = ptr_add %4, %5
+    %7 = load.i16 %6, align 2
+    %8 = iconst.i16 1
+    %9 = icmp eq %7, %8
+    br_if %9, block1, block2
+
+block1:
+    %10 = iconst.i64 6
+    %11 = ptr_add %4, %10
+    %12 = load.i16 %11, align 2
+    %13 = sext.i32 %12
+    return %13
+
+block2:
+    %14 = iconst.i64 8
+    %15 = add %3, %14
+    %16 = ptr_add %0, %15
+    %17 = ptr_add %16, %5
+    %18 = load.i16 %17, align 2
+    %19 = sext.i32 %18
+    return %19
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 0);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 3);
+    }
+
+    #[test]
+    fn a_field_read_after_a_struct_assignment_comes_out_of_the_source() {
+        // What `translate` is for. The copy is from part way into one object to the start of
+        // another and the load is part way into that, so the place asked about on the other side
+        // of the copy is neither operand's own offset and the arithmetic has to be right.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = alloca, size 16, align 8
+    %2 = iconst.i64 12
+    %3 = ptr_add %0, %2
+    %4 = iconst.i32 7
+    store %4 -> %3, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %0, %5
+    memcpy %1, %6, size 8, align 8
+    %7 = iconst.i64 4
+    %8 = ptr_add %1, %7
+    %9 = load.i32 %8, align 4
+    return %9
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        assert_eq!(
+            count_of(func, Opcode::Memcpy),
+            1,
+            "the copy itself is not this pass's to remove"
+        );
+    }
+
+    #[test]
+    fn the_plane_writes_a_copy_leaves_behind_do_not_stop_the_walk() {
+        // The same shape as the test above with what `-fsafety=detect` puts after a copy in it,
+        // which is what the compiler actually optimizes, since the safety opcodes are still
+        // opcodes when this pass runs and are lowered to calls afterwards.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = alloca, size 16, align 8
+    %2 = iconst.i64 12
+    %3 = ptr_add %0, %2
+    %4 = iconst.i32 7
+    store %4 -> %3, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %0, %5
+    memcpy %1, %6, size 8, align 8
+    %7 = iconst.i64 8
+    meta_type_copy %1, %6, %7
+    meta_init_copy %1, %6, %7
+    cap_copy %1, %6, %7
+    %8 = iconst.i64 4
+    %9 = ptr_add %1, %8
+    %10 = load.i32 %9, align 4
+    return %10
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+    }
+
+    #[test]
+    fn what_the_copy_moved_is_what_the_source_held_when_it_ran() {
+        // The store after the copy is not the answer, and it is the one that would come back if
+        // the walk carried on from the load rather than from the copy.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 4, align 4
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    memcpy %1, %0, size 4, align 4
+    %3 = iconst.i32 9
+    store %3 -> %0, align 4
+    %4 = load.i32 %1, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        assert_eq!(count_of(func, Opcode::IConst), 2);
+        let ret = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Return)
+            .expect("a return");
+        let seven = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::IConst)
+            .expect("the first constant, which is the one stored before the copy");
+        assert_eq!(func[func[ret].args][0], func[seven].results().next().expect("a result"));
+    }
+
+    #[test]
+    fn a_load_across_the_edge_of_a_copy_stays() {
+        // Half of what this reads came through the copy and half of it was already there, and a
+        // reference rewritten to the source would be asking about the wrong two bytes as well as
+        // about the right two.
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 8, align 4
+    %1 = alloca, size 8, align 4
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    memcpy %1, %0, size 4, align 4
+    %3 = iconst.i64 2
+    %4 = ptr_add %1, %3
+    %5 = load.i32 %4, align 2
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_copy_the_oracle_could_not_tell_apart_from_the_load_is_not_followed() {
+        // The copy writes through one parameter and the load reads through another, so the two may
+        // be the same object and the oracle cannot say they are. Following that would be asking
+        // about the source of a copy that may not have written this at all, and a may is the
+        // reason to stop rather than a reason to carry on.
+        let text = wrap(
+            "(ptr, ptr, ptr) -> i32",
+            "block0(%0: ptr, %1: ptr, %2: ptr):
+    %3 = iconst.i32 7
+    store %3 -> %1, align 4
+    memcpy %0, %1, size 4, align 4
+    %4 = load.i32 %2, align 4
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_copy_of_a_fill_is_the_same_fill_of_where_it_was_copied_to() {
+        // `*d = (block){ { 0 } }`, which is a fill of a temporary and a copy of all of it.
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 64, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Memcpy), 0);
+        assert_eq!(count_of(func, Opcode::Memset), 2);
+        let fill = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Memset)
+            .last()
+            .expect("the copy, now a fill");
+        let args = &func[func[fill].args];
+        assert_eq!(args[0], func[func.entry().expect("an entry")].params[0]);
+        let Extra::Mem(info) = func[fill].extra else { panic!("a fill says how much it writes") };
+        assert_eq!((func[info].size, func[info].align), (64, 8));
+    }
+
+    #[test]
+    fn a_field_of_a_fill_is_the_byte_at_every_place() {
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = iconst.i8 1
+    memset %0, %1, size 32, align 8
+    %2 = iconst.i32 7
+    store %2 -> %0, align 8
+    %3 = iconst.i64 16
+    %4 = ptr_add %0, %3
+    %5 = load.i32 %4, align 8
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, SPLATTED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        let made = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::IConst)
+            .last()
+            .expect("the constant the load became");
+        let Extra::Imm(at) = func[made].extra else { panic!("a constant has an immediate") };
+        assert_eq!(func[at].unsigned(), 0x0101_0101);
+    }
+
+    #[test]
+    fn a_load_reaching_past_the_end_of_a_fill_stays() {
+        let text = wrap(
+            "() -> i64",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = iconst.i8 0
+    memset %0, %1, size 20, align 8
+    %2 = iconst.i64 16
+    %3 = ptr_add %0, %2
+    %4 = load.i64 %3, align 8
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, SPLATTED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_copy_of_a_fill_something_wrote_into_since_stays_a_copy() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 64, align 16
+    %3 = iconst.i32 7
+    store %3 -> %1, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Memcpy), 1);
+    }
+
+    #[test]
+    fn a_copy_wider_than_the_fill_stays_a_copy() {
+        // The second half of what is copied is whatever the temporary held before, which is not
+        // the byte the fill wrote.
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 32, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Memcpy), 1);
+    }
+
+    #[test]
+    fn a_volatile_load_has_to_happen() {
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    store %1 -> %0, align 4
+    %2 = load.i32.volatile %0, align 4
+    return %2
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    /// The kernel's `current`: a load of a `const` global through `%gs`, a store and a call, and
+    /// the same load again, with `constant` on the global or not and the second load through the
+    /// segment or not.
+    fn current(constant: &str, second: &str) -> String {
+        format!(
+            "{HEADER}
+global @task : bytes 8, align 8, linkage(external){constant}
+
+func @f(ptr) -> ptr, linkage(external) {{
+block0(%0: ptr):
+    %1 = global_addr @task
+    %2 = load.seg_gs %1, align 8
+    store %2 -> %0, align 8
+    call @g() : ()
+    %3 = load{second} %1, align 8
+    return %3
+}}
+
+func @g(), linkage(external);
+"
+        )
+    }
+
+    #[test]
+    fn a_const_global_read_through_gs_is_read_once_across_a_store_and_a_call() {
+        let (module, stats) = run(&current(", constant", ".seg_gs"));
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_global_that_is_not_const_is_read_again_after_the_call() {
+        let (module, stats) = run(&current("", ".seg_gs"));
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn the_same_address_read_without_the_segment_is_other_bytes() {
+        let (module, stats) = run(&current(", constant", ".ptr"));
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_function_with_no_memory_in_it_is_left_alone() {
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = add %0, %0
+    return %1
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(stats.is_empty(), "there was nothing here to say anything about");
+        off(one(&module));
+    }
+
+    #[test]
+    fn out_of_fuel_keeps_the_load_and_still_counts_it() {
+        // The count of what could have gone is the same at every fuel setting, which is what
+        // makes a bisection over it monotonic.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    store %1 -> %0, align 4
+    %2 = load.i32 %0, align 4
+    return %2
+",
+        );
+        let mut names = Interner::new();
+        let mut module = parse(&text, &mut names).expect("the text parses");
+        let id = module.funcs().next().expect("one function");
+        let outside = Arc::new(Outside::of(&module));
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        let stats = RedundantLoad.run(&mut module[id], &mut an, &mut Fuel::of(0));
+        assert!(!stats.changed());
+        assert_eq!(stats.count(crate::stats::Kind::Missed, NO_FUEL), 1);
+        off(&module[id]);
+    }
+
+    #[test]
+    fn what_the_walks_cost_is_written_down() {
+        // Section 9.3 asks for the fraction that ran out of budget by name, and a number nothing
+        // reports is a number nobody will look at.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = iconst.i32 7
+    store %1 -> %0, align 4
+    %2 = load.i32 %0, align 4
+    return %2
+",
+        );
+        let (_, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Note, WALKS), 1);
+        assert_eq!(stats.count(crate::stats::Kind::Note, STEPS), 1);
+        assert_eq!(stats.count(crate::stats::Kind::Note, EXHAUSTED), 0);
+    }
+
+    #[test]
+    fn the_safety_instrumentation_between_them_does_not_stop_the_forward() {
+        // What a safety build looks like by the time the optimizer sees it, which is the shape
+        // above with the lifetime plane written and then read between the store and the load.
+        // Both of those are on the memory chain and both have `%0` as an operand, so the walk
+        // goes through them and has to be told they are not about `%0`.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    %3 = iconst.i64 4
+    meta_init %0, %3
+    br_if %1, block1, block2
+
+block1:
+    %4 = cap_of %0
+    check_bounds %4, %0, size 4, align 4
+    jump block2
+
+block2:
+    %5 = load.i32 %0, align 4
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        // And the instrumentation is still there, because this pass forwards loads and is not
+        // entitled to an opinion about whether a check was worth running.
+        assert_eq!(count_of(func, Opcode::MetaInit), 1);
+        assert_eq!(count_of(func, Opcode::CheckBounds), 1);
+    }
+}

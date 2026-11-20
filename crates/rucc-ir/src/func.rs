@@ -1,0 +1,3064 @@
+//! The function: its blocks, its instructions, its values, and the tables they live in.
+//!
+//! Design: `spec/08-ir.md` sections 8.1 and 8.6.
+//!
+//! One [`Func`] owns everything in it. Nothing is individually freed: the instructions are a flat
+//! vector, a reference to one is a four-byte index, and the whole function is dropped in one go.
+//! The same shape as the AST, for the same reasons. The side tables are behind one pointer, so
+//! that a declaration does not carry them.
+//!
+//! Two things are not flat, and both for the same reason, which is that SSA construction
+//! finishes a loop header long after it has built the blocks inside the loop.
+//!
+//! The instructions in a block are a doubly linked list rather than a run, because the
+//! optimizer inserts and removes instructions constantly and a run would move every
+//! instruction after the edit, invalidating every [`Inst`] anybody was holding.
+//!
+//! A block's parameters are a `Vec` rather than a run in a pool, because a run in a pool
+//! cannot grow once something else has been put after it, and adding a parameter to a loop
+//! header is exactly the operation that has to grow one.
+//!
+//! # CFG invariants
+//!
+//! The entry block has no predecessors and its parameters are the function's arguments in
+//! their C-level form, before the ABI has been applied. Every other block ends in exactly one
+//! terminator and contains no terminator anywhere else. These are checked by the verifier
+//! rather than by the builder, because a function under construction breaks all of them and
+//! the useful question is whether it still does when the pass that was building it says it has
+//! finished.
+
+use std::hash::BuildHasherDefault;
+use std::ops::{Index, IndexMut};
+
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Idx, Symbol};
+use rucc_diag::Span;
+use rucc_target::{Isa, Slot};
+
+use crate::inst::{
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Extra,
+    Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Shuffle, Sig, Signature, SlotList,
+    SwitchInfo, VaInfo, Value, ValueData, ValueList,
+};
+use crate::module::{Dll, Linkage, Visibility};
+use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
+
+/// The names that a wasm object gives a function in place of its own, from clang's
+/// `export_name`, `import_module` and `import_name`. Each is `None` on a function that did not
+/// say, which is every function on a row that is not wasm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WasmNames {
+    /// The name the module exports a definition under.
+    pub export: Option<Symbol>,
+    /// The module a declaration is imported from, in place of `env`.
+    pub module: Option<Symbol>,
+    /// The field a declaration is imported under, in place of its symbol name.
+    pub field: Option<Symbol>,
+}
+
+/// The messages an `error` and a `warning` attribute put on a function, for a call to it that
+/// survives optimization. A function may carry both, and gcc then says both at each such call.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notices {
+    /// What a surviving call is refused with.
+    pub error: Option<String>,
+    /// What a surviving call is warned about with.
+    pub warning: Option<String>,
+}
+
+impl Notices {
+    /// Whether there is nothing to say about a call.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.error.is_none() && self.warning.is_none()
+    }
+}
+
+/// One function.
+#[derive(Clone, Debug)]
+pub struct Func {
+    /// The name it is called by, which is what a direct call to it names.
+    pub name: Symbol,
+    /// The name the source spelled, where an assembler name means the symbol is not that name.
+    ///
+    /// `extern char *strstr (const char *, const char *) __asm ("my_strstr");` declares the
+    /// standard `strstr` and says the symbol is `my_strstr`, and both of those are facts a later
+    /// pass needs: the symbol is what a call names and what the linker resolves, and the spelling
+    /// is what says this is the function the standard describes. Keeping only the symbol is how a
+    /// rename hides a library call from every fold that knows what that library call does, which
+    /// is what `gcc.c-torture/execute/builtins/strstr-asm.c` is written to catch.
+    ///
+    /// `None` where the two are the same, which is every function that renamed nothing, so this
+    /// costs a word on a function and appears in the printed form only where a program asked for
+    /// it.
+    pub spelled: Option<Symbol>,
+    /// How the linker sees it. `Internal` for a `static` function.
+    pub linkage: Linkage,
+    /// How the dynamic linker sees it.
+    pub visibility: Visibility,
+    /// Whether it is in another DLL or offered to others by this one, which only a COFF target
+    /// reads.
+    pub dll: Dll,
+    /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
+    /// object writer choose.
+    pub section: Option<Symbol>,
+    /// What its first instruction has to be aligned to, from `__attribute__((aligned(...)))`, or
+    /// `None` for the alignment the target gives every function anyway.
+    ///
+    /// A raise and never a lower, the way the attribute is everywhere: a function asked to be at
+    /// a multiple of two hundred and fifty six is at one, and one asked for less than the target's
+    /// own alignment keeps the target's.
+    pub align: Option<u32>,
+    /// How many instructions that do nothing it opens with for a patcher, and how many of them
+    /// are in front of its label, from `__attribute__((patchable_function_entry(N, M)))`, in place
+    /// of what `-fpatchable-function-entry=` asks of every function. `None` for one that leaves
+    /// it to the command line, and `(0, 0)` for one that asked for no room at all.
+    pub patchable: Option<(u32, u32)>,
+    /// The names a wasm object gives it in place of its own. See [`WasmNames`].
+    pub wasm: WasmNames,
+    /// The profiler's hook `-pg` calls on the way in, from `__attribute__((fentry_name(...)))`, in
+    /// place of `__fentry__` or `mcount` and of what `-mfentry-name=` says. `None` for one that
+    /// leaves it to the command line.
+    pub fentry_name: Option<Symbol>,
+    /// The section the address of that call is listed in, from
+    /// `__attribute__((fentry_section(...)))`, which lists it whether or not `-mrecord-mcount` was
+    /// given. `None` for one that leaves it to the command line.
+    pub fentry_section: Option<Symbol>,
+    /// What is true of the whole function, which is what a caller reads when it wants to know
+    /// what a call to it does without looking inside.
+    pub attrs: Attrs,
+    /// The x86-64 extensions the function is built for, when `__attribute__((target(...)))`
+    /// said, and `None` for one built for whatever the module is built for.
+    ///
+    /// The inliner is what reads it. A body built for more than its caller may not be copied into
+    /// the caller, because what it was allowed to assume stops being true there, so a callee
+    /// built for SSE4.2 stays a call from a function that is not. It is the whole set rather than
+    /// what the attribute added, so the comparison needs nothing else.
+    pub target: Option<Isa>,
+    /// Where it was declared, which is what a debugger says the prologue is.
+    ///
+    /// Not any instruction's span, and that is the point of it. The pushes, the frame and the
+    /// moves that put the arguments where the body expects them come from no expression in the
+    /// source, so every one of them carries [`Span::DUMMY`], and the front of every function would
+    /// otherwise be the one part of it the line table says nothing about. A program counter in
+    /// there would get no answer rather than a slightly early one, which is the worse of the two
+    /// for whoever is reading a backtrace.
+    ///
+    /// [`Span::DUMMY`] in a function built by something that is not a C source, which is what the
+    /// tests and the IR parser build.
+    ///
+    /// Spelled `declared` rather than `span` because [`Func::span`] is already the span of an
+    /// instruction, and a field and a method of the same name on the same type is a reading
+    /// hazard for no gain.
+    pub declared: Span,
+    /// Where its name is written in the declarator of the definition, which is where gcc says a
+    /// function is when it reports on one as a whole.
+    ///
+    /// Not [`Func::declared`], which is the opening brace, and the two are on different lines in
+    /// the style that puts the brace underneath. `-fstack-usage` names a function by this, so a
+    /// file written in that style still lines up with gcc's report line for line.
+    ///
+    /// [`Span::DUMMY`] wherever [`Func::declared`] is, and for the same reason.
+    pub named: Span,
+    /// What a call to it that is still there once the optimizer is done has to be reported with,
+    /// from `__attribute__((error("...")))` and `__attribute__((warning("...")))`.
+    ///
+    /// Not part of the IR's text, since it is a message for whoever compiled the source and not a
+    /// fact about what the function does. A module read back from text has none, and its calls
+    /// are reported by nothing, which is what a call to such a function in another unit gets.
+    pub notices: Notices,
+
+    values: Vec<ValueData>,
+    insts: Vec<InstData>,
+    inst_layout: Vec<InstLayout>,
+    inst_spans: Vec<Span>,
+    blocks: Vec<BlockData>,
+
+    value_pool: Vec<Value>,
+    block_calls: Vec<BlockCall>,
+    imms: Vec<Imm>,
+    mem: Vec<MemInfo>,
+    calls: Vec<CallInfo>,
+    abis: Vec<Abi>,
+    signatures: Vec<Signature>,
+    /// The side tables, which a declaration has none of.
+    body: Lazy,
+
+    first_block: Option<Block>,
+    last_block: Option<Block>,
+}
+
+/// The side tables of a function's body, the ones a pass reaches for now and then rather than on
+/// every instruction, kept behind a pointer so that a declaration, which has none of them, is small.
+///
+/// A header like duktape's declares a few thousand functions a file calls none of, and each one
+/// is a [`Func`] in the module. With these inline that was about 900 bytes apiece, a few megabytes
+/// of fresh pages for a file with nothing in it. The tables every instruction touches stay inline,
+/// because a pointer in front of them cost a body-heavy file five percent more instructions.
+/// tamnd/rucc#3052.
+#[derive(Clone, Debug, Default)]
+struct Body {
+    switches: Vec<SwitchInfo>,
+    asms: Vec<AsmInfo>,
+    slots: Vec<Slot>,
+    va_objects: Vec<VaInfo>,
+    facts: Vec<(Value, Facts)>,
+    labels: Vec<(Block, Symbol)>,
+    mem_decls: Vec<(Idx<MemInfo>, u32)>,
+    value_decls: Vec<(Value, u32)>,
+    param_decls: Vec<(Value, u32)>,
+    value_starts: Vec<(Value, Start)>,
+    /// The instructions some start in [`Func::value_starts`] is after, so that taking one out only
+    /// has to remember where it was when it is one of them.
+    anchors: Set<Inst>,
+    /// The starts [`Func::remove_inst`] made out of the names on an instruction's results, by the
+    /// instruction, so that putting the instruction back somewhere turns them back into names.
+    unplaced: Map<Inst, Vec<(Value, Start)>>,
+    /// How many of a call's arguments each C argument became, for the calls the lowering says.
+    ///
+    /// Not part of the IR's text and not something the verifier reads. It is there for one
+    /// reader, `rucc_opt::inline`, which forwards the anonymous arguments of a call to an
+    /// `always_inline` function into a call inside it and has to know which values were one
+    /// structure, since the ABI puts all of a structure in registers or none of it. A module read
+    /// back from text has none of these, and the inliner forwards less for it.
+    arg_groups: Map<Inst, Vec<u32>>,
+    /// Where each instruction some start is after was when a pass took it out, as the block and
+    /// the instruction in front of it. See [`Func::start_place`].
+    gone: Map<Inst, (Block, Option<Inst>)>,
+    /// Other instructions that compute a value, for instruction selection to choose from. See
+    /// [`Func::forms`].
+    forms: Map<Value, Vec<Inst>>,
+    /// The room [`Func::append_arg`] left after a run it moved, as where the run ends and where
+    /// the room does.
+    room: Map<u32, u32>,
+}
+
+/// What every declaration reads its tables from, all of them empty.
+static EMPTY: Body = Body {
+    switches: Vec::new(),
+    asms: Vec::new(),
+    slots: Vec::new(),
+    va_objects: Vec::new(),
+    facts: Vec::new(),
+    labels: Vec::new(),
+    mem_decls: Vec::new(),
+    value_decls: Vec::new(),
+    param_decls: Vec::new(),
+    value_starts: Vec::new(),
+    anchors: Set::with_hasher(BuildHasherDefault::new()),
+    unplaced: Map::with_hasher(BuildHasherDefault::new()),
+    arg_groups: Map::with_hasher(BuildHasherDefault::new()),
+    gone: Map::with_hasher(BuildHasherDefault::new()),
+    forms: Map::with_hasher(BuildHasherDefault::new()),
+    room: Map::with_hasher(BuildHasherDefault::new()),
+};
+
+/// A [`Body`] that is only made when something is written to it. Reading one that was never made
+/// reads [`EMPTY`], so a declaration answers every question about its body the way an empty body
+/// would.
+#[derive(Clone, Default)]
+struct Lazy(Option<Box<Body>>);
+
+impl std::ops::Deref for Lazy {
+    type Target = Body;
+
+    #[inline]
+    fn deref(&self) -> &Body {
+        self.0.as_deref().unwrap_or(&EMPTY)
+    }
+}
+
+impl std::ops::DerefMut for Lazy {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Body {
+        self.0.get_or_insert_with(Box::default)
+    }
+}
+
+impl std::fmt::Debug for Lazy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Body::fmt(self, f)
+    }
+}
+
+impl Func {
+    /// A function with that name and that signature, and nothing in it.
+    ///
+    /// The signature becomes signature zero, which is what [`Func::signature`] gives back. The
+    /// entry block is not created here, because the caller is about to create it and give it
+    /// the parameters, and a half-built entry block is worse than no entry block. So a
+    /// function fresh from here is a declaration, and stops being one when it gets a block.
+    #[must_use]
+    pub fn new(name: Symbol, signature: Signature) -> Self {
+        Self {
+            name,
+            spelled: None,
+            linkage: Linkage::External,
+            visibility: Visibility::Default,
+            dll: Dll::Default,
+            section: None,
+            align: None,
+            patchable: None,
+            wasm: WasmNames::default(),
+            fentry_name: None,
+            fentry_section: None,
+            attrs: Attrs::NONE,
+            target: None,
+            declared: Span::DUMMY,
+            named: Span::DUMMY,
+            notices: Notices::default(),
+            values: Vec::new(),
+            insts: Vec::new(),
+            inst_layout: Vec::new(),
+            inst_spans: Vec::new(),
+            blocks: Vec::new(),
+            value_pool: Vec::new(),
+            block_calls: Vec::new(),
+            imms: Vec::new(),
+            mem: Vec::new(),
+            calls: Vec::new(),
+            abis: Vec::new(),
+            signatures: vec![signature],
+            body: Lazy(None),
+            first_block: None,
+            last_block: None,
+        }
+    }
+
+    /// Its own signature.
+    #[must_use]
+    pub fn signature(&self) -> &Signature {
+        &self.signatures[0]
+    }
+
+    /// Gives the function a different signature of its own.
+    ///
+    /// Two callers. One is the back end pass that puts an integer the machine has no register for
+    /// into the pair of registers it travels in, where one parameter becomes two. The other is the
+    /// interprocedural pass that takes out a parameter nothing reads, where one parameter becomes
+    /// none, and that one rewrites every call in the unit in the same breath. A parameter list
+    /// that is not the one the function was created with is a list the entry block's parameters
+    /// have to say the same thing about, which is why this is next to [`Func::retain_params`] in
+    /// what a pass has to keep straight rather than something the middle end reaches for. Nothing
+    /// else changes a function's own signature, because a signature is what its callers were
+    /// compiled against.
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.signatures[0] = signature;
+    }
+
+    /// Every signature the function holds, its own first and then the ones its calls name.
+    pub fn signatures(&self) -> impl Iterator<Item = &Signature> {
+        self.signatures.iter()
+    }
+
+    /// Records a signature a `call_indirect` is made with, and gives back its index.
+    pub fn add_signature(&mut self, signature: Signature) -> Sig {
+        self.signatures.push(signature);
+        Idx::from_usize(self.signatures.len() - 1)
+    }
+
+    /// The entry block, which is the first one in layout order.
+    ///
+    /// `None` only before one has been created. The verifier is what insists a finished
+    /// function has one.
+    #[must_use]
+    pub fn entry(&self) -> Option<Block> {
+        self.first_block
+    }
+
+    /// Whether this only says the function exists somewhere, which is a function with no
+    /// blocks in it.
+    ///
+    /// `extern int puts(const char *);` and every other declaration of something defined in
+    /// another object is one of these, and it is here rather than left out of the module
+    /// because a call needs its signature and its linkage.
+    #[must_use]
+    pub fn is_declaration(&self) -> bool {
+        self.first_block.is_none()
+    }
+
+    // Blocks.
+
+    /// Creates a block with no parameters and no instructions, at the end of the layout.
+    pub fn create_block(&mut self) -> Block {
+        let block = Idx::from_usize(self.blocks.len());
+        self.blocks.push(BlockData { prev: self.last_block, ..BlockData::default() });
+        match self.last_block {
+            Some(last) => self.blocks[last.index()].next = Some(block),
+            None => self.first_block = Some(block),
+        }
+        self.last_block = Some(block);
+        block
+    }
+
+    /// Takes a block out of the layout, along with everything in it.
+    ///
+    /// The block keeps its number, the way a removed instruction keeps its own, because
+    /// renumbering would move every block after it and invalidate every index anybody was
+    /// holding. What it stops being is a block of this function: nothing walks it, nothing
+    /// prints it, and the values defined in it are as gone as the instructions that defined
+    /// them. Deleting one whose branches something still reaches is how a function ends up
+    /// branching to nowhere, so the caller is the one that has to know nothing reaches it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block is the entry block, which is the one block a function has to have.
+    pub fn remove_block(&mut self, block: Block) {
+        assert!(self.first_block != Some(block), "the entry block is not removable");
+        let (prev, next) = (self.blocks[block.index()].prev, self.blocks[block.index()].next);
+        match prev {
+            Some(prev) => self.blocks[prev.index()].next = next,
+            None => self.first_block = next,
+        }
+        match next {
+            Some(next) => self.blocks[next.index()].prev = prev,
+            None => self.last_block = prev,
+        }
+        // The instructions say they are in no block now, which is what a removed instruction
+        // says, so that asking one where it is gives an answer rather than a block nothing
+        // walks.
+        let insts: Vec<Inst> = self.insts(block).collect();
+        for inst in insts {
+            self.inst_layout[inst.index()] = InstLayout::default();
+        }
+        self.blocks[block.index()] = BlockData::default();
+    }
+
+    /// Adds a parameter of that type to a block, and gives back the value it arrives as.
+    ///
+    /// Every predecessor's branch has to grow an argument to match, which is
+    /// [`Func::append_arg`], and the verifier is what notices if one of them did not.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block already has four billion parameters, which no block does.
+    pub fn append_param(&mut self, block: Block, ty: Type) -> Value {
+        let index = u32::try_from(self.blocks[block.index()].params.len())
+            .expect("a block with four billion parameters");
+        let value = self.add_value(ValueData { ty, def: Def::Param { block, index } });
+        self.blocks[block.index()].params.push(value);
+        value
+    }
+
+    /// Drops the parameters of a block that a predicate turns down, and renumbers the rest.
+    ///
+    /// The predicate is asked about each parameter in the order the block takes them. A
+    /// parameter that goes has to take the argument in the same position out of every branch
+    /// to the block, which is the caller's work rather than this method's, because only the
+    /// caller knows which branches there are. This is what removing a redundant block
+    /// parameter is, and SSA construction is the thing that makes them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block has four billion parameters, which no block does.
+    pub fn retain_params(&mut self, block: Block, mut keep: impl FnMut(Value) -> bool) {
+        let mut params = std::mem::take(&mut self.blocks[block.index()].params);
+        let mut dropped = Vec::new();
+        params.retain(|&value| {
+            let kept = keep(value);
+            if !kept {
+                dropped.push(value);
+            }
+            kept
+        });
+        // The same as an instruction taken out: a declaration a dropped parameter was the value of
+        // was given it at the top of the block. What was known about it goes too, since a fact
+        // about a value nothing defines has no number to be printed under and cannot be read back.
+        for value in dropped {
+            self.held_from(value, block, None);
+            self.set_facts(value, Facts::NONE);
+        }
+        for (index, &value) in params.iter().enumerate() {
+            let index = u32::try_from(index).expect("a block with four billion parameters");
+            self.values[value.index()].def = Def::Param { block, index };
+        }
+        self.blocks[block.index()].params = params;
+    }
+
+    /// Gives a value a different type, leaving where it comes from alone.
+    ///
+    /// There are two callers. One is the back end pass that puts an integer of a width the
+    /// machine has no register for into the width it does have one for. The other is constant
+    /// folding, which gives a block parameter the type of the one conversion that reads it when
+    /// it folds that conversion into every argument passed to the parameter. A value's type is
+    /// what makes it, and changing one without changing the other is how an IR stops meaning
+    /// anything. Both callers change both, which is why this is a method and not a field.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not one of this function's.
+    pub fn retype(&mut self, value: Value, ty: Type) {
+        self.values[value.index()].ty = ty;
+    }
+
+    /// Every value the function has, including ones whose defining instruction has gone.
+    ///
+    /// In the order they were created, which is the order a pass that walks all of them wants:
+    /// a value is defined before it is used, so a walk in this order sees a definition first.
+    pub fn values(&self) -> impl Iterator<Item = Value> + use<'_> {
+        (0..self.values.len()).map(Idx::from_usize)
+    }
+
+    /// Every block, in layout order.
+    pub fn blocks(&self) -> impl Iterator<Item = Block> + use<'_> {
+        std::iter::successors(self.first_block, move |&block| self.blocks[block.index()].next)
+    }
+
+    /// Every instruction in a block, in order.
+    pub fn insts(&self, block: Block) -> impl Iterator<Item = Inst> + use<'_> {
+        std::iter::successors(self.blocks[block.index()].first, move |&inst| {
+            self.inst_layout[inst.index()].next
+        })
+    }
+
+    /// Every instruction in a block, last first.
+    ///
+    /// Which is the order a liveness walk needs, and it is here rather than at the caller because
+    /// the layout links are private and collecting the block into a vector to reverse it is an
+    /// allocation per block per round of a fixpoint.
+    pub fn insts_backwards(&self, block: Block) -> impl Iterator<Item = Inst> + use<'_> {
+        std::iter::successors(self.blocks[block.index()].last, move |&inst| {
+            self.inst_layout[inst.index()].prev
+        })
+    }
+
+    /// The last instruction of a block, which is its terminator once it is finished.
+    #[must_use]
+    #[inline]
+    pub fn terminator(&self, block: Block) -> Option<Inst> {
+        self.blocks[block.index()].last.filter(|&inst| self.is_terminator(inst))
+    }
+
+    /// Whether control leaves the block at this instruction.
+    ///
+    /// A question for the function rather than for the instruction, because inline assembly is
+    /// the one case where the opcode is not enough: `asm goto` has labels and everything else
+    /// does not, and the labels are in the function's table rather than on the instruction.
+    #[must_use]
+    #[inline]
+    pub fn is_terminator(&self, inst: Inst) -> bool {
+        let data = &self[inst];
+        match data.extra {
+            Extra::Asm(info) => {
+                data.opcode.is_terminator() || !self.body.asms[info.index()].targets.is_empty()
+            }
+            _ => data.opcode.is_terminator(),
+        }
+    }
+
+    // Instructions.
+
+    /// Creates an instruction and its result values, without putting it in a block.
+    ///
+    /// The results are allocated here and are contiguous, which is what lets an instruction
+    /// hold the first of them and a count rather than a list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `results` has more than 255 types, which no instruction in the set does.
+    pub fn create_inst(&mut self, mut data: InstData, results: &[Type], span: Span) -> Inst {
+        let inst = Idx::from_usize(self.insts.len());
+        data.results = u8::try_from(results.len()).expect("an instruction with too many results");
+        data.first_result = results.first().map(|_| Idx::from_usize(self.values.len()));
+        for (index, &ty) in results.iter().enumerate() {
+            let index = u8::try_from(index).expect("checked just above");
+            self.add_value(ValueData { ty, def: Def::Result { inst, index } });
+        }
+        self.insts.push(data);
+        self.inst_layout.push(InstLayout::default());
+        self.inst_spans.push(span);
+        inst
+    }
+
+    /// Takes the results in front of an instruction away, leaving the ones behind them.
+    ///
+    /// One caller, the interprocedural pass that stops a function handing a value back. The
+    /// results of an instruction are consecutive values with memory last, so dropping the ones in
+    /// front is moving the first one along and shortening the count, and the values that went stay
+    /// in the table with nothing referring to them, because nothing here ever takes a value out.
+    ///
+    /// The ones that stay are renumbered, so that a value still says which of its instruction's
+    /// results it is. A pass that asks that question of a call result is asking whether it is the
+    /// pointer an allocator handed back, and an answer left over from before the drop is an answer
+    /// about a result that is no longer there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction does not produce that many results.
+    pub fn drop_results(&mut self, inst: Inst, drop: u8) {
+        let data = &self.insts[inst.index()];
+        assert!(drop <= data.results, "the instruction does not produce that many results");
+        let left = data.results - drop;
+        let first = data.first_result.map_or(0, Idx::raw) + u32::from(drop);
+        let data = &mut self.insts[inst.index()];
+        data.results = left;
+        data.first_result = (left > 0).then(|| Value::new(first));
+        for offset in 0..u32::from(left) {
+            let index = u8::try_from(offset).expect("no more than the count it came from");
+            let value = Value::new(first + offset);
+            self.values[value.index()].def = Def::Result { inst, index };
+        }
+    }
+
+    /// Puts an instruction at the end of a block.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is already in a block. Moving one is removing it and
+    /// appending it, and doing it by accident is how a linked list ends up in two pieces.
+    pub fn append_inst(&mut self, block: Block, inst: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let last = self.blocks[block.index()].last;
+        self.inst_layout[inst.index()] = InstLayout { block: Some(block), prev: last, next: None };
+        match last {
+            Some(last) => self.inst_layout[last.index()].next = Some(inst),
+            None => self.blocks[block.index()].first = Some(inst),
+        }
+        self.blocks[block.index()].last = Some(inst);
+        self.placed(inst);
+    }
+
+    /// Puts an instruction immediately before another one, in the block that one is in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inst` is already in a block, or if `before` is not in one.
+    pub fn insert_before(&mut self, inst: Inst, before: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let at = self.inst_layout[before.index()];
+        let block = at.block.expect("the instruction to insert before is not in a block");
+        self.inst_layout[inst.index()] =
+            InstLayout { block: Some(block), prev: at.prev, next: Some(before) };
+        self.inst_layout[before.index()].prev = Some(inst);
+        match at.prev {
+            Some(prev) => self.inst_layout[prev.index()].next = Some(inst),
+            None => self.blocks[block.index()].first = Some(inst),
+        }
+        self.placed(inst);
+    }
+
+    /// Puts an instruction immediately after another one, in the block that one is in.
+    ///
+    /// The mirror of [`Func::insert_before`], and it exists because a pass that has to talk about
+    /// a value an instruction produced has nowhere else to put what it is adding. Check insertion
+    /// is the caller: `check_deriv` is handed the pointer the derivation produced, so it goes
+    /// after the derivation and no amount of rearranging moves it earlier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inst` is already in a block, if `after` is not in one, or if `after` is the
+    /// block's terminator, since nothing may come between a terminator and the branch it is.
+    pub fn insert_after(&mut self, inst: Inst, after: Inst) {
+        assert!(self.inst_layout[inst.index()].block.is_none(), "the instruction is in a block");
+        let at = self.inst_layout[after.index()];
+        let block = at.block.expect("the instruction to insert after is not in a block");
+        assert!(at.next.is_some(), "nothing goes after a terminator");
+        self.inst_layout[inst.index()] =
+            InstLayout { block: Some(block), prev: Some(after), next: at.next };
+        self.inst_layout[after.index()].next = Some(inst);
+        if let Some(next) = at.next {
+            self.inst_layout[next.index()].prev = Some(inst);
+        }
+        self.placed(inst);
+    }
+
+    /// Moves every instruction after `inst` in its block to the end of `into`, in the order they
+    /// were in, which is a block split in two at `inst`.
+    ///
+    /// It is [`Func::remove_inst`] and [`Func::append_inst`] on each in turn, without the two
+    /// asking after the declarations each time. Taking one out turns every declaration holding
+    /// its results into a start and putting it back turns them into names again, and both are a
+    /// shift of a list as long as the function's declarations. The inliner splits the block of
+    /// every call it takes, so on monocypher.c at -O2 that was a tenth of the compile,
+    /// tamnd/rucc#3052. Nothing was between an instruction and the one in front of it but the
+    /// instruction, so the names it would have given back are the names it has.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inst` is not in a block, or if `into` is the block it is in.
+    pub fn move_after(&mut self, inst: Inst, into: Block) {
+        let at = self.inst_layout[inst.index()];
+        let from = at.block.expect("the instruction is not in a block");
+        assert!(from != into, "the instructions are moved to another block");
+        let Some(first) = at.next else { return };
+        let last = self.blocks[from.index()].last;
+        self.inst_layout[inst.index()].next = None;
+        self.blocks[from.index()].last = Some(inst);
+        let mut moving = Some(first);
+        while let Some(moved) = moving {
+            self.inst_layout[moved.index()].block = Some(into);
+            moving = self.inst_layout[moved.index()].next;
+        }
+        let tail = self.blocks[into.index()].last;
+        self.inst_layout[first.index()].prev = tail;
+        match tail {
+            Some(tail) => self.inst_layout[tail.index()].next = Some(first),
+            None => self.blocks[into.index()].first = Some(first),
+        }
+        self.blocks[into.index()].last = last;
+    }
+
+    /// Takes an instruction out of its block, leaving it and its results in the tables.
+    ///
+    /// The instruction is not deleted, because deleting it would move every instruction after
+    /// it. A removed instruction is unreachable from any block and is dropped when the whole
+    /// function is.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is not in a block.
+    pub fn remove_inst(&mut self, inst: Inst) {
+        let at = self.inst_layout[inst.index()];
+        let block = at.block.expect("the instruction is not in a block");
+        match at.prev {
+            Some(prev) => self.inst_layout[prev.index()].next = at.next,
+            None => self.blocks[block.index()].first = at.next,
+        }
+        match at.next {
+            Some(next) => self.inst_layout[next.index()].prev = at.prev,
+            None => self.blocks[block.index()].last = at.prev,
+        }
+        self.inst_layout[inst.index()] = InstLayout::default();
+        // A start after this instruction is after wherever a pass that is moving it puts it, and
+        // after the instruction that was in front of it for a pass that is deleting it, which is the
+        // same place: nothing was between the two but this. Which of the two it is is not known
+        // yet, so the second answer is kept and [`Func::start_place`] asks in that order.
+        if self.body.anchors.contains(&inst) {
+            self.body.gone.insert(inst, (block, at.prev));
+            self.body.anchors.extend(at.prev);
+        }
+        // A declaration that held a result of this instruction was given it here, and once the
+        // instruction is gone nothing else says where that was. So it becomes a start at the same
+        // place, which is where the value it is renamed to, if it is, is the declaration's from.
+        // A pass that is moving the instruction puts it back, and then the names go back as they
+        // were, since a value computed somewhere else is still the declaration's from where it is
+        // computed.
+        let mut made = Vec::new();
+        for value in self.insts[inst.index()].results() {
+            for decl in self.held_from(value, block, at.prev) {
+                made.push((value, Start { decl, block, after: at.prev }));
+            }
+        }
+        if !made.is_empty() {
+            self.body.unplaced.insert(inst, made);
+        }
+    }
+
+    /// Whether a block is still one of this function's, which a block [`Func::remove_block`] took
+    /// out is not.
+    #[must_use]
+    pub fn is_placed(&self, block: Block) -> bool {
+        let data = &self.blocks[block.index()];
+        self.first_block == Some(block) || data.prev.is_some()
+    }
+
+    /// The block an instruction is in, or `None` if it has been removed from one.
+    #[must_use]
+    pub fn block_of(&self, inst: Inst) -> Option<Block> {
+        self.inst_layout[inst.index()].block
+    }
+
+    /// The instruction after this one in its block, if it is in one and is not the last.
+    #[must_use]
+    pub fn next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.inst_layout[inst.index()].next
+    }
+
+    /// The instruction before this one in its block, if it is in one and is not the first.
+    #[must_use]
+    pub fn prev_inst(&self, inst: Inst) -> Option<Inst> {
+        self.inst_layout[inst.index()].prev
+    }
+
+    /// Whether this call has an unwind edge, which is an `unwound` straight after it. See
+    /// [`Opcode::Unwound`]. A load, a store or a division can have one too, under
+    /// `-fnon-call-exceptions`, and the question is the same for them.
+    #[must_use]
+    pub fn unwinds_to_pad(&self, call: Inst) -> bool {
+        self.next_inst(call).is_some_and(|next| self[next].opcode == Opcode::Unwound)
+    }
+
+    /// The version of memory an instruction reads, when the function carries memory SSA.
+    ///
+    /// Document 09 of `spec/optimizer`. Memory is a value of type `mem`, it is the last operand
+    /// of every instruction that touches memory, and it is absent in a function that does not
+    /// carry it, which is what `-O0` and `-O1` produce. Absent means unordered with respect to
+    /// everything, so a reader that gets `None` asks the alias analysis directly.
+    ///
+    /// The operand is last rather than first on purpose. Every other operand keeps the position
+    /// it had, so a pass that reads the address of a load as `args[0]` goes on working whether
+    /// or not memory has been threaded, and the only code that has to know about the extra
+    /// operand is this accessor and the verifier.
+    #[must_use]
+    #[inline]
+    pub fn mem_in(&self, inst: Inst) -> Option<Value> {
+        let args = &self[self[inst].args];
+        args.last().copied().filter(|&arg| self[arg].ty.is_mem())
+    }
+
+    /// The version of memory an instruction produces, when it writes memory and the function
+    /// carries memory SSA.
+    ///
+    /// Last among the results, for the reason [`Func::mem_in`] is last among the operands. A
+    /// `load` never has one, because it reads memory without changing it.
+    ///
+    /// Nothing reads the last version in a function, and that means nothing. A store whose
+    /// memory result has no reader is not dead, and what decides whether it is dead is dead
+    /// store elimination, which is document 17's.
+    #[must_use]
+    #[inline]
+    pub fn mem_out(&self, inst: Inst) -> Option<Value> {
+        self[inst].results().last().filter(|&result| self[result].ty.is_mem())
+    }
+
+    /// A bulk copy or fill taken apart, or nothing where the instruction is not one.
+    ///
+    /// The length is an operand on a bulk operation over an object whose length the program works
+    /// out and is [`MemInfo::size`] on every other one. Both shapes are here so that a pass which
+    /// asks this cannot read the payload's number on the one where it is not the count: what it
+    /// gets is the operand or nothing, and nothing is the only answer that means the payload.
+    ///
+    /// Memory is the last operand where the function carries it, which is why the length is found
+    /// by position from the front rather than from the back.
+    #[must_use]
+    pub fn bulk(&self, inst: Inst) -> Option<Bulk> {
+        if !matches!(self[inst].opcode, Opcode::Memcpy | Opcode::Memmove | Opcode::Memset) {
+            return None;
+        }
+        let all = &self[self[inst].args];
+        let args = &all[..all.len() - usize::from(self.mem_in(inst).is_some())];
+        let [to, with, rest @ ..] = args else { return None };
+        Some(Bulk { to: *to, with: *with, length: rest.first().copied() })
+    }
+
+    /// Whether an instruction has been threaded onto the memory chain.
+    #[must_use]
+    #[inline]
+    pub fn carries_mem(&self, inst: Inst) -> bool {
+        self.mem_in(inst).is_some() || self.mem_out(inst).is_some()
+    }
+
+    /// The same instruction with a version of memory threaded through it.
+    ///
+    /// A result cannot be added to an instruction that already exists, because the results of one
+    /// are values next to each other and there is no room after them. So threading memory makes a
+    /// new instruction and the caller puts it where the old one was, forwards the old results to
+    /// the new ones, which are at the same positions, and deletes the old one. That is what memory
+    /// SSA construction does in one pass over the function.
+    ///
+    /// The new instruction is not in any block. Its results are what the old one produced, in the
+    /// same order, and then the new version of memory where the opcode writes memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `incoming` is not memory, if the instruction does not touch memory, or if it is
+    /// already on the chain. All three are a construction bug rather than bad input.
+    pub fn with_mem(&mut self, inst: Inst, incoming: Value) -> Inst {
+        assert!(self[incoming].ty.is_mem(), "the incoming version of memory is not memory");
+        assert!(self[inst].opcode.touches_memory(), "this does not touch memory");
+        assert!(self.mem_in(inst).is_none(), "this is already on the memory chain");
+        let data = self[inst];
+        let mut args = self[data.args].to_vec();
+        args.push(incoming);
+        let mut results: Vec<Type> = data.results().map(|result| self[result].ty).collect();
+        if data.opcode.writes_memory() {
+            results.push(Type::MEM);
+        }
+        let span = self.span(inst);
+        let args = self.push_values(&args);
+        self.create_inst(InstData { args, ..data }, &results, span)
+    }
+
+    /// The same instruction with the version of memory taken back off.
+    ///
+    /// The inverse of [`Func::with_mem`] and the same shape for the same reason: a result cannot be
+    /// taken off an instruction that already exists, so this makes a new one and the caller puts it
+    /// where the old one was, forwards the results it kept, which are at the same positions, and
+    /// deletes the old one. The memory result has no forwarding to do, because taking the chain off
+    /// is only ever done when nothing reads it any more.
+    ///
+    /// The new instruction is not in any block. Its results are what the old one produced without
+    /// the version of memory at the end of them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction is not on the chain, which is a caller that did not look first.
+    pub fn without_mem(&mut self, inst: Inst) -> Inst {
+        assert!(self.carries_mem(inst), "this is not on the memory chain");
+        let data = self[inst];
+        let mut args = self[data.args].to_vec();
+        if self.mem_in(inst).is_some() {
+            args.pop();
+        }
+        let results: Vec<Type> =
+            data.results().map(|result| self[result].ty).filter(|ty| !ty.is_mem()).collect();
+        let span = self.span(inst);
+        let args = self.push_values(&args);
+        self.create_inst(InstData { args, ..data }, &results, span)
+    }
+
+    /// Where an instruction came from in the source.
+    #[must_use]
+    pub fn span(&self, inst: Inst) -> Span {
+        self.inst_spans[inst.index()]
+    }
+
+    /// Where an instruction branches to, which is empty when it does not branch.
+    ///
+    /// This is the one place that knows a `switch` keeps its targets in a side table and
+    /// `asm goto` in another one, so nothing walking the CFG has to.
+    // Always, because the passes call it on every instruction to read the edge arguments, and
+    // the build kept it as a call. Almost every instruction is not a terminator, so in the caller
+    // it is one compare.
+    #[inline(always)]
+    pub fn successors(&self, inst: Inst) -> impl Iterator<Item = BlockCall> + use<'_> {
+        self.block_calls[self.target_list(inst).as_usize_range()].iter().copied()
+    }
+
+    /// Where a terminator keeps its targets, for something that edits them rather than reads
+    /// them.
+    ///
+    /// [`Func::successors`] is what walking the CFG wants. This is what recording an edge
+    /// wants, because an edge that will grow an argument later has to be named by its place in
+    /// the table rather than by the block it went to.
+    #[must_use]
+    #[inline(always)]
+    pub fn target_list(&self, inst: Inst) -> BlockCallList {
+        match self[inst].extra {
+            Extra::Targets(targets) => targets,
+            Extra::Switch(info) => self.body.switches[info.index()].targets,
+            Extra::Asm(info) => self.body.asms[info.index()].targets,
+            _ => BlockCallList::EMPTY,
+        }
+    }
+
+    // The pools.
+
+    /// Records a run of value operands.
+    pub fn push_values(&mut self, values: &[Value]) -> ValueList {
+        let start = Idx::from_usize(self.value_pool.len());
+        self.value_pool.extend_from_slice(values);
+        ValueList::new(start, Idx::from_usize(self.value_pool.len()))
+    }
+
+    /// Adds one value to the end of a run, giving back the run it became.
+    ///
+    /// The run grows in place when nothing has been put after it, which is the case while a
+    /// list is being built. Otherwise it is copied to the end, the old space is left behind, and
+    /// as much room again is left after the copy for it to grow into. Without the room, two runs
+    /// that grow by turns are copied on every turn. That is what building SSA does to the
+    /// branches into a join when many variables are read below it: each one gets a parameter,
+    /// so every edge in gets an argument, and a function with three thousand locals tested one
+    /// after another filled four billion slots and stopped.
+    ///
+    /// The room belongs to the run by where it ends, and taking a slot moves that on by one, so
+    /// a copy of the run kept from before cannot take the same slot. The room is filled with the
+    /// value just added, so that every slot in the pool is a value and [`Func::rewrite_all`] can
+    /// go over all of them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pool would hold more than four billion values.
+    pub fn append_arg(&mut self, list: ValueList, value: Value) -> ValueList {
+        let range = list.as_usize_range();
+        if range.end == self.value_pool.len() {
+            self.value_pool.push(value);
+            return ValueList::new(Idx::from_usize(range.start), Idx::from_usize(range.end + 1));
+        }
+        let raw = |at: usize| u32::try_from(at).expect("index out of range");
+        let end = raw(range.end);
+        if let Some(room) = self.body.room.remove(&end) {
+            self.value_pool[range.end] = value;
+            if end + 1 < room {
+                self.body.room.insert(end + 1, room);
+            }
+            return ValueList::new(Idx::from_usize(range.start), Idx::from_usize(range.end + 1));
+        }
+        let start = self.value_pool.len();
+        let len = range.len();
+        self.value_pool.extend_from_within(range);
+        self.value_pool.push(value);
+        let end = self.value_pool.len();
+        if len > 0 {
+            self.value_pool.resize(end + len + 1, value);
+            self.body.room.insert(raw(end), raw(self.value_pool.len()));
+        }
+        ValueList::new(Idx::from_usize(start), Idx::from_usize(end))
+    }
+
+    /// Replaces the values in a run, which is what substituting one definition for another is.
+    ///
+    /// A run is a run whether it is an instruction's operands or a branch's arguments, so this
+    /// is the whole of the rewriting a substitution has to do.
+    pub fn rewrite(&mut self, list: ValueList, mut with: impl FnMut(Value) -> Value) {
+        for value in &mut self.value_pool[list.as_usize_range()] {
+            *value = with(*value);
+        }
+    }
+
+    /// Replaces the values in every run there is, in one pass over where runs are kept rather than
+    /// a walk of the blocks.
+    ///
+    /// That is every run an instruction or a branch in the body reads, and also the runs of
+    /// instructions already taken out of their blocks, which nothing reads. So it is
+    /// [`Func::rewrite`] over the whole body for a caller that is not going to put one of those
+    /// back.
+    pub fn rewrite_all(&mut self, mut with: impl FnMut(Value) -> Value) {
+        for value in &mut self.value_pool {
+            *value = with(*value);
+        }
+    }
+
+    /// Records a run of branch targets.
+    pub fn push_block_calls(&mut self, calls: &[BlockCall]) -> BlockCallList {
+        let start = Idx::from_usize(self.block_calls.len());
+        self.block_calls.extend_from_slice(calls);
+        BlockCallList::new(start, Idx::from_usize(self.block_calls.len()))
+    }
+
+    /// Replaces one branch target, which is what redirecting an edge is.
+    pub fn set_block_call(&mut self, at: Idx<BlockCall>, call: BlockCall) {
+        self.block_calls[at.index()] = call;
+    }
+
+    /// Records a run of case values.
+    pub fn push_imms(&mut self, imms: &[Imm]) -> ImmList {
+        let start = Idx::from_usize(self.imms.len());
+        self.imms.extend_from_slice(imms);
+        ImmList::new(start, Idx::from_usize(self.imms.len()))
+    }
+
+    /// Records a constant.
+    pub fn add_imm(&mut self, imm: Imm) -> Idx<Imm> {
+        self.imms.push(imm);
+        Idx::from_usize(self.imms.len() - 1)
+    }
+
+    /// Records where each eightbyte of an object travelled.
+    pub fn push_slots(&mut self, slots: &[Slot]) -> SlotList {
+        let start = Idx::from_usize(self.body.slots.len());
+        self.body.slots.extend_from_slice(slots);
+        SlotList::new(start, Idx::from_usize(self.body.slots.len()))
+    }
+
+    /// Records an object read off a variable argument list.
+    pub fn add_va_object(&mut self, info: VaInfo) -> Idx<VaInfo> {
+        self.body.va_objects.push(info);
+        Idx::from_usize(self.body.va_objects.len() - 1)
+    }
+
+    /// Records what an access does.
+    pub fn add_mem(&mut self, info: MemInfo) -> Idx<MemInfo> {
+        self.mem.push(info);
+        Idx::from_usize(self.mem.len() - 1)
+    }
+
+    /// Raises the alignment a piece of memory has to at least `align`.
+    ///
+    /// For the lowering, which gives two locals one slot when their blocks never overlap and meets
+    /// the second one after the slot is made. Only ever raised, because an access built for the
+    /// alignment the memory had is still right at a larger one.
+    pub fn align_mem(&mut self, mem: Idx<MemInfo>, align: u32) {
+        let info = &mut self.mem[mem.index()];
+        info.align = info.align.max(align);
+    }
+
+    /// Records what the ABI asks of the arguments a call's signature does not name.
+    pub fn push_abis(&mut self, abis: &[Abi]) -> AbiList {
+        let start = Idx::from_usize(self.abis.len());
+        self.abis.extend_from_slice(abis);
+        AbiList::new(start, Idx::from_usize(self.abis.len()))
+    }
+
+    /// Records a call's callee and signature.
+    pub fn add_call(&mut self, info: CallInfo) -> Idx<CallInfo> {
+        self.calls.push(info);
+        Idx::from_usize(self.calls.len() - 1)
+    }
+
+    /// Says how many of a call's arguments each C argument became, in order.
+    pub fn set_arg_groups(&mut self, call: Inst, groups: Vec<u32>) {
+        self.body.arg_groups.insert(call, groups);
+    }
+
+    /// How many of a call's arguments each C argument became, where the lowering said.
+    ///
+    /// `None` for almost every call, since the lowering only says it for a call that the inliner
+    /// might forward the arguments of. See [`Func::set_arg_groups`].
+    #[must_use]
+    pub fn arg_groups(&self, call: Inst) -> Option<&[u32]> {
+        self.body.arg_groups.get(&call).map(Vec::as_slice)
+    }
+
+    /// Records a `switch`'s targets and case values.
+    pub fn add_switch(&mut self, info: SwitchInfo) -> Idx<SwitchInfo> {
+        self.body.switches.push(info);
+        Idx::from_usize(self.body.switches.len() - 1)
+    }
+
+    /// Records an inline assembly instruction's template and constraints.
+    pub fn add_asm(&mut self, info: AsmInfo) -> Idx<AsmInfo> {
+        self.body.asms.push(info);
+        Idx::from_usize(self.body.asms.len() - 1)
+    }
+
+    /// How many values, instructions and blocks there are, for a reader that wants to size
+    /// something by them.
+    #[must_use]
+    pub fn counts(&self) -> Counts {
+        Counts { values: self.values.len(), insts: self.insts.len(), blocks: self.blocks.len() }
+    }
+
+    /// What is known about a value, which is nothing at all unless somebody said otherwise.
+    ///
+    /// Section 6.2.3 of `spec/safe-memory/06-instrumentation.md`. Facts are in a side table and
+    /// not in the value, so a function nobody has said anything about carries no facts and is
+    /// the same size it was before facts existed.
+    #[must_use]
+    pub fn facts(&self, value: Value) -> Facts {
+        match self.body.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => self.body.facts[at].1,
+            Err(_) => Facts::NONE,
+        }
+    }
+
+    /// Says what is known about a value, replacing whatever was known before.
+    ///
+    /// Setting [`Facts::NONE`] takes the value back out of the table, which is what keeps the
+    /// table empty in a function that has had facts put on and then taken off again.
+    pub fn set_facts(&mut self, value: Value, facts: Facts) {
+        let found = self.body.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw());
+        match (found, facts.is_empty()) {
+            (Ok(at), true) => drop(self.body.facts.remove(at)),
+            (Ok(at), false) => self.body.facts[at].1 = facts,
+            (Err(_), true) => {}
+            (Err(at), false) => self.body.facts.insert(at, (value, facts)),
+        }
+    }
+
+    /// Every value something is known about, in value order.
+    pub fn known(&self) -> impl Iterator<Item = (Value, Facts)> + '_ {
+        self.body.facts.iter().copied()
+    }
+
+    /// Records that an instruction computes the same value as the one that does, for instruction
+    /// selection to choose from.
+    ///
+    /// Section 12.3 of `spec/optimizer/12-egraph.md` names this the classes kept alive into
+    /// selection. The e-graph arm of the rewriter puts one form of each value in the function, and
+    /// the other members of its class are instructions nothing reads any more, which `dce` takes
+    /// out. This keeps them where selection can ask for them. Nothing reads one as an instruction
+    /// of the function, and neither the verifier nor the text sees the table.
+    ///
+    /// Says whether the form is new, since the same one may be found from more than one value.
+    pub fn add_form(&mut self, value: Value, form: Inst) -> bool {
+        let forms = self.body.forms.entry(value).or_default();
+        let new = !forms.contains(&form);
+        if new {
+            forms.push(form);
+        }
+        new
+    }
+
+    /// The instructions recorded as computing the value that may still stand in for it.
+    ///
+    /// A form stands in when it has the value's type, writes one result and no memory, and reads
+    /// nothing but constants and what the instruction that computes the value reads. Those operands
+    /// are in registers where the value is computed, so a reader that takes the form rather than
+    /// the value reads nothing that was not going to be there anyway. It is also what keeps a form
+    /// right after a later pass changed the function: a pass that renames what the value is
+    /// computed from or retypes the value leaves a form that no longer passes, and it is left out
+    /// rather than believed.
+    pub fn forms(&self, value: Value) -> impl Iterator<Item = Inst> + use<'_> {
+        let def = match self.values[value.index()].def {
+            Def::Result { inst, .. } => Some(inst),
+            Def::Param { .. } => None,
+        };
+        let recorded = def.and_then(|_| self.body.forms.get(&value));
+        recorded
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&form| def.is_some_and(|def| self.stands_in(value, def, form)))
+    }
+
+    /// Whether a recorded form of a value may be read in its place, per [`Func::forms`].
+    fn stands_in(&self, value: Value, def: Inst, form: Inst) -> bool {
+        let data = &self.insts[form.index()];
+        if form == def || data.results != 1 || self.carries_mem(form) {
+            return false;
+        }
+        let Some(result) = data.first_result else { return false };
+        if self.values[result.index()].ty != self.values[value.index()].ty {
+            return false;
+        }
+        let reads = &self[self.insts[def.index()].args];
+        let constant = |arg: Value| match self.values[arg.index()].def {
+            Def::Result { inst, .. } => self.insts[inst.index()].opcode == Opcode::IConst,
+            Def::Param { .. } => false,
+        };
+        self[data.args].iter().all(|&arg| reads.contains(&arg) || constant(arg))
+    }
+
+    /// Gives a block a name of its own, which is how an image written before the program runs
+    /// says it holds the address of a place inside this function.
+    ///
+    /// What asks for this is GNU's address of a label in the initializer of an object with static
+    /// storage duration, which is how every threaded interpreter builds its dispatch table. The
+    /// address a `lea` produces needs none of this, because both ends of that distance are in the
+    /// same section and the object writer works it out for itself. An image is the other case: it
+    /// is in another section, so what it holds is a relocation, and a relocation names a symbol.
+    ///
+    /// One name per block. Two labels on the same statement are two labels and one block, and the
+    /// image asks for a name rather than for a particular one, so the second ask keeps the first
+    /// answer. Nothing outside this table ever sees the name, which is why it may be anything the
+    /// object format lets a local symbol be called.
+    pub fn name_block(&mut self, block: Block, name: Symbol) {
+        let found = self.body.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw());
+        if let Err(at) = found {
+            self.body.labels.insert(at, (block, name));
+        }
+    }
+
+    /// The name a block was given, or `None` for a block nothing took the address of.
+    #[must_use]
+    pub fn block_name(&self, block: Block) -> Option<Symbol> {
+        match self.body.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => Some(self.body.labels[at].1),
+            Err(_) => None,
+        }
+    }
+
+    /// Every block that has a name, in block order.
+    pub fn named_blocks(&self) -> impl Iterator<Item = (Block, Symbol)> + '_ {
+        self.body.labels.iter().copied()
+    }
+
+    /// Says which declaration in the source a piece of memory was made for, which is how a build
+    /// that was asked for debugging information ends up able to print a local by its name.
+    ///
+    /// The number is whatever the front end counts declarations by and means nothing here. This
+    /// crate sits below the one that has a type for it, and inventing a second name for the same
+    /// thing so that it could be spelled out here would buy nothing: nothing between the front end
+    /// that writes the number and the back end that hands it back reads it.
+    ///
+    /// On the memory rather than on the `alloca` that asks for it because the memory is what
+    /// survives. An instruction is rewritten, moved and renumbered by every pass it goes through,
+    /// and [`MemInfo`] is appended to and never reordered, so the number an access carries today is
+    /// the number it carries at the end.
+    ///
+    /// A piece of memory can be more than one declaration. The lowering gives two locals in scopes
+    /// that never overlap one slot when their addresses are taken, and each of them is still a
+    /// name a debugger may ask about. They are kept in the order they were asked for, and asking
+    /// twice for the same one records it once.
+    pub fn declare_mem(&mut self, mem: Idx<MemInfo>, decl: u32) {
+        let end = self.body.mem_decls.partition_point(|&(at, _)| at.raw() <= mem.raw());
+        let start = self.body.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        if !self.body.mem_decls[start..end].iter().any(|&(_, known)| known == decl) {
+            self.body.mem_decls.insert(end, (mem, decl));
+        }
+    }
+
+    /// The declarations a piece of memory was made for, which is none for memory no declaration in
+    /// the source asked for, which is every temporary and every spill.
+    pub fn mem_decls(&self, mem: Idx<MemInfo>) -> impl Iterator<Item = u32> + '_ {
+        let start = self.body.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        self.body.mem_decls[start..]
+            .iter()
+            .take_while(move |&&(at, _)| at == mem)
+            .map(|&(_, decl)| decl)
+    }
+
+    /// Says which declaration in the source a value is a value of, which is the other half of
+    /// [`Func::declare_mem`].
+    ///
+    /// A local whose address is never taken has no memory to put the number on, because nothing
+    /// asked for any, and what holds it is a value the SSA construction worked out.
+    ///
+    /// One declaration is many values. Every assignment to it makes one, and so does every block
+    /// parameter that collects two of them where control joins. One value can be more than one
+    /// declaration as well, because a pass that finds two values equal points the readers of one at
+    /// the other, and both names then mean the one that is left. Neither of those is a mistake to
+    /// be ruled out here, so this is a list of pairs rather than a map in either direction.
+    ///
+    /// What the pairs do not say is which of a declaration's values it holds at a given address,
+    /// and nothing in this crate can say it. That is a question about where the definitions ended
+    /// up in the code that came out and how long each of them survived there, which the back end
+    /// knows and the IR does not.
+    pub fn declare_value(&mut self, value: Value, decl: u32) {
+        let key = (value.raw(), decl);
+        let found =
+            self.body.value_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        if let Err(at) = found {
+            self.body.value_decls.insert(at, (value, decl));
+        }
+    }
+
+    /// [`Func::declare_value`] for many pairs at once, which is what SSA construction has at the
+    /// end. One at a time is a shift of the list for each, and a function with thousands of
+    /// variables live across thousands of joins has millions of pairs.
+    pub fn declare_values(&mut self, pairs: impl IntoIterator<Item = (Value, u32)>) {
+        let decls = &mut self.body.value_decls;
+        decls.extend(pairs);
+        decls.sort_unstable_by_key(|&(value, decl)| (value.raw(), decl));
+        decls.dedup();
+    }
+
+    /// Whether that value is the one value the declaration is ever given, which is a variable the
+    /// program does not assign after it gets its first value.
+    ///
+    /// A value a pass took out still counts, because the declaration was given it all the same. So
+    /// does a value that went to the declaration from a place, through [`Func::rename_value`]. A
+    /// parameter that is here has the value it arrived with at every address of the function.
+    pub fn only_value(&self, decl: u32, value: Value) -> bool {
+        let unplaced = self.body.unplaced.values().flatten();
+        self.body.value_decls.iter().all(|&(held, at)| at != decl || held == value)
+            && self
+                .body
+                .value_starts
+                .iter()
+                .chain(unplaced)
+                .all(|&(held, start)| start.decl != decl || held == value)
+    }
+
+    /// Every declaration a value is a value of, in the order the front end numbered them.
+    ///
+    /// Empty for a value no declaration in the source is behind, which is most of them: every
+    /// temporary an expression needed, every address computed on the way to a member, and every
+    /// result of a rule the peephole applied.
+    pub fn value_decls(&self, value: Value) -> impl Iterator<Item = u32> + '_ {
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.body.value_decls[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == value)
+            .map(|&(_, decl)| decl)
+    }
+
+    /// Says which declaration in the source lives in the bytes a parameter points at, for a
+    /// parameter that is the address of an object the caller left in the argument area.
+    ///
+    /// The third way a declaration can be somewhere, next to [`Func::declare_mem`] and
+    /// [`Func::declare_value`]. A structure passed by value whose bytes are already in this
+    /// function's argument area is used where it arrived rather than copied into a slot of its
+    /// own, so there is no memory of this function's to put the number on, and the value the
+    /// parameter is would be the wrong thing to name: it is the address of the declaration and
+    /// not the declaration. The back end knows how far up the argument area the bytes are and
+    /// turns the pair into a place in the frame.
+    pub fn declare_param(&mut self, param: Value, decl: u32) {
+        let key = (param.raw(), decl);
+        let found =
+            self.body.param_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        if let Err(at) = found {
+            self.body.param_decls.insert(at, (param, decl));
+        }
+    }
+
+    /// Every declaration that lives in the bytes a parameter points at, which is none for every
+    /// parameter but the ones [`Func::declare_param`] was told about.
+    pub fn param_decls(&self, param: Value) -> impl Iterator<Item = u32> + '_ {
+        let at = self.body.param_decls.partition_point(|&(held, _)| held.raw() < param.raw());
+        self.body.param_decls[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == param)
+            .map(|&(_, decl)| decl)
+    }
+
+    /// Moves every declaration one value is a value of onto another value.
+    ///
+    /// What a pass that found two values equal does about the names. It points the readers of one
+    /// at the other and the one it pointed away from is about to be nobody's, so the names go with
+    /// the readers: the declaration still holds the value it held, and the value is now spelled the
+    /// other way. Where the value going away is still defined, the declarations that held it are
+    /// turned into starts at that definition first, since the value left may have been computed
+    /// earlier and the declaration was not given it any sooner for that. A pass that deletes a
+    /// value without giving its readers somewhere else to look is
+    /// a pass that deleted something nothing reads, and a declaration whose value went that way is
+    /// one the back end will have nothing to say about over those addresses, which is the right
+    /// answer rather than a lost one.
+    pub fn rename_value(&mut self, from: Value, to: Value) {
+        if from == to {
+            return;
+        }
+        // The value left is usually one computed earlier, and a declaration that held the one going
+        // away was given it where that one was computed and not before. See [`Func::held_from`].
+        match self.values[from.index()].def {
+            Def::Result { inst, .. } => {
+                let at = self.inst_layout[inst.index()];
+                if let Some(block) = at.block {
+                    self.held_from(from, block, at.prev);
+                }
+            }
+            Def::Param { block, index } => {
+                let param = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.blocks[block.index()].params.get(index).copied());
+                if param == Some(from) {
+                    self.held_from(from, block, None);
+                }
+            }
+        }
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.body.value_decls[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<u32> = self.body.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+        for decl in moving {
+            self.declare_value(to, decl);
+        }
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.body.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<Start> =
+            self.body.value_starts.drain(at..end).map(|(_, start)| start).collect();
+        for start in moving {
+            self.declare_value_from(to, start);
+        }
+    }
+
+    /// Says that a declaration holds a value from a point in a block onward, rather than from
+    /// where the value was computed.
+    ///
+    /// What `int m = a;` is. The assignment computes nothing, so the value `m` is given is one
+    /// `a` already holds, and naming it with [`Func::declare_value`] would say `m` held it from
+    /// wherever `a` was written. This says where the assignment was instead, as the instruction in
+    /// front of it, or `None` for one at the top of the block.
+    ///
+    /// A pass that moves that instruction moves the start with it, and one that deletes it leaves
+    /// the start after the one that was in front of it, which is the same place. A block that is
+    /// taken out takes its starts with it, and the back end reads those as saying nothing rather
+    /// than guess. See [`Func::start_place`].
+    pub fn declare_value_from(&mut self, value: Value, start: Start) {
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() <= value.raw());
+        if !self.body.value_starts[..at]
+            .iter()
+            .rev()
+            .take_while(|&&(held, _)| held == value)
+            .any(|&(_, have)| have == start)
+        {
+            self.body.value_starts.insert(at, (value, start));
+            self.body.anchors.extend(start.after);
+        }
+    }
+
+    /// Every place a declaration starts holding a value part of the way through, in the order they
+    /// were said. See [`Func::declare_value_from`].
+    pub fn value_starts(&self, value: Value) -> impl Iterator<Item = Start> + '_ {
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.body.value_starts[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == value)
+            .map(|&(_, start)| start)
+    }
+
+    /// Hands some of the starts on one value over to another, for a pass that gives part of the
+    /// function a value of its own in place of one it read before.
+    ///
+    /// The starts are the ones in `which` that `from` has, and the rest stay where they are. A
+    /// start is a place in the function, so one in the part that now reads `into` is a place the
+    /// declaration was given `into`, and one left on `from` there would say the declaration holds
+    /// whatever `from` turns into later.
+    pub fn move_starts(&mut self, from: Value, into: Value, which: &[Start]) {
+        if from == into {
+            return;
+        }
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.body.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let (moving, staying): (Vec<Start>, Vec<Start>) = self
+            .body
+            .value_starts
+            .drain(at..end)
+            .map(|(_, start)| start)
+            .partition(|start| which.contains(start));
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        self.body.value_starts.splice(at..at, staying.into_iter().map(|start| (from, start)));
+        for start in moving {
+            self.declare_value_from(into, start);
+        }
+    }
+
+    /// Turns every declaration that holds a value from where it was computed into one that holds it
+    /// from a place, for a value whose definition is about to stop saying where that was.
+    ///
+    /// A pass that takes out the instruction that computed a value, drops the block parameter it
+    /// arrived as, or points its readers at another value, leaves the declarations behind it with
+    /// nothing that says where they were given it. The place is the same place, the instruction in
+    /// front of the definition or the top of the block, so what the declaration holds and from
+    /// where is unchanged, and it now survives the value being renamed to one computed earlier.
+    fn held_from(&mut self, value: Value, block: Block, after: Option<Inst>) -> Vec<u32> {
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        let end =
+            at + self.body.value_decls[at..].iter().take_while(|&&(held, _)| held == value).count();
+        let moving: Vec<u32> = self.body.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+        for &decl in &moving {
+            self.declare_value_from(value, Start { decl, block, after });
+        }
+        moving
+    }
+
+    /// Turns the starts [`Func::remove_inst`] made for an instruction back into names, now that it
+    /// is in a block again.
+    fn placed(&mut self, inst: Inst) {
+        if self.body.unplaced.is_empty() {
+            return;
+        }
+        let Some(made) = self.body.unplaced.remove(&inst) else { return };
+        for (value, start) in made {
+            let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+            let found = self.body.value_starts[at..]
+                .iter()
+                .take_while(|&&(held, _)| held == value)
+                .position(|&(_, have)| have == start);
+            // Gone when a pass renamed the value away before putting the instruction back, and
+            // then the name went with the readers and is not this value's to have back.
+            if let Some(found) = found {
+                self.body.value_starts.remove(at + found);
+                self.declare_value(value, start.decl);
+            }
+        }
+    }
+
+    /// Where a start is now, as the block and the instruction it is after, or `None` for one in a
+    /// block a pass took out.
+    ///
+    /// The instruction it is after says, where it is still in a block, since a pass that moves
+    /// that instruction moves the assignment with it. One a pass deleted is where it was, which
+    /// is after the instruction that was in front of it then, and so on back to one that is still
+    /// there or to the top of the block. A start at the top of a block is there for as long as
+    /// the block is in the function.
+    #[must_use]
+    pub fn start_place(&self, start: Start) -> Option<(Block, Option<Inst>)> {
+        let (mut block, mut after) = (start.block, start.after);
+        loop {
+            let Some(inst) = after else {
+                return self.is_placed(block).then_some((block, None));
+            };
+            if let Some(now) = self.block_of(inst) {
+                return Some((now, Some(inst)));
+            }
+            (block, after) = *self.body.gone.get(&inst)?;
+        }
+    }
+
+    /// Moves the starts at the top of one block to after an instruction in another, for a pass
+    /// that is emptying the first into the second and taking it out.
+    ///
+    /// The top of the block it empties is the place right after `after` once the instructions
+    /// have gone in behind it, or the top of `into` for `None`, and nothing else can say that,
+    /// because the block the start was in is about to stop being one.
+    pub fn carry_starts(&mut self, from: Block, into: Block, after: Option<Inst>) {
+        let body = &mut *self.body;
+        let unplaced = body.unplaced.values_mut().flatten().map(|(_, start)| start);
+        for start in body.value_starts.iter_mut().map(|(_, start)| start).chain(unplaced) {
+            if start.block == from && start.after.is_none() {
+                *start = Start { block: into, after, ..*start };
+            }
+        }
+        for place in self.body.gone.values_mut() {
+            if *place == (from, None) {
+                *place = (into, after);
+            }
+        }
+        self.body.anchors.extend(after);
+    }
+
+    fn add_value(&mut self, data: ValueData) -> Value {
+        self.values.push(data);
+        Idx::from_usize(self.values.len() - 1)
+    }
+}
+
+/// Where a declaration starts holding a value, when that is not where the value was computed.
+///
+/// The block and the instruction in front of the assignment, because an assignment that computes
+/// nothing is not an instruction and the one in front of it is the nearest thing that is. The block
+/// is carried for a start at the top of one, and for the rest it is where the start was made, since
+/// a pass can move the instruction to another block. [`Func::start_place`] says where it is now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Start {
+    /// The declaration, in whatever numbering the front end gave it.
+    pub decl: u32,
+    /// The block the assignment is in.
+    pub block: Block,
+    /// The instruction in front of the assignment, or `None` for one at the top of the block.
+    pub after: Option<Inst>,
+}
+
+/// How many of each thing a function holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Values, including the ones whose defining instruction has been removed.
+    pub values: usize,
+    /// Instructions, including the ones that have been removed from their block.
+    pub insts: usize,
+    /// Blocks.
+    pub blocks: usize,
+}
+
+// Reading is indexing. There is one of these for each handle, so `func[inst]` and `func[value]`
+// and `&func[args]` all work and none of them needs a method whose name says which table.
+impl Index<Value> for Func {
+    type Output = ValueData;
+
+    fn index(&self, value: Value) -> &ValueData {
+        &self.values[value.index()]
+    }
+}
+
+impl Index<Inst> for Func {
+    type Output = InstData;
+
+    fn index(&self, inst: Inst) -> &InstData {
+        &self.insts[inst.index()]
+    }
+}
+
+impl IndexMut<Inst> for Func {
+    fn index_mut(&mut self, inst: Inst) -> &mut InstData {
+        &mut self.insts[inst.index()]
+    }
+}
+
+impl Index<Block> for Func {
+    type Output = BlockData;
+
+    fn index(&self, block: Block) -> &BlockData {
+        &self.blocks[block.index()]
+    }
+}
+
+impl Index<Sig> for Func {
+    type Output = Signature;
+
+    fn index(&self, sig: Sig) -> &Signature {
+        &self.signatures[sig.index()]
+    }
+}
+
+impl Index<ValueList> for Func {
+    type Output = [Value];
+
+    fn index(&self, list: ValueList) -> &[Value] {
+        &self.value_pool[list.as_usize_range()]
+    }
+}
+
+impl Index<BlockCallList> for Func {
+    type Output = [BlockCall];
+
+    fn index(&self, list: BlockCallList) -> &[BlockCall] {
+        &self.block_calls[list.as_usize_range()]
+    }
+}
+
+impl Index<Idx<BlockCall>> for Func {
+    type Output = BlockCall;
+
+    fn index(&self, at: Idx<BlockCall>) -> &BlockCall {
+        &self.block_calls[at.index()]
+    }
+}
+
+impl Index<ImmList> for Func {
+    type Output = [Imm];
+
+    fn index(&self, list: ImmList) -> &[Imm] {
+        &self.imms[list.as_usize_range()]
+    }
+}
+
+impl Index<Idx<Imm>> for Func {
+    type Output = Imm;
+
+    fn index(&self, at: Idx<Imm>) -> &Imm {
+        &self.imms[at.index()]
+    }
+}
+
+impl Index<Idx<MemInfo>> for Func {
+    type Output = MemInfo;
+
+    fn index(&self, at: Idx<MemInfo>) -> &MemInfo {
+        &self.mem[at.index()]
+    }
+}
+
+impl Index<AbiList> for Func {
+    type Output = [Abi];
+
+    fn index(&self, list: AbiList) -> &[Abi] {
+        &self.abis[list.as_usize_range()]
+    }
+}
+
+impl Index<SlotList> for Func {
+    type Output = [Slot];
+
+    fn index(&self, list: SlotList) -> &[Slot] {
+        &self.body.slots[list.as_usize_range()]
+    }
+}
+
+impl Index<Idx<VaInfo>> for Func {
+    type Output = VaInfo;
+
+    fn index(&self, at: Idx<VaInfo>) -> &VaInfo {
+        &self.body.va_objects[at.index()]
+    }
+}
+
+impl Index<Idx<CallInfo>> for Func {
+    type Output = CallInfo;
+
+    fn index(&self, at: Idx<CallInfo>) -> &CallInfo {
+        &self.calls[at.index()]
+    }
+}
+
+impl Index<Idx<SwitchInfo>> for Func {
+    type Output = SwitchInfo;
+
+    fn index(&self, at: Idx<SwitchInfo>) -> &SwitchInfo {
+        &self.body.switches[at.index()]
+    }
+}
+
+impl Index<Idx<AsmInfo>> for Func {
+    type Output = AsmInfo;
+
+    fn index(&self, at: Idx<AsmInfo>) -> &AsmInfo {
+        &self.body.asms[at.index()]
+    }
+}
+
+/// A cursor that appends to the end of one block.
+///
+/// This is the shape lowering wants: it works on one block at a time, it appends, and it wants
+/// the value back so it can use it in the next instruction. Everything here is a thin wrapper
+/// over [`Func::create_inst`] and [`Func::append_inst`], and anything the wrappers do not
+/// cover is done with those two directly.
+#[derive(Debug)]
+pub struct Builder<'a> {
+    func: &'a mut Func,
+    block: Block,
+    span: Span,
+}
+
+impl<'a> Builder<'a> {
+    /// A cursor appending to that block, with every instruction taking that source location.
+    pub fn new(func: &'a mut Func, block: Block) -> Self {
+        Self { func, block, span: Span::DUMMY }
+    }
+
+    /// The same cursor, with a source location for the instructions after this.
+    #[must_use]
+    pub fn at(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
+
+    /// Sets the source location for the instructions after this.
+    pub fn set_span(&mut self, span: Span) {
+        self.span = span;
+    }
+
+    /// The function being built.
+    pub fn func(&mut self) -> &mut Func {
+        self.func
+    }
+
+    /// The block being appended to.
+    #[must_use]
+    pub fn block(&self) -> Block {
+        self.block
+    }
+
+    /// Appends an instruction as it is, and gives back its results.
+    pub fn inst(&mut self, data: InstData, results: &[Type]) -> Inst {
+        let inst = self.func.create_inst(data, results, self.span);
+        self.func.append_inst(self.block, inst);
+        inst
+    }
+
+    /// The one value an instruction produces.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it did not produce exactly one.
+    pub fn value(&mut self, data: InstData, ty: Type) -> Value {
+        let inst = self.inst(data, &[ty]);
+        self.func[inst].first_result.expect("one result was asked for")
+    }
+
+    /// An integer constant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ty` is not an integer type.
+    pub fn iconst(&mut self, ty: Type, value: i128) -> Value {
+        let imm = self.func.add_imm(Imm::int(value, ty.lane()));
+        self.value(InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
+    }
+
+    /// A floating point constant, given as the bits of its format.
+    pub fn fconst(&mut self, ty: Type, bits: u128) -> Value {
+        let imm = self.func.add_imm(Imm::from_bits(bits));
+        self.value(InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::FConst) }, ty)
+    }
+
+    /// A two-operand instruction whose result has the type of its operands.
+    pub fn binary(&mut self, opcode: Opcode, lhs: Value, rhs: Value, flags: Flags) -> Value {
+        let ty = self.func[lhs].ty;
+        let args = self.func.push_values(&[lhs, rhs]);
+        self.value(InstData { args, flags, ..InstData::new(opcode) }, ty)
+    }
+
+    /// Arithmetic that answers with both the wrapped result and whether it wrapped.
+    ///
+    /// The one shape in the IR whose result is two things, which is why it has a builder of its
+    /// own rather than going through [`Builder::value`]. The first result is the answer in the
+    /// type of the operands, the same as the ordinary form of the same arithmetic would give, and
+    /// the second is one `i1` per lane saying whether the exact answer needed more bits than that
+    /// type has.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the instruction did not produce exactly the two results it was created with,
+    /// which is the same promise [`Builder::value`] makes about its one.
+    pub fn checked(&mut self, opcode: Opcode, lhs: Value, rhs: Value) -> (Value, Value) {
+        let ty = self.func[lhs].ty;
+        let args = self.func.push_values(&[lhs, rhs]);
+        let results = [ty, ty.with_lane(Type::I1)];
+        let inst = self.inst(InstData { args, ..InstData::new(opcode) }, &results);
+        let mut answers = self.func[inst].results();
+        let value = answers.next().expect("two results were asked for");
+        let wrapped = answers.next().expect("two results were asked for");
+        (value, wrapped)
+    }
+
+    /// A one-operand instruction whose result has the type given.
+    pub fn unary(&mut self, opcode: Opcode, arg: Value, ty: Type) -> Value {
+        let args = self.func.push_values(&[arg]);
+        self.value(InstData { args, ..InstData::new(opcode) }, ty)
+    }
+
+    /// An integer comparison, which produces one `i1` per lane.
+    pub fn icmp(&mut self, pred: IntPred, lhs: Value, rhs: Value) -> Value {
+        let ty = self.func[lhs].ty.with_lane(Type::I1);
+        let args = self.func.push_values(&[lhs, rhs]);
+        self.value(
+            InstData { args, extra: Extra::IntPred(pred), ..InstData::new(Opcode::ICmp) },
+            ty,
+        )
+    }
+
+    /// One of two values, chosen by a bit, which is what a diamond becomes when it stops being one.
+    ///
+    /// The type comes from the arms rather than from the bit, and the two arms have to agree, which
+    /// the verifier checks. Both are evaluated, so the caller owes the argument that evaluating the
+    /// one that is not chosen is harmless.
+    pub fn select(&mut self, cond: Value, then: Value, other: Value) -> Value {
+        let ty = self.func[then].ty;
+        let args = self.func.push_values(&[cond, then, other]);
+        self.value(InstData { args, ..InstData::new(Opcode::Select) }, ty)
+    }
+
+    /// One lane of a vector.
+    pub fn extract_lane(&mut self, vector: Value, lane: u8) -> Value {
+        let ty = self.func[vector].ty.lane();
+        let args = self.func.push_values(&[vector]);
+        self.value(
+            InstData { args, extra: Extra::Lane(lane), ..InstData::new(Opcode::ExtractLane) },
+            ty,
+        )
+    }
+
+    /// The vector with one lane replaced by a value of the lane's type.
+    pub fn insert_lane(&mut self, vector: Value, value: Value, lane: u8) -> Value {
+        let ty = self.func[vector].ty;
+        let args = self.func.push_values(&[vector, value]);
+        self.value(
+            InstData { args, extra: Extra::Lane(lane), ..InstData::new(Opcode::InsertLane) },
+            ty,
+        )
+    }
+
+    /// A vector of the lanes of another in the order `picks` names them, as many as it names.
+    ///
+    /// # Panics
+    ///
+    /// Never, since a [`Shuffle`] has at most eight lanes.
+    pub fn shuffle(&mut self, vector: Value, picks: Shuffle) -> Value {
+        let from = self.func[vector].ty;
+        let lanes = u32::try_from(picks.len()).expect("a shuffle has at most eight lanes");
+        let ty = Type::vector(from.lane(), lanes);
+        let args = self.func.push_values(&[vector]);
+        self.value(
+            InstData { args, extra: Extra::Shuffle(picks), ..InstData::new(Opcode::Shuffle) },
+            ty,
+        )
+    }
+
+    /// A floating point comparison, which produces one `i1` per lane.
+    pub fn fcmp(&mut self, pred: FloatPred, lhs: Value, rhs: Value, flags: Flags) -> Value {
+        let ty = self.func[lhs].ty.with_lane(Type::I1);
+        let args = self.func.push_values(&[lhs, rhs]);
+        self.value(
+            InstData { args, flags, extra: Extra::FloatPred(pred), ..InstData::new(Opcode::FCmp) },
+            ty,
+        )
+    }
+
+    /// Memory as the function found it, which is where a memory SSA chain starts.
+    ///
+    /// It belongs at the top of the entry block and there is one of them in a function.
+    pub fn mem_entry(&mut self) -> Value {
+        self.value(InstData::new(Opcode::MemEntry), Type::MEM)
+    }
+
+    /// A read of that type from that address.
+    pub fn load(&mut self, ty: Type, addr: Value, info: MemInfo, flags: Flags) -> Value {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr]);
+        self.value(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) },
+            ty,
+        )
+    }
+
+    /// A write of a value to an address.
+    pub fn store(&mut self, value: Value, addr: Value, info: MemInfo, flags: Flags) -> Inst {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[value, addr]);
+        self.inst(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) },
+            &[],
+        )
+    }
+
+    /// The same read, ordered.
+    ///
+    /// A separate opcode rather than an ordering on [`Builder::load`], because the two are not the
+    /// same thing to anything that moves code: a plain load may be moved, duplicated and dropped,
+    /// and this one may not. The IR verifier is what keeps the pair honest, since it refuses an
+    /// ordering on a plain access and refuses an unordered one here, so no pass has to remember to
+    /// check the payload before deciding a load is free.
+    pub fn atomic_load(&mut self, ty: Type, addr: Value, info: MemInfo, flags: Flags) -> Value {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr]);
+        self.value(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::AtomicLoad) },
+            ty,
+        )
+    }
+
+    /// The same write, ordered.
+    pub fn atomic_store(&mut self, value: Value, addr: Value, info: MemInfo, flags: Flags) -> Inst {
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[value, addr]);
+        self.inst(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::AtomicStore) },
+            &[],
+        )
+    }
+
+    /// A compare and exchange, which answers what it found and whether that was what was expected.
+    ///
+    /// Two values out of one instruction, in that order, because a caller that had to ask twice
+    /// would be asking about two different moments. The type of the first is the type of the value
+    /// expected, which is what says how wide the access is, and the type of the second is
+    /// [`Type::I1`] whatever the width was.
+    pub fn cmpxchg(
+        &mut self,
+        addr: Value,
+        expected: Value,
+        desired: Value,
+        info: MemInfo,
+        flags: Flags,
+    ) -> (Value, Value) {
+        let ty = self.func[expected].ty;
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr, expected, desired]);
+        let inst = self.inst(
+            InstData { args, flags, extra: Extra::Mem(mem), ..InstData::new(Opcode::Cmpxchg) },
+            &[ty, Type::I1],
+        );
+        let results: Vec<Value> = self.func[inst].results().collect();
+        let [old, exchanged] = results[..] else { unreachable!("two results were asked for") };
+        (old, exchanged)
+    }
+
+    /// A read, an operation on what was read, and a write back, with nothing able to get between
+    /// them.
+    ///
+    /// The value it answers is the one that was there before, which is the convention every machine
+    /// and every language in this area uses, and a caller that wanted the value afterwards works it
+    /// out from the two it already has rather than asking for a second flavour of the instruction.
+    /// The type of that value is the type of the operand, which is what says how wide the access is.
+    pub fn atomic_rmw(
+        &mut self,
+        op: RmwOp,
+        addr: Value,
+        operand: Value,
+        info: MemInfo,
+        flags: Flags,
+    ) -> Value {
+        let ty = self.func[operand].ty;
+        let mem = self.func.add_mem(info);
+        let args = self.func.push_values(&[addr, operand]);
+        self.value(
+            InstData {
+                args,
+                flags,
+                extra: Extra::Rmw(op, mem),
+                ..InstData::new(Opcode::AtomicRmw)
+            },
+            ty,
+        )
+    }
+
+    /// A barrier, which touches no address and is its ordering and nothing else.
+    pub fn fence(&mut self, order: MemOrder) -> Inst {
+        self.inst(InstData { extra: Extra::Order(order), ..InstData::new(Opcode::Fence) }, &[])
+    }
+
+    /// A hint that an address is about to be read or written, which produces nothing.
+    ///
+    /// It reads the address rather than the memory at it, in the sense that nothing after this
+    /// sees anything it did not see before. What it is allowed to do is take time, so it is on the
+    /// memory chain anyway: a prefetch of an address a store is about to write to has to stay on
+    /// the side of that store it was written on, or it is a hint about the wrong thing.
+    pub fn prefetch(&mut self, address: Value, hint: PrefetchHint) -> Inst {
+        let args = self.func.push_values(&[address]);
+        self.inst(
+            InstData { args, extra: Extra::Prefetch(hint), ..InstData::new(Opcode::Prefetch) },
+            &[],
+        )
+    }
+
+    /// An unconditional branch.
+    pub fn jump(&mut self, target: Block, args: &[Value]) -> Inst {
+        let call = self.block_call(target, args);
+        let targets = self.func.push_block_calls(&[call]);
+        self.inst(InstData { extra: Extra::Targets(targets), ..InstData::new(Opcode::Jump) }, &[])
+    }
+
+    /// The address of a block, which is a value a later `indirect_br` can branch to.
+    ///
+    /// The block is a target here in the same sense a branch's is, so everything that asks an
+    /// instruction which blocks it names finds this one, and a block whose address is taken is
+    /// not mistaken for a block nothing mentions.
+    pub fn block_addr(&mut self, target: Block) -> Value {
+        let call = self.block_call(target, &[]);
+        let targets = self.func.push_block_calls(&[call]);
+        self.value(
+            InstData { extra: Extra::Targets(targets), ..InstData::new(Opcode::BlockAddr) },
+            Type::PTR,
+        )
+    }
+
+    /// A branch to an address, which arrives at one of the blocks listed.
+    ///
+    /// Every block the address can hold has to be there. The list is what the rest of the
+    /// compiler reads, so a block left out of it is a block the branch is saying it never
+    /// reaches, and none of it is checked against the addresses anybody took.
+    pub fn indirect_br(&mut self, addr: Value, targets: &[Block]) -> Inst {
+        let calls: Vec<BlockCall> =
+            targets.iter().map(|&target| self.block_call(target, &[])).collect();
+        let targets = self.func.push_block_calls(&calls);
+        let args = self.func.push_values(&[addr]);
+        self.inst(
+            InstData { args, extra: Extra::Targets(targets), ..InstData::new(Opcode::IndirectBr) },
+            &[],
+        )
+    }
+
+    /// A two-way branch, taking the first target when the condition is one.
+    pub fn br_if(
+        &mut self,
+        cond: Value,
+        then_block: Block,
+        then_args: &[Value],
+        else_block: Block,
+        else_args: &[Value],
+    ) -> Inst {
+        let then_call = self.block_call(then_block, then_args);
+        let else_call = self.block_call(else_block, else_args);
+        let targets = self.func.push_block_calls(&[then_call, else_call]);
+        let args = self.func.push_values(&[cond]);
+        self.inst(
+            InstData { args, extra: Extra::Targets(targets), ..InstData::new(Opcode::BrIf) },
+            &[],
+        )
+    }
+
+    /// A branch on an integer, taking the target its value selects and the default when it
+    /// selects none.
+    ///
+    /// The cases are values and blocks rather than a table with the default in it, because the
+    /// order the side table wants, which is the default first, is not an order anybody building
+    /// a `switch` has their cases in.
+    pub fn switch(&mut self, value: Value, default: Block, cases: &[(i128, Block)]) -> Inst {
+        let ty = self.func[value].ty.lane();
+        let mut calls = vec![self.block_call(default, &[])];
+        let mut values = Vec::with_capacity(cases.len());
+        for &(value, block) in cases {
+            calls.push(self.block_call(block, &[]));
+            values.push(Imm::int(value, ty));
+        }
+        let targets = self.func.push_block_calls(&calls);
+        let cases = self.func.push_imms(&values);
+        let info = self.func.add_switch(SwitchInfo { targets, cases });
+        let args = self.func.push_values(&[value]);
+        self.inst(
+            InstData { args, extra: Extra::Switch(info), ..InstData::new(Opcode::Switch) },
+            &[],
+        )
+    }
+
+    /// A return of the values the signature says.
+    pub fn ret(&mut self, values: &[Value]) -> Inst {
+        let args = self.func.push_values(values);
+        self.inst(InstData { args, ..InstData::new(Opcode::Return) }, &[])
+    }
+
+    /// A place control does not reach.
+    pub fn unreachable(&mut self) -> Inst {
+        self.inst(InstData::new(Opcode::Unreachable), &[])
+    }
+
+    /// A direct call, with the results its signature says it produces.
+    pub fn call(&mut self, callee: Symbol, signature: Sig, args: &[Value]) -> Inst {
+        self.call_varargs(callee, signature, args, &[])
+    }
+
+    /// The same, saying how the arguments the signature does not name travel.
+    ///
+    /// Empty says they all travel as the values in hand, which is what [`Builder::call`] passes
+    /// and is the usual case. Anything else has one entry for each argument past the ones the
+    /// signature names.
+    pub fn call_varargs(
+        &mut self,
+        callee: Symbol,
+        signature: Sig,
+        args: &[Value],
+        varargs: &[Abi],
+    ) -> Inst {
+        let varargs = self.func.push_abis(varargs);
+        let info = self.func.add_call(CallInfo { callee: Some(callee), signature, varargs });
+        let returns: Vec<Type> = self.func[signature].return_types().collect();
+        let args = self.func.push_values(args);
+        self.inst(
+            InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) },
+            &returns,
+        )
+    }
+
+    /// Inline assembly, which is a terminator when the info carries targets.
+    ///
+    /// The targets are built by the caller, because the frontend is the only thing that knows
+    /// which block is the one control reaches when the assembly does not jump, and that block
+    /// has to come first.
+    pub fn inline_asm(
+        &mut self,
+        info: AsmInfo,
+        args: &[Value],
+        results: &[Type],
+        flags: Flags,
+    ) -> Inst {
+        let info = self.func.add_asm(info);
+        let args = self.func.push_values(args);
+        self.inst(
+            InstData { args, flags, extra: Extra::Asm(info), ..InstData::new(Opcode::InlineAsm) },
+            results,
+        )
+    }
+
+    fn block_call(&mut self, block: Block, args: &[Value]) -> BlockCall {
+        BlockCall::new(block, self.func.push_values(args))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+
+    use super::*;
+    use crate::inst::BlockCallList;
+    use crate::{MemOrder, Restrict};
+
+    /// The example from the spec, near enough: a loop that sums one to n and stores it.
+    fn sum() -> (Func, Block, Block, Block) {
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("sum"),
+            Signature::new().with_params(&[i32_]).with_returns(&[i32_]),
+        );
+
+        let entry = func.create_block();
+        let n = func.append_param(entry, i32_);
+        let header = func.create_block();
+        let acc = func.append_param(header, i32_);
+        let i = func.append_param(header, i32_);
+        let exit = func.create_block();
+        let result = func.append_param(exit, i32_);
+
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i32_, 0);
+        let cmp = b.icmp(IntPred::Sle, n, zero);
+        b.br_if(cmp, exit, &[zero], header, &[zero, zero]);
+
+        let mut b = Builder::new(&mut func, header);
+        let one = b.iconst(i32_, 1);
+        let next = b.binary(Opcode::Add, i, one, Flags::NSW);
+        let total = b.binary(Opcode::Add, acc, next, Flags::NSW);
+        let done = b.icmp(IntPred::Sge, next, n);
+        b.br_if(done, exit, &[total], header, &[total, next]);
+
+        let mut b = Builder::new(&mut func, exit);
+        b.ret(&[result]);
+
+        (func, entry, header, exit)
+    }
+
+    #[test]
+    fn a_form_is_offered_only_while_it_reads_what_the_value_is_computed_from() {
+        let (mut func, _, header, _) = sum();
+        let insts: Vec<Inst> = func.insts(header).collect();
+        let next = func[insts[1]].first_result.expect("the add has a result");
+        let reads = func[func[insts[1]].args].to_vec();
+        let acc = func[func[insts[2]].args][0];
+        let form = |func: &mut Func, ty: Type, args: &[Value]| {
+            let args = func.push_values(args);
+            func.create_inst(InstData { args, ..InstData::new(Opcode::Add) }, &[ty], Span::DUMMY)
+        };
+        // `1 + i` reads what `i + 1` does. `acc + 1` reads something it does not, and a form at
+        // another width is not the value.
+        let swapped = form(&mut func, Type::int(32), &[reads[1], reads[0]]);
+        let elsewhere = form(&mut func, Type::int(32), &[acc, reads[1]]);
+        let wider = form(&mut func, Type::int(64), &[reads[0], reads[1]]);
+        for made in [swapped, elsewhere, wider] {
+            assert!(func.add_form(next, made));
+        }
+        assert!(!func.add_form(next, swapped));
+        assert_eq!(func.forms(next).collect::<Vec<_>>(), [swapped]);
+        assert_eq!(func.forms(acc).count(), 0);
+    }
+
+    #[test]
+    fn the_blocks_come_back_in_the_order_they_were_made() {
+        let (func, entry, header, exit) = sum();
+        assert_eq!(func.blocks().collect::<Vec<_>>(), [entry, header, exit]);
+        assert_eq!(func.entry(), Some(entry));
+    }
+
+    #[test]
+    fn a_removed_block_is_gone_from_the_layout_and_so_is_what_was_in_it() {
+        let (mut func, entry, header, exit) = sum();
+        let inside: Vec<Inst> = func.insts(header).collect();
+        func.remove_block(header);
+        assert_eq!(func.blocks().collect::<Vec<_>>(), [entry, exit]);
+        assert_eq!(func.entry(), Some(entry));
+        assert_eq!(func[entry].next, Some(exit));
+        assert_eq!(func[exit].prev, Some(entry));
+        // The instructions say they are in no block, the way a removed one does.
+        assert!(inside.iter().all(|&inst| func.block_of(inst).is_none()));
+        assert!(func.insts(header).next().is_none());
+    }
+
+    #[test]
+    fn moving_what_is_after_an_instruction_is_taking_each_out_and_appending_it() {
+        let (mut func, _, header, exit) = sum();
+        let insts: Vec<Inst> = func.insts(header).collect();
+        for (at, &inst) in insts.iter().enumerate() {
+            if let Some(value) = func[inst].first_result {
+                func.declare_value(value, at as u32);
+            }
+        }
+        let mut each = func.clone();
+        let into = func.create_block();
+        func.move_after(insts[1], into);
+        let into_each = each.create_block();
+        for &inst in &insts[2..] {
+            each.remove_inst(inst);
+            each.append_inst(into_each, inst);
+        }
+        for func in [&func, &each] {
+            assert_eq!(func.insts(header).collect::<Vec<_>>(), insts[..2]);
+            assert_eq!(func.insts(into).collect::<Vec<_>>(), insts[2..]);
+            assert!(insts[2..].iter().all(|&inst| func.block_of(inst) == Some(into)));
+            assert_eq!(func.insts(exit).count(), 1);
+        }
+        for &inst in &insts {
+            let Some(value) = func[inst].first_result else { continue };
+            assert_eq!(
+                func.value_decls(value).collect::<Vec<_>>(),
+                each.value_decls(value).collect::<Vec<_>>()
+            );
+            assert_eq!(func.value_starts(value).count(), 0);
+            assert_eq!(each.value_starts(value).count(), 0);
+        }
+        // Nothing after the last instruction is nothing to move.
+        let term = insts[insts.len() - 1];
+        let other = func.create_block();
+        func.move_after(term, other);
+        assert_eq!(func.insts(other).count(), 0);
+        assert_eq!(func.insts(into).last(), Some(term));
+    }
+
+    #[test]
+    fn each_block_holds_what_was_appended_to_it() {
+        let (func, entry, header, exit) = sum();
+        let opcodes =
+            |block| func.insts(block).map(|inst| func[inst].opcode.name()).collect::<Vec<_>>();
+        assert_eq!(opcodes(entry), ["iconst", "icmp", "br_if"]);
+        assert_eq!(opcodes(header), ["iconst", "add", "add", "icmp", "br_if"]);
+        assert_eq!(opcodes(exit), ["return"]);
+    }
+
+    #[test]
+    fn dropping_the_results_in_front_moves_the_first_one_along_and_renumbers_the_rest() {
+        // The last result of a call is the memory it produces, and the caller of this is the pass
+        // that stops a function handing a value back. What has to survive is that the memory is
+        // still the last result and still says which of the results it is, because a pass reading
+        // that index is asking whether it is looking at the value a call handed over.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let types = [Type::int(32), Type::int(64), Type::MEM];
+        let inst = func.create_inst(InstData::new(Opcode::Call), &types, Span::DUMMY);
+        let before: Vec<Value> = func[inst].results().collect();
+        func.drop_results(inst, 1);
+        assert_eq!(func[inst].results().collect::<Vec<_>>(), before[1..]);
+        assert_eq!(func[before[1]].def, Def::Result { inst, index: 0 });
+        assert_eq!(func[before[2]].def, Def::Result { inst, index: 1 });
+        assert_eq!(func.mem_out(inst), Some(before[2]));
+    }
+
+    #[test]
+    fn dropping_every_result_leaves_an_instruction_that_produces_nothing() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let inst = func.create_inst(InstData::new(Opcode::Call), &[Type::int(32)], Span::DUMMY);
+        func.drop_results(inst, 1);
+        assert_eq!(func[inst].results().count(), 0);
+        assert_eq!(func[inst].first_result, None);
+    }
+
+    #[test]
+    fn asm_ends_a_block_when_it_has_labels_and_not_otherwise() {
+        // The labels are in the function's table, so the instruction on its own cannot answer
+        // and anything asking it rather than the function would walk off the end of the block.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let plain = func.add_asm(AsmInfo {
+            template: Symbol::from_raw(0),
+            constraints: Symbol::from_raw(0),
+            clobbers: Symbol::from_raw(0),
+            targets: BlockCallList::EMPTY,
+        });
+        let call = BlockCall::to(block);
+        let targets = func.push_block_calls(&[call]);
+        let labelled = func.add_asm(AsmInfo {
+            template: Symbol::from_raw(0),
+            constraints: Symbol::from_raw(0),
+            clobbers: Symbol::from_raw(0),
+            targets,
+        });
+
+        let mut make = |extra| {
+            let data = InstData { extra, ..InstData::new(Opcode::InlineAsm) };
+            func.create_inst(data, &[], Span::DUMMY)
+        };
+        let plain = make(Extra::Asm(plain));
+        let labelled = make(Extra::Asm(labelled));
+        assert!(!func.is_terminator(plain));
+        assert!(func.is_terminator(labelled));
+    }
+
+    #[test]
+    fn every_block_ends_in_its_terminator() {
+        let (func, entry, header, exit) = sum();
+        for block in [entry, header, exit] {
+            let last = func.terminator(block).expect("a terminator");
+            assert_eq!(Some(last), func.insts(block).last());
+        }
+    }
+
+    #[test]
+    fn a_branch_carries_the_arguments_the_block_takes() {
+        let (func, entry, header, _) = sum();
+        let br = func.terminator(entry).expect("a terminator");
+        let calls: Vec<BlockCall> = func.successors(br).collect();
+        assert_eq!(calls.len(), 2);
+        // The loop header takes two parameters, so the branch to it passes two.
+        assert_eq!(calls[1].block, header);
+        assert_eq!(func[calls[1].args].len(), 2);
+        assert_eq!(func[header].params.len(), 2);
+        assert_eq!(func[calls[0].args].len(), 1);
+    }
+
+    #[test]
+    fn a_value_knows_what_defined_it() {
+        let (func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        let value = func[first].first_result.expect("a result");
+        assert_eq!(func[value].def, Def::Result { inst: first, index: 0 });
+        assert_eq!(func[value].ty, Type::int(32));
+
+        let param = func[entry].params[0];
+        assert_eq!(func[param].def, Def::Param { block: entry, index: 0 });
+    }
+
+    #[test]
+    fn a_comparison_produces_one_bit() {
+        let (func, entry, _, _) = sum();
+        let cmp = func.insts(entry).nth(1).expect("the comparison");
+        let value = func[cmp].first_result.expect("a result");
+        assert_eq!(func[value].ty, Type::I1);
+        assert_eq!(func[cmp].extra, Extra::IntPred(IntPred::Sle));
+    }
+
+    #[test]
+    fn flags_ride_along_on_the_instruction_that_was_given_them() {
+        let (func, _, header, _) = sum();
+        let add = func.insts(header).nth(1).expect("the addition");
+        assert_eq!(func[add].flags, Flags::NSW);
+        let cmp = func.insts(header).nth(3).expect("the comparison");
+        assert_eq!(func[cmp].flags, Flags::NONE);
+    }
+
+    #[test]
+    fn removing_an_instruction_takes_it_out_of_the_middle() {
+        let (mut func, _, header, _) = sum();
+        let add = func.insts(header).nth(1).expect("the addition");
+        func.remove_inst(add);
+        let opcodes: Vec<&str> = func.insts(header).map(|inst| func[inst].opcode.name()).collect();
+        assert_eq!(opcodes, ["iconst", "add", "icmp", "br_if"]);
+        assert_eq!(func.block_of(add), None);
+    }
+
+    #[test]
+    fn removing_the_first_and_the_last_keeps_the_ends_right() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        let last = func.terminator(entry).expect("a terminator");
+        func.remove_inst(first);
+        func.remove_inst(last);
+        let opcodes: Vec<&str> = func.insts(entry).map(|inst| func[inst].opcode.name()).collect();
+        assert_eq!(opcodes, ["icmp"]);
+        assert_eq!(func[entry].first, func[entry].last);
+    }
+
+    #[test]
+    fn removing_the_only_instruction_empties_the_block() {
+        let (mut func, _, _, exit) = sum();
+        let only = func.insts(exit).next().expect("an instruction");
+        func.remove_inst(only);
+        assert_eq!(func.insts(exit).count(), 0);
+        assert_eq!(func[exit].first, None);
+        assert_eq!(func[exit].last, None);
+    }
+
+    #[test]
+    fn inserting_before_puts_it_in_the_right_place() {
+        let (mut func, entry, _, _) = sum();
+        let cmp = func.insts(entry).nth(1).expect("the comparison");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_before(made, cmp);
+        let opcodes: Vec<&str> = func.insts(entry).map(|inst| func[inst].opcode.name()).collect();
+        assert_eq!(opcodes, ["iconst", "unreachable", "icmp", "br_if"]);
+    }
+
+    #[test]
+    fn inserting_before_the_first_makes_it_the_first() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_before(made, first);
+        assert_eq!(func.insts(entry).next(), Some(made));
+        assert_eq!(func[entry].first, Some(made));
+    }
+
+    #[test]
+    fn inserting_after_puts_it_in_the_right_place() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_after(made, first);
+        let opcodes: Vec<&str> = func.insts(entry).map(|inst| func[inst].opcode.name()).collect();
+        assert_eq!(opcodes, ["iconst", "unreachable", "icmp", "br_if"]);
+        assert_eq!(func[entry].first, Some(first));
+    }
+
+    #[test]
+    #[should_panic(expected = "nothing goes after a terminator")]
+    fn inserting_after_the_terminator_is_refused() {
+        // A block ends where its branch is, so an instruction after one would be in no block that
+        // control ever reaches, and the layout would be claiming otherwise.
+        let (mut func, entry, _, _) = sum();
+        let last = func.insts(entry).last().expect("a terminator");
+        let made = func.create_inst(InstData::new(Opcode::Unreachable), &[], Span::DUMMY);
+        func.insert_after(made, last);
+    }
+
+    #[test]
+    fn a_list_grows_in_place_while_it_is_the_last_thing_in_the_pool() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let list = func.push_values(&[a]);
+        let grown = func.append_arg(list, b);
+        assert_eq!(func[grown], [a, b]);
+        assert_eq!(grown.as_usize_range().start, list.as_usize_range().start);
+    }
+
+    #[test]
+    fn a_list_is_copied_when_something_is_behind_it() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let list = func.push_values(&[a, a]);
+        let behind = func.push_values(&[b]);
+        let grown = func.append_arg(list, b);
+        assert_eq!(func[grown], [a, a, b]);
+        assert_eq!(func[list], [a, a], "the old run is still readable");
+        assert_eq!(func[behind], [b], "and so is what was behind it");
+        assert_ne!(grown.as_usize_range().start, list.as_usize_range().start);
+    }
+
+    #[test]
+    fn two_lists_that_grow_by_turns_grow_into_room_rather_than_being_copied_each_time() {
+        // The branches into a join while SSA construction gives it a parameter for each variable
+        // read below it: every one grows by one, by turns.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let (mut left, mut right) = (func.push_values(&[a]), func.push_values(&[b]));
+        for _ in 0..200 {
+            left = func.append_arg(left, a);
+            right = func.append_arg(right, b);
+        }
+        assert_eq!(func[left], [a; 201]);
+        assert_eq!(func[right], [b; 201]);
+        // Copying both on every turn would have been forty thousand.
+        assert!(func.value_pool.len() < 2000, "{}", func.value_pool.len());
+    }
+
+    #[test]
+    fn a_copy_of_a_list_kept_from_before_it_grew_does_not_take_its_room() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let list = func.push_values(&[a, a]);
+        func.push_values(&[b]);
+        let moved = func.append_arg(list, b);
+        let grown = func.append_arg(moved, a);
+        assert_eq!(grown.as_usize_range().start, moved.as_usize_range().start, "in the room");
+        let other = func.append_arg(moved, b);
+        assert_eq!(func[grown], [a, a, b, a]);
+        assert_eq!(func[other], [a, a, b, b]);
+    }
+
+    #[test]
+    fn a_parameter_added_late_is_the_next_one_along() {
+        // This is the shape SSA construction leaves: the loop header gains a parameter after
+        // the blocks that branch to it already exist, and each of their branches grows an
+        // argument to match.
+        let (mut func, entry, header, _) = sum();
+        let extra = func.append_param(header, Type::int(32));
+        assert_eq!(func[header].params.len(), 3);
+        assert_eq!(func[extra].def, Def::Param { block: header, index: 2 });
+
+        let br = func.terminator(entry).expect("a terminator");
+        let call = func.successors(br).nth(1).expect("the branch to the header");
+        let grown = func.append_arg(call.args, extra);
+        assert_eq!(func[grown].len(), 3);
+    }
+
+    #[test]
+    fn a_dropped_parameter_takes_what_was_known_about_it_along() {
+        // #2048: ipasra dropped a pointer parameter with `!aligned` on it, the fact stayed behind,
+        // and the printer wrote it under a value with no number.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let kept = func.append_param(block, Type::PTR);
+        let dropped = func.append_param(block, Type::PTR);
+        let aligned = Facts { align: Some(4), ..Facts::NONE };
+        func.set_facts(kept, aligned);
+        func.set_facts(dropped, aligned);
+
+        func.retain_params(block, |value| value == kept);
+        assert_eq!(func.facts(kept), aligned);
+        assert_eq!(func.facts(dropped), Facts::NONE);
+    }
+
+    #[test]
+    fn a_span_rides_along_with_the_instruction() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let span = Span::new(10, 20);
+        let mut b = Builder::new(&mut func, block).at(span);
+        let value = b.iconst(Type::int(32), 7);
+        let inst = match func[value].def {
+            Def::Result { inst, .. } => inst,
+            Def::Param { .. } => unreachable!("a constant is not a parameter"),
+        };
+        assert_eq!(func.span(inst), span);
+    }
+
+    #[test]
+    fn a_store_produces_nothing_and_a_load_produces_one_value() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let addr = func.append_param(block, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mut b = Builder::new(&mut func, block);
+        let value = b.load(Type::int(32), addr, info, Flags::NONE);
+        let store = b.store(value, addr, info, Flags::VOLATILE);
+        assert_eq!(func[store].results, 0);
+        assert_eq!(func[store].flags, Flags::VOLATILE);
+        assert_eq!(func[value].ty, Type::int(32));
+    }
+
+    #[test]
+    fn memory_remembers_which_declaration_asked_for_it_and_which_did_not() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let first = func.add_mem(info);
+        let second = func.add_mem(info);
+        let third = func.add_mem(info);
+
+        // Out of order, because a declaration is recorded where the walk reaches it and the table
+        // is kept sorted so that reading it back is a search rather than a scan.
+        func.declare_mem(third, 7);
+        func.declare_mem(first, 2);
+        // A second declaration for the same memory, which is two locals sharing a slot, and the
+        // same one again, which changes nothing.
+        func.declare_mem(first, 9);
+        func.declare_mem(first, 2);
+
+        let of = |mem| func.mem_decls(mem).collect::<Vec<u32>>();
+        assert_eq!(of(first), [2, 9]);
+        assert_eq!(of(third), [7]);
+        // Memory no declaration asked for, which is what every temporary is.
+        assert_eq!(of(second), []);
+    }
+
+    /// A parameter says which declaration lives in the bytes it points at, apart from what it is
+    /// the value of, because the two are different questions about the same value.
+    #[test]
+    fn a_parameter_says_which_declaration_its_bytes_are() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::PTR);
+        let second = func.append_param(block, Type::PTR);
+
+        func.declare_param(second, 4);
+        func.declare_param(second, 4);
+        func.declare_param(first, 3);
+
+        assert_eq!(func.param_decls(first).collect::<Vec<u32>>(), [3]);
+        assert_eq!(func.param_decls(second).collect::<Vec<u32>>(), [4]);
+        assert_eq!(func.value_decls(second).count(), 0, "the address is not the declaration");
+    }
+
+    /// A value says which declarations it is the value of, and a rename carries them over.
+    ///
+    /// Both directions are many, which is why this is a list rather than a map: a declaration
+    /// assigned twice has a value for each assignment, and two values a pass found equal end up
+    /// as one value that two declarations are both spelled by.
+    #[test]
+    fn a_value_says_which_declarations_it_is_and_a_rename_carries_them_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::int(32));
+        let second = func.append_param(block, Type::int(32));
+        let third = func.append_param(block, Type::int(32));
+
+        // Out of order, because a value is named where the walk reaches the assignment that made
+        // it and the table is kept sorted so that reading it back is a search rather than a scan.
+        func.declare_value(third, 7);
+        func.declare_value(first, 2);
+        // The same ask twice, which a read that memoises what it found makes, and it is one pair.
+        func.declare_value(first, 2);
+
+        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2]);
+        assert_eq!(func.value_decls(third).collect::<Vec<u32>>(), vec![7]);
+        // A value no declaration is behind, which is what every temporary is.
+        assert_eq!(func.value_decls(second).count(), 0);
+
+        // A pass finds two values equal and points the readers of one at the other. The names go
+        // with the readers, and the value that is left is both of them, the one that went away's
+        // from where it was defined, which for a parameter is the top of its block.
+        func.rename_value(third, first);
+        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2]);
+        assert_eq!(
+            func.value_starts(first).collect::<Vec<Start>>(),
+            vec![Start { decl: 7, block, after: None }]
+        );
+        assert_eq!(func.value_decls(third).count(), 0);
+
+        // And renaming a value nothing named moves nothing rather than inventing a pair.
+        func.rename_value(second, third);
+        assert_eq!(func.value_decls(third).count(), 0);
+    }
+
+    /// A declaration that starts holding a value part of the way through says where, and a rename
+    /// carries that over as it does a name.
+    #[test]
+    fn a_start_part_of_the_way_through_is_kept_and_a_rename_carries_it_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::int(32));
+        let second = func.append_param(block, Type::int(32));
+        let one = Builder::new(&mut func, block).iconst(Type::int(32), 1);
+        let inst = func.insts(block).next().expect("the constant");
+
+        let top = Start { decl: 4, block, after: None };
+        let later = Start { decl: 4, block, after: Some(inst) };
+        func.declare_value_from(first, later);
+        func.declare_value_from(first, top);
+        // The same ask twice is one start.
+        func.declare_value_from(first, later);
+        assert_eq!(func.value_starts(first).collect::<Vec<_>>(), vec![later, top]);
+        assert_eq!(func.value_starts(one).count(), 0);
+
+        func.rename_value(first, second);
+        assert_eq!(func.value_starts(second).collect::<Vec<_>>(), vec![later, top]);
+        assert_eq!(func.value_starts(first).count(), 0);
+    }
+
+    /// Where a start is, by where it resolves to rather than what it was made with.
+    fn places(func: &Func, value: Value) -> Vec<Option<(Block, Option<Inst>)>> {
+        func.value_starts(value).map(|start| func.start_place(start)).collect()
+    }
+
+    /// Taking out the instruction a start is after leaves it after the one in front, which is the
+    /// same place, and a replacement put in front of the old one is what it ends up after.
+    #[test]
+    fn a_start_after_an_instruction_that_is_taken_out_stays_where_it_was() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let value = func.append_param(block, Type::int(32));
+        let mut build = Builder::new(&mut func, block);
+        build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 2);
+        let [one, two]: [Inst; 2] = func.insts(block).collect::<Vec<_>>().try_into().expect("two");
+        func.declare_value_from(value, Start { decl: 4, block, after: Some(two) });
+
+        func.remove_inst(two);
+        assert_eq!(places(&func, value), [Some((block, Some(one)))]);
+        let data = func[one];
+        let fresh = func.create_inst(data, &[Type::int(32)], Span::DUMMY);
+        func.insert_before(fresh, one);
+        func.remove_inst(one);
+        assert_eq!(places(&func, value), [Some((block, Some(fresh)))]);
+        func.remove_inst(fresh);
+        assert_eq!(places(&func, value), [Some((block, None))]);
+    }
+
+    /// A pass that moves the instruction a start is after to another block moves the assignment
+    /// with it, rather than leaving it after whatever was in front of the instruction before.
+    #[test]
+    fn a_start_after_an_instruction_a_pass_moves_goes_with_it() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let top = func.create_block();
+        let below = func.create_block();
+        let value = func.append_param(top, Type::int(32));
+        let mut build = Builder::new(&mut func, below);
+        build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 2);
+        let [one, two]: [Inst; 2] = func.insts(below).collect::<Vec<_>>().try_into().expect("two");
+        func.declare_value_from(value, Start { decl: 4, block: below, after: Some(two) });
+
+        // Emptied into the block above one at a time, which is what a merge does.
+        for inst in [one, two] {
+            func.remove_inst(inst);
+            func.append_inst(top, inst);
+        }
+        func.remove_block(below);
+        assert_eq!(places(&func, value), [Some((top, Some(two)))]);
+    }
+
+    /// A start at the top of a block a pass empties into the one above goes after what that block
+    /// ended with before, which is where the top of the block that went is now.
+    #[test]
+    fn a_start_at_the_top_of_a_block_that_is_merged_away_is_carried_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let top = func.create_block();
+        let below = func.create_block();
+        let value = func.append_param(top, Type::int(32));
+        Builder::new(&mut func, top).iconst(Type::int(32), 1);
+        Builder::new(&mut func, below).iconst(Type::int(32), 2);
+        let last = func.insts(top).next();
+        func.declare_value_from(value, Start { decl: 4, block: below, after: None });
+
+        for inst in func.insts(below).collect::<Vec<_>>() {
+            func.remove_inst(inst);
+            func.append_inst(top, inst);
+        }
+        func.carry_starts(below, top, last);
+        func.remove_block(below);
+        assert_eq!(places(&func, value), [Some((top, last))]);
+    }
+
+    /// A value whose instruction is taken out and not put back leaves its declaration starting
+    /// where it was, and one put back somewhere else leaves it the name it had.
+    #[test]
+    fn a_name_on_a_value_whose_instruction_goes_becomes_a_start_and_comes_back_if_it_returns() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let kept = build.iconst(Type::int(32), 1);
+        let moved = build.iconst(Type::int(32), 2);
+        let first = func.insts(block).next().expect("one");
+        let second = func.insts(block).nth(1).expect("two");
+        func.declare_value(kept, 4);
+        func.declare_value(moved, 5);
+
+        func.remove_inst(first);
+        assert_eq!(func.value_decls(kept).count(), 0);
+        assert_eq!(places(&func, kept), [Some((block, None))]);
+
+        func.remove_inst(second);
+        func.append_inst(block, second);
+        assert_eq!(func.value_decls(moved).collect::<Vec<_>>(), [5]);
+        assert_eq!(func.value_starts(moved).count(), 0);
+    }
+
+    /// A parameter the program never assigns has one value, and one it assigns has two, even when
+    /// the instruction of the second is gone.
+    #[test]
+    fn a_parameter_given_no_other_value_is_its_only_value() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let kept = func.append_param(block, Type::int(32));
+        let changed = func.append_param(block, Type::int(32));
+        func.declare_value(kept, 4);
+        func.declare_value(changed, 5);
+        let other = Builder::new(&mut func, block).iconst(Type::int(32), 1);
+        func.declare_value(other, 5);
+        assert!(func.only_value(4, kept));
+        assert!(!func.only_value(5, changed));
+
+        let inst = func.insts(block).next().expect("one");
+        func.remove_inst(inst);
+        assert!(!func.only_value(5, changed), "a start is a value too");
+    }
+
+    /// Renaming a value into one computed earlier leaves the declaration starting where the one
+    /// that went away was computed, rather than holding the earlier one from where it was.
+    #[test]
+    fn a_rename_into_an_earlier_value_starts_the_declaration_where_the_later_one_was() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let early = build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 3);
+        let late = build.iconst(Type::int(32), 1);
+        let middle = func.insts(block).nth(1).expect("three");
+        func.declare_value(late, 4);
+
+        func.rename_value(late, early);
+        assert_eq!(func.value_decls(early).count(), 0);
+        assert_eq!(places(&func, early), [Some((block, Some(middle)))]);
+    }
+
+    /// Moving some of a value's starts to another leaves the rest where they were, in order.
+    #[test]
+    fn moving_starts_moves_the_ones_asked_for_and_no_others() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let from = build.iconst(Type::int(32), 1);
+        let into = build.iconst(Type::int(32), 2);
+        let first = func.insts(block).next();
+        let starts: Vec<Start> = (5..8).map(|decl| Start { decl, block, after: first }).collect();
+        for &start in &starts {
+            func.declare_value_from(from, start);
+        }
+
+        func.move_starts(from, into, &starts[1..2]);
+        assert_eq!(func.value_starts(from).collect::<Vec<Start>>(), [starts[0], starts[2]]);
+        assert_eq!(func.value_starts(into).collect::<Vec<Start>>(), [starts[1]]);
+    }
+
+    #[test]
+    fn a_call_produces_what_its_signature_returns() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("caller"), Signature::new());
+        let sig = func.add_signature(
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(64)]),
+        );
+        let block = func.create_block();
+        let arg = func.append_param(block, Type::int(32));
+        let callee = names.intern("callee");
+        let mut b = Builder::new(&mut func, block);
+        let call = b.call(callee, sig, &[arg]);
+        assert_eq!(func[call].results, 1);
+        let value = func[call].first_result.expect("a result");
+        assert_eq!(func[value].ty, Type::int(64));
+        assert_eq!(func[call].extra, Extra::Call(Idx::new(0)));
+    }
+
+    #[test]
+    fn the_counts_are_what_was_made() {
+        let (func, _, _, _) = sum();
+        let counts = func.counts();
+        assert_eq!(counts.blocks, 3);
+        assert_eq!(counts.insts, 9);
+        // Four block parameters and five instruction results, which is the two constants, the
+        // two additions and the two comparisons less the branches, which produce nothing.
+        assert_eq!(counts.values, 4 + 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "the instruction is in a block")]
+    fn appending_an_instruction_twice_is_refused() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        func.append_inst(entry, first);
+    }
+
+    #[test]
+    #[should_panic(expected = "the instruction is not in a block")]
+    fn removing_an_instruction_twice_is_refused() {
+        let (mut func, entry, _, _) = sum();
+        let first = func.insts(entry).next().expect("an instruction");
+        func.remove_inst(first);
+        func.remove_inst(first);
+    }
+
+    /// A store and a load with memory threaded through them, as memory SSA construction does it.
+    fn threaded() -> (Func, Inst, Inst) {
+        let mut names = Interner::new();
+        let i32_ = Type::int(32);
+        let mut func = Func::new(
+            names.intern("thread"),
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[i32_]),
+        );
+        let entry = func.create_block();
+        let addr = func.append_param(entry, Type::PTR);
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let start = b.mem_entry();
+        let seven = b.iconst(i32_, 7);
+        let store = b.store(seven, addr, info, Flags::NONE);
+        let value = b.load(i32_, addr, info, Flags::NONE);
+        let Def::Result { inst: load, .. } = func[value].def else {
+            panic!("the load produced it");
+        };
+
+        let store = func.with_mem(store, start);
+        let after = func.mem_out(store).expect("a store makes a new version");
+        let load = func.with_mem(load, after);
+        (func, store, load)
+    }
+
+    #[test]
+    fn threading_memory_puts_it_last_and_leaves_everything_else_where_it_was() {
+        let (func, store, load) = threaded();
+        assert_eq!(func.mem_in(store), func.mem_out(store).map(|_| func[func[store].args][2]));
+        assert_eq!(func[func[store].args].len(), 3);
+        assert!(func.carries_mem(store));
+        assert!(func.carries_mem(load));
+
+        // The address of the load is still its first operand, which is the point of putting
+        // memory last: nothing that read the operands before has to learn about it.
+        assert_eq!(func[func[load].args][0], func[func.entry().expect("an entry")].params[0]);
+        assert_eq!(func.mem_in(load), func.mem_out(store));
+        assert_eq!(func.mem_out(load), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "this is already on the memory chain")]
+    fn threading_memory_through_the_same_instruction_twice_is_refused() {
+        let (mut func, store, _) = threaded();
+        let start = func.mem_in(store).expect("it was threaded");
+        func.with_mem(store, start);
+    }
+
+    /// Two copies of the same pair of addresses, the first of a fixed length and the second of one
+    /// the caller passed in, both on the memory chain so that the length is not the last operand.
+    fn copies() -> (Func, Inst, Inst) {
+        let mut names = Interner::new();
+        let i64_ = Type::int(64);
+        let mut func = Func::new(
+            names.intern("copies"),
+            Signature::new().with_params(&[Type::PTR, Type::PTR, i64_]),
+        );
+        let entry = func.create_block();
+        let to = func.append_param(entry, Type::PTR);
+        let from = func.append_param(entry, Type::PTR);
+        let length = func.append_param(entry, i64_);
+        let info = MemInfo {
+            size: 16,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+
+        let mut b = Builder::new(&mut func, entry);
+        let start = b.mem_entry();
+        let mem = b.func().add_mem(info);
+        let args = b.func().push_values(&[to, from]);
+        let fixed =
+            b.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        let mem = b.func().add_mem(MemInfo { size: 0, ..info });
+        let args = b.func().push_values(&[to, from, length]);
+        let computed =
+            b.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        b.ret(&[]);
+
+        let fixed = func.with_mem(fixed, start);
+        let after = func.mem_out(fixed).expect("a copy makes a new version");
+        let computed = func.with_mem(computed, after);
+        (func, fixed, computed)
+    }
+
+    #[test]
+    fn a_bulk_copy_hands_back_its_length_where_it_has_one_and_nothing_where_the_payload_has_it() {
+        let (func, fixed, computed) = copies();
+        let params = &func[func.entry().expect("an entry")].params;
+        let [to, from, length] = params[..] else { panic!("three of them were appended") };
+
+        let bulk = func.bulk(fixed).expect("a memcpy is one");
+        assert_eq!((bulk.to, bulk.with, bulk.length), (to, from, None));
+
+        let bulk = func.bulk(computed).expect("a memcpy is one");
+        assert_eq!((bulk.to, bulk.with, bulk.length), (to, from, Some(length)));
+    }
+
+    #[test]
+    fn an_instruction_that_is_not_a_bulk_operation_is_not_taken_apart_as_one() {
+        let (func, store, load) = threaded();
+        assert_eq!(func.bulk(store), None);
+        assert_eq!(func.bulk(load), None);
+    }
+}

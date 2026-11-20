@@ -1,0 +1,1520 @@
+//! The linker command line, as a function of the target and the sysroot and nothing else.
+//!
+//! Design: `spec/cross-compile/11-linking.md` section 11.3, which is a list of eight things a
+//! system linker gets right by default on the machine it came with and gets wrong when it is asked
+//! to link for another one.
+//!
+//! # Why this is a pure function
+//!
+//! Section 11.3 ends with the shape: `(tuple, sysroot, options) -> argv`, no environment reads, no
+//! filesystem probing. That is not tidiness, it is what makes the highest consequence code in the
+//! driver testable. A link line is the last thing that touches a binary and the first thing that
+//! can quietly ruin it, and a function that reads the machine it runs on can only be tested on the
+//! machine it runs on. This one is tested for every target in the table from any host, and
+//! `tests/link-lines` is what it produced for each of them when it was last changed.
+//!
+//! The mirror of that rule is the one [`crate::search`] enforces for headers: nothing from the host
+//! reaches the line. No `/usr/lib`, no `/lib64`, no `LIBRARY_PATH`, and no start file found by
+//! looking around. Every path here is either under the sysroot or something the user wrote on the
+//! command line themselves, and `nothing_on_the_line_comes_from_the_host` is that as a test.
+//!
+//! # What is not decided here
+//!
+//! Which linker runs. `spec/cross-compile/11-linking.md` section 11.2 picks one per format and the
+//! driver spawns it, and the arguments below are the ones `ld`, `ld.lld` and `mold` all read the
+//! same way. That is a real constraint rather than an aspiration: `-static-pie` is a compiler driver
+//! flag that none of the three linkers has, so the mode that means it is spelled out here as the
+//! three flags a linker does understand.
+//!
+//! # The formats that have a line
+//!
+//! ELF, and PE in mingw-w64's environment. Both are written in the GNU style, which is the same
+//! syntax for the inputs and a different set of flags, so they share everything below that is about
+//! what has to be linked and differ in what is about the image. The PE line is GNU ld's PE port and
+//! `ld.lld` in its MinGW mode, which read each other's arguments for exactly this reason.
+//!
+//! PE in Microsoft's environment has a line of its own, `msvc`, because `lld-link` and
+//! `link.exe` take a different command line rather than a different set of flags. Its libraries
+//! come out of a tree `--fetch` lays out once the person asking has accepted Microsoft's
+//! licence, which is the one sysroot here that is not ours to produce, so the line names the tree's
+//! directories and the libraries by name and leaves the finding to the linker.
+//!
+//! wasm has a line of its own, `wasm`, for `wasm-ld`. It reads the GNU syntax for the inputs, but
+//! a wasm module has no loader, no sections to bracket and no position to choose, so almost none
+//! of the ELF flags apply, and the start file and the entry point are what is left to decide.
+//!
+//! Mach-O is refused rather than approximated. `ld64` wants a platform version load command and a
+//! `-syslibroot`, which is not a different spelling of what is below. [`Unsupported`] says so by
+//! name, which is a better answer than a line that looks plausible and produces nothing that runs.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use rucc_tuple::{Arch, DataModel, Endian, Env, ObjectFormat, Os, TargetTuple};
+
+use crate::layout::Sysroot;
+use crate::link::{BUILTINS, Crt, Libc, LinkLine, LinkMode, libc, loader};
+use crate::msvc::Chip;
+
+/// One input to the link, in the position the user wrote it.
+///
+/// Link order is semantic: an archive is searched for what is undefined at the moment the linker
+/// reaches it, so a library named before the object that needs it contributes nothing. That is why
+/// this is one ordered list rather than a list of objects and a list of libraries, which is a shape
+/// that cannot represent what the user typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    /// A file, which is an object this compilation produced or one named on the command line.
+    File(PathBuf),
+    /// `-l<name>`, which the linker resolves against the search path.
+    Library(String),
+    /// One word from `-Wl,` or `-Xlinker`, handed to the linker where the user wrote it.
+    ///
+    /// Here for the reason the other two are. A great many of the linker's options are a bracket
+    /// around the files after them, so an option moved away from what it brackets means something
+    /// else or nothing at all: `--whole-archive` takes every member of every archive after it
+    /// whether anything referenced it or not, `--start-group` searches the archives after it again
+    /// until nothing more comes out, and `-Bstatic` picks which half of a library that ships both
+    /// is wanted.
+    Linker(String),
+}
+
+/// What the driver knows that the line needs, beyond the target and the sysroot.
+///
+/// A struct because most of it is empty in the common case, and because a function with nine
+/// positional parameters of which seven are usually a default is a function somebody calls wrong.
+#[derive(Debug, Clone, Default)]
+pub struct Invocation<'a> {
+    /// The objects and libraries, in the order they were written.
+    pub inputs: &'a [Item],
+    /// `-o`. Empty means the linker's own default, which is what a caller testing a line wants.
+    pub output: Option<&'a Path>,
+    /// How the program is linked, which decides the start file and four of the flags.
+    pub mode: LinkMode,
+    /// `-L`, in the order given. The user's own, and they come before ours, because somebody who
+    /// passed `-L` meant it to win.
+    pub search: &'a [PathBuf],
+    /// `-nostartfiles`, which leaves `crt1.o`, `crti.o` and `crtn.o` off.
+    pub no_startfiles: bool,
+    /// `-nodefaultlibs`, which leaves the libc and our runtime off.
+    pub no_defaultlibs: bool,
+    /// `-fno-builtins-lib`, which leaves our own runtime off and keeps the libc.
+    ///
+    /// It means something narrower here than it does on a native link. There it leaves ours off so
+    /// that the machine's `libgcc` answers for the wide arithmetic instead, and there is no `libgcc`
+    /// in a generated sysroot, so here it leaves those names undefined. Which is what somebody
+    /// passing it with a `-l` of their own is asking for, and the link says so by name if they are
+    /// not.
+    pub no_builtins_lib: bool,
+    /// Our own runtime archive for this target, if it is on the machine.
+    ///
+    /// A path from the caller rather than a name this crate joins onto the sysroot, because it is
+    /// the compiler's own output for the target and not the platform's, and a fetched sysroot will
+    /// never hold it. The driver is what looks for it, in the `-B` prefixes and then beside the
+    /// compiler, and [`None`] is what it says when there is none: the line goes without it and
+    /// whatever wanted a wide divide is undefined. See [`crate::link::BUILTINS`].
+    pub builtins: Option<&'a Path>,
+    /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
+    pub export_dynamic: bool,
+    /// `-s`, which drops the symbol table.
+    pub strip: bool,
+    /// `-mwindows`, which makes a Windows program a GUI one: the `windows` subsystem, so no console
+    /// is opened for it, and GDI and the common dialogs on the line the way gcc puts them there.
+    /// Nothing on any other target.
+    pub gui: bool,
+    /// `-municode`, which starts a Windows program at `wmain` or `wWinMain` through `crt2u.o`
+    /// instead of `crt2.o`. Nothing for a DLL or on any other target.
+    pub unicode: bool,
+    /// `-fms-runtime-lib=`, which is `/MT` or `/MD`. Only a line for the MSVC environment reads it.
+    pub crt: Crt,
+    /// `-mexec-model=reactor`, which makes a WASI module a reactor: `crt1-reactor.o` and the entry
+    /// `_initialize` in place of `crt1-command.o` and `_start`. Nothing on any other target.
+    pub reactor: bool,
+    /// gcc's runtime directory for a mingw-w64 target, when the tree the line is against has one.
+    ///
+    /// That is a tree somebody named rather than one this compiler fetched, laid out the way MSYS2
+    /// lays out `/ucrt64`, with gcc's own files under `lib/gcc/<arch>-w64-mingw32/<version>`. Its
+    /// `crtbegin.o` goes after the start file and its `crtend.o` at the very end, the places gcc
+    /// puts them, and the directory is searched after the tree's `lib` so that a `-lgcc` finds the
+    /// one beside them. [`LinkLine::mingw`] leaves both files off a fetched tree, which has no gcc
+    /// in it, and nothing on any other target reads this. tamnd/rucc#2573.
+    pub gcc: Option<&'a Path>,
+    /// gcc's `libgcc.a` for the target, which goes on after ours.
+    ///
+    /// For what we have not written, which on a mingw-w64 target is the decimal floating point
+    /// arithmetic, `__bid_adddd3` and the rest of it. After ours so that ours answers for anything
+    /// both have, and only what is still undefined by then is taken from it. The driver finds it in
+    /// the named tree's gcc directory or in a mingw-w64 gcc installed on this machine, and when
+    /// there is neither a program using `_Decimal64` fails to link by those names. tamnd/rucc#2145.
+    pub libgcc: Option<&'a Path>,
+}
+
+/// A target, or a combination of a target and a mode, that has no line here.
+///
+/// The variants are different kinds of answer. A format is not supported yet and will be. The MSVC
+/// ABI is waiting on something that is not code. A static glibc link is not a thing this scheme can
+/// produce at all. A shared wasm library and a WASI component are later steps of the wasm plan. The distinction matters to somebody reading the message, because only
+/// some of them are worth waiting for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unsupported {
+    /// The target's object format is neither ELF nor PE, and the linker for it wants a different
+    /// line rather than a different spelling of this one.
+    Format {
+        /// The target that was asked for.
+        target: String,
+        /// Its object format, in the spelling `--print-config` uses.
+        format: &'static str,
+    },
+    /// A Windows target in Microsoft's ABI whose architecture Microsoft ships no C library for.
+    ///
+    /// ARM64EC, which is the one row this is. It is tier 4 in
+    /// `spec/cross-compile/04-target-matrix.md`, nothing in this compiler emits code for it, and
+    /// what the installer manifest has for it is a few kilobytes of thunks rather than a CRT, so
+    /// [`Chip::of`] has no answer for it and there are no directories to name. x86-64 and AArch64
+    /// in the same environment have a line, which is `msvc`.
+    MsvcAbi {
+        /// The target that was asked for.
+        target: String,
+    },
+    /// A PE target whose architecture has no machine type among the ones a PE linker writes.
+    ///
+    /// Unreachable through the target table, which has three mingw-w64 rows and an ARM64EC one that
+    /// the MSVC ABI refuses first. It is a variant rather than a panic because the table is data and
+    /// a row added to it should produce a sentence rather than a crash.
+    Machine {
+        /// The target that was asked for.
+        target: String,
+    },
+    /// A static link against a libc that is a stub.
+    ///
+    /// `spec/cross-compile/09-libc-stubs.md` section 9.1 is the reason: a stub carries the names a
+    /// library exports and none of the code behind them, which is everything a dynamic link needs
+    /// and nothing a static one does. glibc's own `libc.a` is several megabytes of objects that
+    /// cannot be synthesized from a description of an interface, so this combination is refused
+    /// here rather than failing later with several thousand undefined symbols.
+    ///
+    /// Every [`crate::link::Libc::Stub`] target, which is glibc and also bionic, the BSDs and
+    /// illumos. musl is the exception rather than the rule here, because musl is the one whose libc
+    /// we build from source.
+    StaticStub {
+        /// The target that was asked for.
+        target: String,
+    },
+    /// A shared library on wasm, which is a module with a `dylink.0` section, code that is
+    /// position independent, and a loader in the host to put it together with the program. None of
+    /// the three is written yet.
+    WasmShared {
+        /// The target that was asked for.
+        target: String,
+    },
+}
+
+impl fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unsupported::Format { target, format } => write!(
+                f,
+                "there is no cross link line for {target} yet, because its object format is \
+                 {format} and that linker takes a different line rather than a different spelling \
+                 of this one"
+            ),
+            Unsupported::MsvcAbi { target } => write!(
+                f,
+                "there is no link line for {target}, because Microsoft ships no C runtime for that \
+                 architecture to link it against. x86_64-windows-msvc and aarch64-windows-msvc \
+                 have one, and the mingw-w64 environment needs nothing installed"
+            ),
+            Unsupported::Machine { target } => write!(
+                f,
+                "there is no PE machine type for {target}, so there is nothing to write after -m \
+                 and a linker would guess the machine from the first object it read"
+            ),
+            Unsupported::StaticStub { target } => write!(
+                f,
+                "{target} cannot be linked statically against a generated sysroot, because its \
+                 libc there is a stub: it carries the names the platform's libc exports and none of \
+                 the code behind them, which is what a dynamic link reads and not what a static one \
+                 needs. Link it dynamically, or use a musl target, which ships a real libc.a"
+            ),
+            Unsupported::WasmShared { target } => write!(
+                f,
+                "shared libraries on wasm (dylink.0) are not supported yet, so {target} cannot \
+                 be linked with -shared. A module that the host calls into is -mexec-model=reactor"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// The whole linker command line for this target, not counting the linker itself.
+///
+/// Section 11.3's eight items, in the order a linker wants them:
+///
+/// 1. `-m`, the output format, because a linker built for more than one machine guesses from its
+///    first input otherwise and a link of no objects has nothing to guess from.
+/// 2. `--sysroot`, and every `-L` rooted inside it.
+/// 3. `-dynamic-linker`, the one string on the line that describes the target's filesystem rather
+///    than ours.
+/// 4. The start files, by absolute path, in the order the two nested pairs need.
+/// 5. The default libraries, which are ours rather than the host's.
+/// 6. `librucc_builtins.a` for the target, which [`LinkLine`] puts after the libc.
+/// 7. No host paths at all.
+/// 8. The format's own extras, which on ELF is the hardening and reproducibility set below and on
+///    PE is the subsystem, the address space layout flags and the header timestamp.
+///
+/// Two formats reach a line here and the difference between them is the flags rather than the shape.
+/// Both are written in the GNU style, which is what `ld`, `ld.lld` and `ld.lld` in its MinGW mode all
+/// read, so the inputs and the `-L` directories are assembled once for both rather than twice. The
+/// MSVC line and the wasm line are their own, which is the module documentation.
+///
+/// # Errors
+///
+/// [`Unsupported::Format`] for a target whose object format is not ELF, PE or wasm,
+/// [`Unsupported::MsvcAbi`] for a Windows target in Microsoft's ABI with no CRT to link against,
+/// [`Unsupported::Machine`] for a PE target with no machine type,
+/// [`Unsupported::StaticStub`] for a static link against a libc that is a stub, and
+/// [`Unsupported::WasmShared`] for `-shared` on wasm.
+pub fn argv(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    let format = target.object_format();
+    match format {
+        ObjectFormat::Elf => elf(target, sysroot, options),
+        // mingw-w64 in the GNU style and Microsoft's environment in its own, because the MSVC ABI
+        // is linked by a different linker with a different argument syntax.
+        ObjectFormat::Coff if target.env() == Env::Gnu => coff(target, sysroot, options),
+        ObjectFormat::Coff => msvc(target, sysroot, options),
+        ObjectFormat::Wasm => wasm(target, sysroot, options),
+        _ => Err(Unsupported::Format {
+            target: target.to_canonical_string(),
+            format: format.as_str(),
+        }),
+    }
+}
+
+/// The line for an ELF target.
+fn elf(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    let statically = matches!(options.mode, LinkMode::Static | LinkMode::StaticPie);
+    if statically && libc(target) == Libc::Stub {
+        return Err(Unsupported::StaticStub { target: target.to_canonical_string() });
+    }
+
+    let mut args = output(options);
+    if let Some(name) = emulation(target) {
+        args.push("-m".to_owned());
+        args.push(name.to_owned());
+    }
+    args.push(sysroot_flag(sysroot));
+
+    args.extend(mode_flags(target, options.mode));
+    args.extend(hardening(target));
+    if options.export_dynamic {
+        args.push("--export-dynamic".to_owned());
+    }
+    if options.strip {
+        args.push("-s".to_owned());
+    }
+
+    args.extend(body(sysroot, options));
+    Ok(args)
+}
+
+/// The line for a mingw-w64 target.
+///
+/// The same eight items as the ELF line and four of them answered differently. The emulation is a PE
+/// one. There is no dynamic linker, because a PE image names no interpreter: the loader is part of
+/// the operating system and finds a DLL by name at load time rather than by a path written into the
+/// program. There is no `-pie` and no `-no-pie`, because every PE image carries a relocation table
+/// and may be placed anywhere, so the question the two flags answer does not exist here and what is
+/// left of it is whether the loader is asked to use that freedom, which is `--dynamicbase`. And
+/// `-static` says something narrower than it does on ELF, which is the note on
+/// [`crate::link::Libc::Import`].
+///
+/// So the five modes are three lines here, and the recorded file shows two pairs of identical
+/// blocks. That is the answer rather than a gap: a position independent executable and one that is
+/// not are the same image on this format, so a build system that passes `-static-pie` or `-no-pie`
+/// gets what it asked for and loses nothing by the flag having nowhere to go.
+///
+/// The subsystem is named rather than left to the linker. Both linkers default it from the entry
+/// point they find, which means a program with a `WinMain` in it silently becomes a GUI program, and
+/// a cross link deciding anything from what it happens to find in the inputs is the failure mode
+/// section 11.3 is about. A user who wants the other one passes `-Wl,--subsystem,windows`, which
+/// goes on last and wins.
+fn coff(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    let Some(machine) = pe_machine(target) else {
+        return Err(Unsupported::Machine { target: target.to_canonical_string() });
+    };
+
+    let mut args = output(options);
+    args.push("-m".to_owned());
+    args.push(machine.to_owned());
+    args.push(sysroot_flag(sysroot));
+
+    if options.mode == LinkMode::Shared {
+        args.push("-shared".to_owned());
+        // The entry point of a DLL is named the way gcc names it. lld before 20 does not pick it
+        // for a MinGW DLL and falls back to MSVC's `_DllMainCRTStartup`, which `dllcrt2.o` does
+        // not define. On i686 the name is decorated, and both linkers drop the leading underscore.
+        args.push("-e".to_owned());
+        let entry = if machine == "i386pe" { "_DllMainCRTStartup@12" } else { "DllMainCRTStartup" };
+        args.push(entry.to_owned());
+    } else {
+        args.push("--subsystem".to_owned());
+        args.push(if options.gui { "windows" } else { "console" }.to_owned());
+    }
+    if matches!(options.mode, LinkMode::Static | LinkMode::StaticPie) {
+        args.push("-static".to_owned());
+    }
+    args.extend(pe_hardening(target));
+    // GNU ld reserves two megabytes of stack for a PE program and lld's MinGW driver reserves one,
+    // so the same program built by gcc and by us had a stack half the size, and a frame of one
+    // megabyte ran out of it. Named here so both linkers agree with gcc. A `-Wl,--stack,N` of
+    // the user's own comes later on the line and wins.
+    if options.mode != LinkMode::Shared {
+        args.push("--stack".to_owned());
+        args.push("2097152".to_owned());
+    }
+    // The PE counterpart of `--export-dynamic`, and a different word rather than a different
+    // default: a Windows image exports what its own export table names, and `-rdynamic` asks for
+    // every symbol to be in there so that a program can look itself up.
+    if options.export_dynamic {
+        args.push("--export-all-symbols".to_owned());
+    }
+    if options.strip {
+        args.push("-s".to_owned());
+    }
+
+    args.extend(body(sysroot, options));
+    Ok(args)
+}
+
+/// The line for a program in Microsoft's environment, which is `lld-link`'s and `link.exe`'s.
+///
+/// Every option starts with a dash rather than a slash. Both linkers take either, and a slash is
+/// what Microsoft's documentation writes, but on a host where an absolute path starts with a slash
+/// `/out:` and `/home/me/main.obj` are the same shape, and a dash is how clang writes this line
+/// for the same reason.
+///
+/// Where it differs from the mingw-w64 line, item by item:
+///
+/// - The machine is `-machine:`, in Microsoft's names, rather than a GNU emulation.
+/// - The libraries are found on `-libpath:` rather than named by path, which is [`LinkLine::msvc`].
+///   The tree is `xwin`'s shape: the CRT in `crt/lib/<arch>`, and the universal CRT and the Win32
+///   import libraries in `sdk/lib/ucrt/<arch>` and `sdk/lib/um/<arch>`.
+/// - There is no start file and no entry point. The CRT has both, `mainCRTStartup` in `libcmt.lib`
+///   or `msvcrt.lib`, and the linker picks it because the program defines `main`, or `wmain` for
+///   `wmainCRTStartup`, which is why `-municode` changes nothing here.
+/// - The five modes are two lines: a program and a DLL. `-static` is about the C runtime on the
+///   other two formats and here that is `-fms-runtime-lib=`, which is [`Invocation::crt`], so the
+///   four program modes are one line here.
+/// - `-Brepro` is the reproducibility flag, which leaves the header's timestamp as a hash of the
+///   output rather than the second it was linked, and is the `--no-insert-timestamp` of this
+///   linker. The stack reservation is left at Microsoft's megabyte, which is what `cl.exe` gives.
+///
+/// `-nodefaultlibs` also writes `-nodefaultlib`, because an object built by `cl.exe` names its CRT
+/// in a directive, and leaving the CRT off the line would otherwise put it back. `-nostartfiles`
+/// changes nothing, since there is no start file to leave off that is not also the C runtime.
+/// Neither `-rdynamic` nor `-s` has anything to say: a PE image exports what its export table
+/// names, and this line writes no symbol table to strip.
+fn msvc(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    let (Some(chip), Some(machine)) = (Chip::of(target), link_machine(target)) else {
+        return Err(Unsupported::MsvcAbi { target: target.to_canonical_string() });
+    };
+
+    let mut args = Vec::new();
+    if let Some(path) = options.output {
+        args.push(format!("-out:{}", path.display()));
+    }
+    args.push("-nologo".to_owned());
+    args.push(format!("-machine:{machine}"));
+    if options.mode == LinkMode::Shared {
+        args.push("-dll".to_owned());
+    } else {
+        args.push(format!("-subsystem:{}", if options.gui { "windows" } else { "console" }));
+    }
+    args.push("-dynamicbase".to_owned());
+    args.push("-nxcompat".to_owned());
+    if target.pointer_width() == 64 {
+        args.push("-highentropyva".to_owned());
+    }
+    args.push("-Brepro".to_owned());
+    if options.no_defaultlibs {
+        args.push("-nodefaultlib".to_owned());
+    }
+
+    for dir in options.search {
+        args.push(format!("-libpath:{}", dir.display()));
+    }
+    let arch = chip.in_tree();
+    for dir in ["crt/lib", "sdk/lib/ucrt", "sdk/lib/um"] {
+        args.push(format!("-libpath:{}", sysroot.root().join(dir).join(arch).display()));
+    }
+
+    for input in options.inputs {
+        match input {
+            Item::File(path) => args.push(path.display().to_string()),
+            // What clang makes of `-lfoo` for this environment, which is the library's own name
+            // with the extension every Windows library has.
+            Item::Library(name) if name.to_ascii_lowercase().ends_with(".lib") => {
+                args.push(name.clone());
+            }
+            Item::Library(name) => args.push(format!("{name}.lib")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+
+    if !options.no_defaultlibs {
+        let line = LinkLine::msvc(options.crt, options.builtins);
+        args.extend(shown(&libraries(&line, options)));
+    }
+    Ok(args)
+}
+
+/// Which machine `lld-link` is to write for, in the name `-machine:` knows it by.
+///
+/// Microsoft's names, which are neither the architecture's nor GNU ld's. [`None`] for a target that
+/// is not in Microsoft's environment, whose linker reads [`pe_machine`] instead.
+#[must_use]
+pub fn link_machine(target: TargetTuple) -> Option<&'static str> {
+    if target.object_format() != ObjectFormat::Coff || target.env() != Env::Msvc {
+        return None;
+    }
+    Some(match target.arch() {
+        Arch::X86_64 => "x64",
+        Arch::X86 => "x86",
+        Arch::Aarch64 => "arm64",
+        Arch::Arm64Ec => "arm64ec",
+        Arch::Arm => "arm",
+        _ => return None,
+    })
+}
+
+/// `-o`, or nothing, which is what a caller testing a line wants.
+fn output(options: &Invocation<'_>) -> Vec<String> {
+    match options.output {
+        Some(path) => vec!["-o".to_owned(), path.display().to_string()],
+        None => Vec::new(),
+    }
+}
+
+/// `--sysroot`.
+///
+/// Not because anything below needs it, since every path this function writes is absolute and
+/// complete, but because a linker script inside the sysroot resolves the names in it against this.
+/// On a real distribution `libc.so` is such a script, and without this the names in one found under
+/// a sysroot are looked for on the host.
+fn sysroot_flag(sysroot: &Sysroot) -> String {
+    format!("--sysroot={}", sysroot.root().display())
+}
+
+/// Everything after the flags: the start files, the search directories, the inputs, the libraries
+/// and whatever the user told the linker directly.
+///
+/// One function for both formats, because none of this differs between them. What has to be linked
+/// is [`LinkLine`]'s answer and it is already a per target one, and `-L`, `-l` and everything a user
+/// hands the linker directly are spelled the same by every linker that reads a GNU command line.
+///
+/// What the user said goes where the user wrote it, in among the inputs, rather than at the end. An
+/// option that brackets the files after it means nothing once it is moved behind them, which is what
+/// [`Item::Linker`] is about.
+fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut line = LinkLine::for_target(sysroot, options.mode, options.builtins);
+    let gcc = options.gcc.filter(|_| is_mingw(sysroot.target()));
+    if libc(sysroot.target()) == Libc::Import {
+        windows_flags(&mut line, options);
+    }
+    if let Some(gcc) = gcc {
+        line.start.push(gcc.join("crtbegin.o"));
+        line.end.push(gcc.join("crtend.o"));
+    }
+    if !options.no_startfiles {
+        args.extend(shown(&line.start));
+    }
+
+    // The user's search directories first and ours second, which is the order they are written in a
+    // native link too, so that `-L` in front of a sysroot behaves the way somebody passing it
+    // expects. And then nothing else: step 7 is that there is no host directory here at all.
+    for dir in options.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    args.push(format!("-L{}", sysroot.lib().display()));
+    if let Some(gcc) = gcc {
+        args.push(format!("-L{}", gcc.display()));
+    }
+    // And the stubs after the sysroot's own files, so that `-lm` finds the one the driver wrote.
+    // Only for a libc that is a stub and only where they are somewhere else, which is a sysroot in
+    // the cache: a tree the user named keeps its libraries in one place and a second `-L` to it
+    // would be noise.
+    if libc(sysroot.target()) == Libc::Stub && sysroot.stubs() != sysroot.lib() {
+        args.push(format!("-L{}", sysroot.stubs().display()));
+    }
+
+    for input in options.inputs {
+        match input {
+            Item::File(path) => args.push(path.display().to_string()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+
+    if !options.no_defaultlibs {
+        args.extend(shown(&libraries(&line, options)));
+    }
+    if !options.no_startfiles {
+        args.extend(shown(&line.end));
+    }
+
+    args
+}
+
+/// The line for a wasm target, which `wasm-ld` reads.
+///
+/// It is the line clang 23 of wasi-sdk 34 writes for the same row, so that a link that fails for
+/// one compiler fails for the other in the same way. Two differences: our runtime takes the place
+/// of `libclang_rt.builtins.a`, and `libc.a` is named by its path as on every other line here,
+/// where clang writes `-lc` with the same directory on the line.
+///
+/// The ELF flags are not here, because each of them is about a thing a wasm module does not have:
+/// a loader to name, an address to place the image at, a `.eh_frame` to index, or pages to mark.
+/// There is no `--sysroot` either, because wasm-ld reads no linker scripts that would resolve
+/// names against it. The five modes give one line, which is the note on [`LinkLine::wasi`], with
+/// the exception of `-shared`, which is refused.
+///
+/// A WASI command needs nothing more. A reactor gets `--entry _initialize` after its start file,
+/// which is what clang writes, because wasm-ld looks for `_start` by default. wasm32-none has no
+/// libc and no start file, so it has no `_start` either, and gets `--no-entry` unless the user
+/// named an entry with `-Wl,`. Its library directory is not on the line, because there is no
+/// sysroot for a target with no libc to put one in.
+///
+/// wasm32-wasip2 and wasm32-wasip3 have the same line, and the driver gives it to
+/// `wasm-component-ld`, which takes the flags of `wasm-ld`, runs it, and makes a component of the
+/// module. wasm32-wasip3 has cooperative threads in wasi-libc, so its line has
+/// `--cooperative-threading` after the inputs and `libpthread.a` in front of the libraries, which
+/// is where clang writes `--cooperative-threading -lpthread`. The flag makes wasm-ld keep the stack
+/// pointer and the TLS base in the context slots.
+fn wasm(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    if options.mode == LinkMode::Shared {
+        return Err(Unsupported::WasmShared { target: target.to_canonical_string() });
+    }
+    let hosted = libc(target) != Libc::None;
+    let threads = hosted && target.os_version().is_some_and(|version| version.major_part() == 3);
+    let line = if hosted {
+        LinkLine::wasi(sysroot, options.reactor, options.builtins)
+    } else {
+        LinkLine::freestanding(options.builtins)
+    };
+
+    let mut args = output(options);
+    args.push("-m".to_owned());
+    args.push("wasm32".to_owned());
+    if !options.no_startfiles {
+        args.extend(shown(&line.start));
+    }
+    if hosted && options.reactor {
+        args.push("--entry".to_owned());
+        args.push("_initialize".to_owned());
+    }
+    let entry = options.inputs.iter().any(
+        |input| matches!(input, Item::Linker(arg) if arg == "-e" || arg.starts_with("--entry")),
+    );
+    if !hosted && !entry {
+        args.push("--no-entry".to_owned());
+    }
+    if options.export_dynamic {
+        args.push("--export-dynamic".to_owned());
+    }
+    if options.strip {
+        args.push("--strip-all".to_owned());
+    }
+    for dir in options.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    if hosted {
+        args.push(format!("-L{}", sysroot.lib().display()));
+    }
+    for input in options.inputs {
+        match input {
+            Item::File(path) => args.push(path.display().to_string()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+    if threads {
+        args.push("--cooperative-threading".to_owned());
+    }
+    if !options.no_defaultlibs {
+        if threads {
+            args.push(sysroot.lib().join("libpthread.a").display().to_string());
+        }
+        args.extend(shown(&libraries(&line, options)));
+    }
+    Ok(args)
+}
+
+/// Whether this is a mingw-w64 target, the only one whose line takes gcc's runtime directory.
+fn is_mingw(target: TargetTuple) -> bool {
+    target.object_format() == ObjectFormat::Coff && target.env() == Env::Gnu
+}
+
+/// What `-municode` and `-mwindows` change about a mingw-w64 line.
+///
+/// The start file and two libraries, and where the libraries go is gcc's: before `libadvapi32.a`,
+/// which is where its spec writes `-lgdi32 -lcomdlg32` for the second flag.
+fn windows_flags(line: &mut LinkLine, options: &Invocation<'_>) {
+    if options.unicode && options.mode != LinkMode::Shared {
+        for file in &mut line.start {
+            if file.file_name().is_some_and(|name| name == "crt2.o") {
+                file.set_file_name("crt2u.o");
+            }
+        }
+    }
+    if options.gui {
+        let at = line
+            .libraries
+            .iter()
+            .position(|path| path.file_name().is_some_and(|name| name == "libadvapi32.a"))
+            .unwrap_or(line.libraries.len());
+        let dir = line.libraries.first().and_then(|path| path.parent()).map(Path::to_path_buf);
+        let dir = dir.unwrap_or_default();
+        for (i, name) in ["libgdi32.a", "libcomdlg32.a"].into_iter().enumerate() {
+            line.libraries.insert(at + i, dir.join(name));
+        }
+    }
+}
+
+/// The libraries, with ours left off if that is what was asked for.
+///
+/// By the one name in [`BUILTINS`] rather than by position, because the position is
+/// [`LinkLine`]'s business and a caller that knew it would be a second place to fix the day the
+/// order changes.
+fn libraries(line: &LinkLine, options: &Invocation<'_>) -> Vec<PathBuf> {
+    let mut libraries = line.libraries.clone();
+    if options.no_builtins_lib {
+        libraries.retain(|path| path.file_name().is_none_or(|name| name != BUILTINS));
+    }
+    libraries.extend(options.libgcc.map(Path::to_path_buf));
+    libraries
+}
+
+/// The flags that say how the result is linked, and the loader when there is one.
+///
+/// `-static-pie` is not among them and that is the point of this function being separate. It is a
+/// compiler driver flag, and the three linkers this line has to suit take three flags instead: the
+/// link is static, the result is position independent, and there is explicitly no interpreter,
+/// because a static binary that names one gets one mapped and then relocates itself twice.
+fn mode_flags(target: TargetTuple, mode: LinkMode) -> Vec<String> {
+    let mut args = Vec::new();
+    match mode {
+        LinkMode::Static => args.push("-static".to_owned()),
+        LinkMode::StaticPie => {
+            args.push("-static".to_owned());
+            args.push("-pie".to_owned());
+            args.push("--no-dynamic-linker".to_owned());
+        }
+        LinkMode::Dynamic => args.push("-pie".to_owned()),
+        LinkMode::DynamicNoPie => args.push("-no-pie".to_owned()),
+        LinkMode::Shared => args.push("-shared".to_owned()),
+    }
+    // A shared object is started by whatever loads it, so it names no interpreter even though it is
+    // linked dynamically. That is the one place `is_dynamic` is not the condition.
+    if matches!(mode, LinkMode::Dynamic | LinkMode::DynamicNoPie) {
+        if let Some(path) = loader(target) {
+            args.push("-dynamic-linker".to_owned());
+            args.push(path.to_owned());
+        }
+    }
+    args
+}
+
+/// The flags that are on every ELF line, whatever the mode.
+///
+/// Five answers to defaults nobody wants. An executable stack is a target default several linkers
+/// still assume when no input object says otherwise. `relro` and `now` make the relocation tables
+/// read only before `main` runs, which is the cheapest hardening there is. The unwind table header
+/// is needed by every crash handler and by `backtrace`, in a C program with no exceptions in it.
+/// The GNU hash table is the one a loader from this century reads.
+///
+/// `--build-id=none` is the reproducibility one and it is the interesting one.
+/// `spec/cross-compile/11-linking.md` section 11.4 wants byte identical output from two hosts, and a
+/// build id computed over the inputs carries their absolute paths into the binary. A deterministic
+/// one would also do, and it is a linker's own idea of deterministic rather than ours, so the
+/// absence of one is the answer that holds on all three linkers.
+///
+/// A GNU or musl Linux row is different. Its line is the same as the native line, so that a native
+/// link and a cross link for one row give the same program. Each distribution GCC passes
+/// `--build-id`, and `debuginfod`, `systemd-coredump` and the Debian and Fedora debug packages read
+/// the note. The default build ID is a SHA-1 of the output, so it is the same on two hosts when the
+/// output is. `-z now` is not on the line, because upstream GCC does not pass it. `-fhardened` and
+/// `-Wl,-z,now` add it on both lines.
+fn hardening(target: TargetTuple) -> Vec<String> {
+    let linux = target.os() == Os::Linux && matches!(target.env(), Env::Gnu | Env::Musl);
+    let mut flags = vec!["--eh-frame-hdr", "--hash-style=gnu", "-z", "relro"];
+    if !linux {
+        flags.extend(["-z", "now"]);
+    }
+    flags.extend(["-z", "noexecstack"]);
+    flags.push(if linux { "--build-id" } else { "--build-id=none" });
+    flags.into_iter().map(str::to_owned).collect()
+}
+
+/// The flags that are on every PE line, whatever the target and whatever the mode.
+///
+/// The same job as [`hardening`] above and a different list, because the two formats protect
+/// themselves with different mechanisms. `--dynamicbase` is the PE counterpart of a position
+/// independent executable: the image carries a relocation table either way, and this is the bit in
+/// the header that tells the loader it may use it rather than placing the image where it asks. It is
+/// not a default in GNU ld's PE port, which is the reason it is written here.
+/// `--high-entropy-va` goes with it on a 64-bit target, where it widens the address space the loader
+/// picks from, and means nothing on a 32-bit one. `--nxcompat` is the `noexecstack` of this format.
+///
+/// `--no-insert-timestamp` is the reproducibility one and it is this format's version of
+/// `--build-id=none`. A PE header carries the time it was linked, `spec/cross-compile/11-linking.md`
+/// section 11.4 names it as one of the four ways byte identical output is lost, and a link that
+/// stamps the current second produces a different file every time it runs on one machine, let alone
+/// on two.
+fn pe_hardening(target: TargetTuple) -> Vec<String> {
+    let mut args = vec!["--dynamicbase".to_owned(), "--nxcompat".to_owned()];
+    if target.pointer_width() == 64 {
+        args.push("--high-entropy-va".to_owned());
+    }
+    args.push("--no-insert-timestamp".to_owned());
+    args
+}
+
+/// Which machine a PE linker is to write for, in the name `-m` knows it by.
+///
+/// A different table from [`emulation`] and a much shorter one, because PE has four machine types
+/// that matter against ELF's dozen formats: there is no byte order to spell, since every Windows port
+/// is little endian, and no data model to spell either, since each machine type fixes one.
+///
+/// The names are GNU ld's PE emulations, which `ld.lld` accepts in its MinGW mode for exactly this
+/// reason. `i386pep` is the 64-bit x86 one and `i386pe` the 32-bit one, and the `p` that tells them
+/// apart is PE32+ rather than anything about the architecture, which is a piece of 1990s naming that
+/// nothing can be done about now.
+///
+/// [`None`] for a Windows target in Microsoft's ABI, which is not a gap. These names are GNU ld's
+/// and `lld-link` has never read one: it takes `/MACHINE:X64`, in an argument syntax where the rest
+/// of the line is different too, so there is nothing for a shared table to hold. ARM64EC is
+/// [`None`] for that reason first and for a second one:
+/// `spec/cross-compile/09-libc-stubs.md` refuses its import libraries as well, because an export in
+/// that ABI is a mangled name and a library written the way the others are written links and then
+/// fails to load.
+#[must_use]
+pub fn pe_machine(target: TargetTuple) -> Option<&'static str> {
+    if target.object_format() != ObjectFormat::Coff || target.env() != Env::Gnu {
+        return None;
+    }
+    Some(match target.arch() {
+        Arch::X86_64 => "i386pep",
+        Arch::X86 => "i386pe",
+        Arch::Aarch64 => "arm64pe",
+        Arch::Arm => "thumb2pe",
+        _ => return None,
+    })
+}
+
+/// Paths as the line carries them.
+fn shown(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|path| path.display().to_string()).collect()
+}
+
+/// Which of the formats one linker can write is meant, in the name `-m` knows it by.
+///
+/// The same names in `ld`, `ld.lld` and `mold`, which is why this is one table rather than one per
+/// linker. They are not derivable from the architecture: three of them spell the byte order into
+/// the name, two spell the data model, and the narrow modes of a 64-bit architecture are a different
+/// format rather than a flag on one.
+///
+/// [`None`] for a target whose format is not ELF, which is every one of them rather than wasm alone.
+/// An emulation is an ELF idea: `ld64` takes an architecture and a platform version, and the COFF
+/// linkers take a machine, so a Mach-O target that answered `aarch64linux` here would be answering a
+/// question nobody asked it in a word its linker does not know. Nothing reaches this through
+/// [`argv`], which refuses a non-ELF target before asking, and the answer still has to be right for
+/// the recorded files and for anybody calling it directly.
+#[must_use]
+pub fn emulation(target: TargetTuple) -> Option<&'static str> {
+    if target.object_format() != ObjectFormat::Elf {
+        return None;
+    }
+    let narrow = target.data_model() == DataModel::Ilp32On64;
+    let little = target.endian() == Endian::Little;
+    Some(match target.arch() {
+        Arch::X86_64 if narrow => "elf32_x86_64",
+        Arch::X86_64 => "elf_x86_64",
+        Arch::X86 => "elf_i386",
+        Arch::Aarch64 | Arch::Arm64Ec => match (little, narrow) {
+            (true, false) => "aarch64linux",
+            (true, true) => "aarch64linux32",
+            (false, false) => "aarch64linuxb",
+            (false, true) => "aarch64linux32b",
+        },
+        Arch::Arm if little => "armelf_linux_eabi",
+        Arch::Arm => "armelfb_linux_eabi",
+        Arch::Riscv64 if little => "elf64lriscv",
+        Arch::Riscv64 => "elf64briscv",
+        Arch::Riscv32 if little => "elf32lriscv",
+        Arch::Riscv32 => "elf32briscv",
+        // 32-bit z/Architecture is `elf32_s390` and is not a target here, so there is one row.
+        Arch::S390x => "elf64_s390",
+        Arch::PowerPc64 if little => "elf64lppc",
+        Arch::PowerPc64 => "elf64ppc",
+        Arch::LoongArch64 => "elf64loongarch",
+        // Unreachable, because a wasm target's format is wasm and the check above has already
+        // returned. It is here because the match is exhaustive and a wasm emulation name does not
+        // exist to write in it.
+        Arch::Wasm32 => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use rucc_tuple::TargetTuple;
+
+    use super::{Invocation, Item, Unsupported, argv, emulation, link_machine, pe_machine};
+    use crate::layout::Sysroot;
+    use crate::link::{Crt, LinkMode};
+
+    fn target(spelling: &str) -> TargetTuple {
+        spelling.parse().expect("a tuple the table knows")
+    }
+
+    fn sysroot(spelling: &str) -> Sysroot {
+        Sysroot::in_cache(Path::new("/cache"), target(spelling))
+    }
+
+    /// Where our own runtime is, which is beside the compiler on a real machine and therefore
+    /// nowhere near the sysroot. The driver finds it and hands the path in.
+    fn builtins() -> PathBuf {
+        PathBuf::from("/beside/the/compiler/librucc_builtins.a")
+    }
+
+    fn line(spelling: &str, mode: LinkMode) -> Vec<String> {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let ours = builtins();
+        let options = Invocation {
+            inputs: &one,
+            output: Some(Path::new("main")),
+            mode,
+            builtins: Some(&ours),
+            ..Invocation::default()
+        };
+        argv(target(spelling), &sysroot(spelling), &options).expect("a line")
+    }
+
+    #[test]
+    fn nothing_on_the_line_comes_from_the_host() {
+        // The mirror of the header search rule, and the property `spec/cross-compile/02-the-goal.md`
+        // claim 5 rests on. Every path is under the sysroot or is what the caller wrote.
+        for spelling in ["aarch64-linux-musl", "x86_64-linux-gnu", "riscv64-linux-musl"] {
+            for mode in [LinkMode::Dynamic, LinkMode::DynamicNoPie, LinkMode::Shared] {
+                for arg in line(spelling, mode) {
+                    let host = ["/usr/lib", "/usr/local", "/lib64/", "/lib/x86_64"]
+                        .iter()
+                        .any(|bad| arg.starts_with(bad));
+                    // The loader is the one absolute path that is not a path on this machine. It is
+                    // read by the kernel on the target, which is why it is written in full.
+                    let is_loader = arg.contains("ld-musl") || arg.contains("ld-linux");
+                    assert!(!host || is_loader, "{spelling} {mode:?} {arg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_file_of_ours_is_under_the_sysroot_except_the_runtime_the_caller_named() {
+        let spelling = "aarch64-linux-musl";
+        // The prefix as this host spells it rather than as a literal, because the question is which
+        // directory these files are in and a Windows separator is a backslash.
+        let root = sysroot(spelling).root().display().to_string();
+        let ours = builtins().display().to_string();
+        for arg in line(spelling, LinkMode::Static) {
+            // The caller's own `main.o` is relative and is theirs. Our runtime is absolute and is
+            // also theirs, because it is the compiler's output for the target and the caller is
+            // what knows where it put it. Everything else absolute is under the sysroot.
+            let named = arg.starts_with('/') && (arg.ends_with(".o") || arg.ends_with(".a"));
+            assert!(!named || arg == ours || arg.starts_with(&root), "{arg}");
+        }
+    }
+
+    #[test]
+    fn the_static_line_names_no_loader_because_nothing_will_start_it() {
+        let args = line("aarch64-linux-musl", LinkMode::Static);
+        assert!(args.contains(&"-static".to_owned()), "{args:?}");
+        assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_static_position_independent_link_is_three_flags_and_not_the_driver_one() {
+        // `-static-pie` is a gcc flag and none of the three linkers has it, which is the whole
+        // reason the mode is spelled out rather than passed through.
+        let args = line("x86_64-linux-musl", LinkMode::StaticPie);
+        assert!(!args.iter().any(|arg| arg == "-static-pie"), "{args:?}");
+        for flag in ["-static", "-pie", "--no-dynamic-linker"] {
+            assert!(args.contains(&flag.to_owned()), "{flag} missing from {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_dynamic_program_names_the_loader_that_will_start_it_and_a_shared_object_does_not() {
+        let program = line("x86_64-linux-gnu", LinkMode::Dynamic);
+        let at = program.iter().position(|arg| arg == "-dynamic-linker").expect("the flag");
+        assert_eq!(program[at + 1], "/lib64/ld-linux-x86-64.so.2");
+        let library = line("x86_64-linux-gnu", LinkMode::Shared);
+        assert!(!library.contains(&"-dynamic-linker".to_owned()), "{library:?}");
+        assert!(library.contains(&"-shared".to_owned()), "{library:?}");
+    }
+
+    #[test]
+    fn the_start_file_of_a_program_that_moves_is_not_the_one_of_a_program_that_does_not() {
+        let named = |mode| {
+            line("x86_64-linux-gnu", mode)
+                .iter()
+                .filter_map(|arg| {
+                    Path::new(arg).file_name().map(|n| n.to_string_lossy().into_owned())
+                })
+                .find(|name| name.ends_with("crt1.o"))
+        };
+        assert_eq!(named(LinkMode::Dynamic).as_deref(), Some("Scrt1.o"));
+        assert_eq!(named(LinkMode::DynamicNoPie).as_deref(), Some("crt1.o"));
+        assert_eq!(named(LinkMode::Shared), None);
+    }
+
+    #[test]
+    fn the_library_comes_after_the_objects_that_need_it() {
+        let inputs = [Item::File(Path::new("main.o").to_path_buf()), Item::Library("m".to_owned())];
+        let options =
+            Invocation { inputs: &inputs, mode: LinkMode::Static, ..Invocation::default() };
+        let args = argv(target("x86_64-linux-musl"), &sysroot("x86_64-linux-musl"), &options)
+            .expect("a line");
+        let object = args.iter().position(|arg| arg == "main.o").expect("the object");
+        let asked = args.iter().position(|arg| arg == "-lm").expect("the library");
+        let libc = args.iter().position(|arg| arg.ends_with("libc.a")).expect("the libc");
+        let end = args.iter().position(|arg| arg.ends_with("crtn.o")).expect("the end file");
+        assert!(object < asked && asked < libc && libc < end, "{args:?}");
+    }
+
+    #[test]
+    fn a_static_glibc_link_is_refused_by_name_rather_than_attempted() {
+        // A stub has no code in it, so there is nothing for a static link to take. Saying that is
+        // the whole value here: the alternative is a line that produces several thousand undefined
+        // symbols and a user reading the first forty of them.
+        let options = Invocation { mode: LinkMode::Static, ..Invocation::default() };
+        let error = argv(target("x86_64-linux-gnu"), &sysroot("x86_64-linux-gnu"), &options)
+            .expect_err("refused");
+        assert!(matches!(error, Unsupported::StaticStub { .. }), "{error:?}");
+        assert!(error.to_string().contains("musl"), "the way out is not in the message");
+        // And a musl target links statically, which is the exit criterion of #618.
+        assert!(argv(target("x86_64-linux-musl"), &sysroot("x86_64-linux-musl"), &options).is_ok());
+    }
+
+    #[test]
+    fn a_format_with_no_line_of_its_own_is_refused_by_name_rather_than_approximated() {
+        let spelling = "aarch64-macos";
+        let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
+        let error =
+            argv(target(spelling), &sysroot(spelling), &options).expect_err("no line for it");
+        assert!(matches!(error, Unsupported::Format { .. }), "{spelling} {error:?}");
+    }
+
+    #[test]
+    fn an_msvc_line_is_lld_link_s_with_the_static_crt_unless_asked_otherwise() {
+        let args = line("x86_64-windows-msvc", LinkMode::Dynamic);
+        let at = |what: &str| {
+            args.iter().position(|arg| arg.ends_with(what)).unwrap_or_else(|| panic!("{what}"))
+        };
+        for flag in ["-out:main", "-machine:x64", "-subsystem:console", "-Brepro"] {
+            assert!(args.contains(&flag.to_owned()), "{flag} in {args:?}");
+        }
+        // No entry point, because the CRT has one and the linker picks it from `main`.
+        assert!(!args.iter().any(|arg| arg.starts_with("-entry")), "{args:?}");
+        // The three directories of the tree, for this architecture.
+        let root = sysroot("x86_64-windows-msvc").root().to_path_buf();
+        for dir in ["crt/lib", "sdk/lib/ucrt", "sdk/lib/um"] {
+            let flag = format!("-libpath:{}", root.join(dir).join("x86_64").display());
+            assert!(args.contains(&flag), "{flag} in {args:?}");
+        }
+        // `/MT`, which is the default, and then ours after everything Microsoft's has.
+        assert!(at("main.o") < at("libcmt.lib"), "{args:?}");
+        assert!(at("libcmt.lib") < at("libucrt.lib"), "{args:?}");
+        assert!(at("libucrt.lib") < at("libvcruntime.lib"), "{args:?}");
+        assert!(at("oldnames.lib") < at("librucc_builtins.a"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "msvcrt.lib"), "{args:?}");
+        // And nothing in the GNU style, which this linker would take for an input file.
+        assert!(!args.iter().any(|arg| arg.starts_with("--") || arg == "-o"), "{args:?}");
+    }
+
+    #[test]
+    fn the_dll_runtime_is_the_other_three_libraries() {
+        let one = [Item::File(Path::new("main.obj").to_path_buf())];
+        let options = Invocation {
+            inputs: &one,
+            mode: LinkMode::Dynamic,
+            crt: Crt::Dll,
+            ..Invocation::default()
+        };
+        let spelling = "aarch64-windows-msvc";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        assert!(args.contains(&"-machine:arm64".to_owned()), "{args:?}");
+        for name in ["msvcrt.lib", "ucrt.lib", "vcruntime.lib", "kernel32.lib"] {
+            assert!(args.contains(&name.to_owned()), "{name} in {args:?}");
+        }
+        for name in ["libcmt.lib", "libucrt.lib", "libvcruntime.lib"] {
+            assert!(!args.contains(&name.to_owned()), "{name} in {args:?}");
+        }
+        assert!(args.iter().any(|arg| arg.ends_with("aarch64")), "{args:?}");
+    }
+
+    #[test]
+    fn an_msvc_dll_is_one_flag_and_takes_its_entry_from_the_crt_too() {
+        let args = line("x86_64-windows-msvc", LinkMode::Shared);
+        assert!(args.contains(&"-dll".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("-subsystem")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("-entry")), "{args:?}");
+        // The four program modes are one line, because none of them changes anything here.
+        let program = line("x86_64-windows-msvc", LinkMode::Dynamic);
+        for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::DynamicNoPie] {
+            assert_eq!(line("x86_64-windows-msvc", mode), program, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_msvc_library_is_named_the_way_windows_names_one_and_nodefaultlibs_means_all_of_them() {
+        let inputs = [
+            Item::File(Path::new("main.obj").to_path_buf()),
+            Item::Library("user32".to_owned()),
+            Item::Library("gdi32.lib".to_owned()),
+        ];
+        let options = Invocation {
+            inputs: &inputs,
+            no_defaultlibs: true,
+            gui: true,
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-windows-msvc";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        assert!(args.contains(&"user32.lib".to_owned()), "{args:?}");
+        assert!(args.contains(&"gdi32.lib".to_owned()), "{args:?}");
+        assert!(args.contains(&"-subsystem:windows".to_owned()), "{args:?}");
+        // The flag too, so that a directive in somebody's object cannot put the CRT back.
+        assert!(args.contains(&"-nodefaultlib".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("libcmt.lib")), "{args:?}");
+    }
+
+    #[test]
+    fn arm64ec_is_refused_because_there_is_no_crt_for_it_to_link_against() {
+        let spelling = "arm64ec-windows-msvc";
+        let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
+        let error = argv(target(spelling), &sysroot(spelling), &options).expect_err("refused");
+        assert!(matches!(error, Unsupported::MsvcAbi { .. }), "{error:?}");
+        assert!(error.to_string().contains("mingw-w64"), "{error}");
+    }
+
+    #[test]
+    fn what_the_user_told_the_linker_stays_where_the_user_wrote_it() {
+        // The pair libtool writes around a set of convenience archives. Both words bracket the files
+        // between them, so a line that collects them and appends them to the end has two options
+        // that say nothing and an archive that went in empty. Written in the middle here for that
+        // reason: what is checked is the position rather than the presence.
+        let inputs = [
+            Item::File(Path::new("main.o").to_path_buf()),
+            Item::Linker("--whole-archive".to_owned()),
+            Item::File(Path::new("libaesni.a").to_path_buf()),
+            Item::Linker("--no-whole-archive".to_owned()),
+            Item::Library("m".to_owned()),
+        ];
+        let options =
+            Invocation { mode: LinkMode::Dynamic, inputs: &inputs, ..Invocation::default() };
+        let args = argv(target("x86_64-linux-gnu"), &sysroot("x86_64-linux-gnu"), &options)
+            .expect("a line");
+        let at = |what: &str| args.iter().position(|arg| arg == what).expect(what);
+        assert!(at("main.o") < at("--whole-archive"), "{args:?}");
+        assert!(at("--whole-archive") < at("libaesni.a"), "{args:?}");
+        assert!(at("libaesni.a") < at("--no-whole-archive"), "{args:?}");
+        assert!(at("--no-whole-archive") < at("-lm"), "{args:?}");
+        // And still in front of the libc and the end start files, which are ours and go after every
+        // input whatever kind each one turned out to be.
+        assert!(args.iter().position(|arg| arg.ends_with("crtn.o")).expect("crtn") > at("-lm"));
+    }
+
+    #[test]
+    fn asking_for_no_start_files_leaves_out_both_ends_of_them() {
+        let options =
+            Invocation { mode: LinkMode::Dynamic, no_startfiles: true, ..Invocation::default() };
+        let args = argv(target("x86_64-linux-gnu"), &sysroot("x86_64-linux-gnu"), &options)
+            .expect("a line");
+        assert!(!args.iter().any(|arg| arg.ends_with("crt1.o")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("crtn.o")), "{args:?}");
+        // And still links against the libc, because that is the other flag.
+        assert!(args.iter().any(|arg| arg.ends_with("libc.so")), "{args:?}");
+    }
+
+    #[test]
+    fn a_narrow_mode_of_a_wide_architecture_is_a_different_output_format() {
+        // The row that proves the data model belongs in the tuple. Linking x32 as `elf_x86_64`
+        // produces 64-bit pointers for a target whose pointers are 32 bits.
+        assert_eq!(emulation(target("x86_64-linux-gnux32")), Some("elf32_x86_64"));
+        assert_eq!(emulation(target("x86_64-linux-gnu")), Some("elf_x86_64"));
+    }
+
+    #[test]
+    fn byte_order_is_in_the_output_format_name() {
+        assert_eq!(emulation(target("s390x-linux-gnu")), Some("elf64_s390"));
+        assert_eq!(emulation(target("powerpc64le-linux-gnu")), Some("elf64lppc"));
+        assert_eq!(emulation(target("riscv64-linux-musl")), Some("elf64lriscv"));
+    }
+
+    /// The two flags that are about the line rather than about the target.
+    ///
+    /// `-rdynamic` is a flag the linker has and `-fno-builtins-lib` is one it does not, so one of
+    /// them appears and the other one takes a path away, and both are here because a flag the cross
+    /// line ignored would be a flag that works natively and stops working the moment the target is
+    /// somebody else's.
+    #[test]
+    fn rdynamic_reaches_the_linker_and_no_builtins_lib_takes_our_runtime_off() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let ours = builtins();
+        let both = Invocation {
+            inputs: &one,
+            output: Some(Path::new("main")),
+            mode: LinkMode::Dynamic,
+            export_dynamic: true,
+            no_builtins_lib: true,
+            // Found on the machine and still left off, which is what the flag is. A line built
+            // with no runtime to name would pass this test without the flag doing anything.
+            builtins: Some(&ours),
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-linux-musl";
+        let args = argv(target(spelling), &sysroot(spelling), &both).expect("a line");
+        assert!(args.contains(&"--export-dynamic".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        // And the libc it was asked to keep is still there, because that is the other flag.
+        assert!(args.iter().any(|arg| arg.ends_with("libc.a")), "{args:?}");
+    }
+
+    #[test]
+    fn a_mingw_line_names_the_pe_machine_and_the_subsystem_and_no_loader() {
+        let args = line("x86_64-windows-gnu", LinkMode::Dynamic);
+        let at = args.iter().position(|arg| arg == "-m").expect("the machine flag");
+        assert_eq!(args[at + 1], "i386pep");
+        let at = args.iter().position(|arg| arg == "--subsystem").expect("the subsystem flag");
+        assert_eq!(args[at + 1], "console");
+        // A PE image names no interpreter and carries a relocation table whatever it is linked as,
+        // so the two flags that answer those questions on ELF have nothing to say here.
+        for absent in ["-dynamic-linker", "-pie", "-no-pie", "--eh-frame-hdr"] {
+            assert!(!args.contains(&absent.to_owned()), "{absent} in {args:?}");
+        }
+    }
+
+    #[test]
+    fn mwindows_and_municode_change_the_subsystem_the_start_file_and_two_libraries() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let options = Invocation {
+            inputs: &one,
+            mode: LinkMode::Dynamic,
+            gui: true,
+            unicode: true,
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-windows-gnu";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        let at = |name: &str| {
+            args.iter().position(|arg| arg.ends_with(name)).unwrap_or_else(|| panic!("{name}"))
+        };
+        let subsystem = args.iter().position(|arg| arg == "--subsystem").expect("the flag");
+        assert_eq!(args[subsystem + 1], "windows");
+        assert!(at("crt2u.o") < at("main.o"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("/crt2.o")), "{args:?}");
+        assert!(at("libmsvcrt.a") < at("libgdi32.a"), "{args:?}");
+        assert!(at("libcomdlg32.a") < at("libadvapi32.a"), "{args:?}");
+
+        // And neither says anything on an ELF line.
+        let linux = "x86_64-linux-musl";
+        let args = argv(target(linux), &sysroot(linux), &options).expect("a line");
+        assert!(!args.iter().any(|arg| arg.contains("gdi32") || arg.contains("crt2u")));
+    }
+
+    #[test]
+    fn a_mingw_line_carries_the_crt_and_the_win32_libraries_in_single_pass_order() {
+        let args = line("x86_64-windows-gnu", LinkMode::Dynamic);
+        let at = |name: &str| {
+            args.iter().position(|arg| arg.ends_with(name)).unwrap_or_else(|| panic!("{name}"))
+        };
+        // One start file and no end file, because PE has no `.init` and `.fini` for a pair of them
+        // to open and close.
+        assert!(at("crt2.o") < at("main.o"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("crtn.o")), "{args:?}");
+        // Then a library after everything that calls into it, which is what GNU ld's PE port needs
+        // and what lld's COFF linker does not care about.
+        assert!(at("main.o") < at("libmingw32.a"), "{args:?}");
+        assert!(at("libmingwex.a") < at("libmsvcrt.a"), "{args:?}");
+        assert!(at("libmsvcrt.a") < at("libkernel32.a"), "{args:?}");
+        assert!(at("libkernel32.a") < at("librucc_builtins.a"), "{args:?}");
+    }
+
+    #[test]
+    fn a_dll_takes_the_other_start_file_and_no_subsystem() {
+        let args = line("x86_64-windows-gnu", LinkMode::Shared);
+        assert!(args.contains(&"-shared".to_owned()), "{args:?}");
+        // By file name rather than by suffix, since `dllcrt2.o` ends with the other one's name.
+        let named = |name: &str| {
+            args.iter().any(|arg| Path::new(arg).file_name().is_some_and(|file| file == name))
+        };
+        assert!(named("dllcrt2.o"), "{args:?}");
+        assert!(!named("crt2.o"), "{args:?}");
+        assert!(!args.contains(&"--subsystem".to_owned()), "{args:?}");
+        let entry = args.iter().position(|arg| arg == "-e").expect("an entry point");
+        assert_eq!(args[entry + 1], "DllMainCRTStartup", "{args:?}");
+    }
+
+    /// What Postgres's `meson.build` hands the linker on MinGW, behind `-Wl,`, for `postgres.exe`
+    /// and for a DLL: lld's MinGW driver reads every one of these words itself, so the line passes
+    /// them through as written, in the order written and after the objects. Ours go first, so the
+    /// `--stack` Postgres asks for is the last one on the line and the one lld keeps.
+    /// tamnd/rucc#1993.
+    #[test]
+    fn the_mingw_link_flags_postgres_writes_reach_the_linker_as_written_and_last() {
+        let words = [
+            "--allow-multiple-definition",
+            "--disable-auto-import",
+            "--stack",
+            "4194304",
+            "--export-all-symbols",
+            "--out-implib=libpostgres.exe.a",
+        ];
+        let mut inputs = vec![Item::File(Path::new("main.o").to_path_buf())];
+        inputs.extend(words.iter().map(|word| Item::Linker((*word).to_owned())));
+        for mode in [LinkMode::Dynamic, LinkMode::Shared] {
+            let options = Invocation {
+                inputs: &inputs,
+                output: Some(Path::new("postgres.exe")),
+                mode,
+                ..Invocation::default()
+            };
+            let spelling = "x86_64-windows-gnu";
+            let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+            let at = args
+                .windows(words.len())
+                .position(|run| run == &words[..])
+                .unwrap_or_else(|| panic!("{mode:?} {args:?}"));
+            let object = args.iter().position(|arg| arg == "main.o").expect("the object");
+            assert!(object < at, "{mode:?} {args:?}");
+            let last = args.iter().rposition(|arg| arg == "--stack").expect("a stack size");
+            assert_eq!(args[last + 1], "4194304", "{mode:?} {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_static_windows_link_is_not_refused_because_the_crt_there_is_a_dll_on_every_machine() {
+        // The difference between an import library and a stub shared object that shows up on the
+        // line. `-static` on Windows is a statement about our libraries rather than about the CRT,
+        // and the program it produces runs, which is why the refusal is about `Libc::Stub` by name.
+        let args = line("x86_64-windows-gnu", LinkMode::Static);
+        assert!(args.contains(&"-static".to_owned()), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("libmsvcrt.a")), "{args:?}");
+    }
+
+    #[test]
+    fn the_pe_header_carries_no_timestamp_so_that_two_links_produce_one_file() {
+        // Section 11.4's second cause of a host reaching a binary, and the PE counterpart of
+        // `--build-id=none`. A stamped header differs between two runs on one machine.
+        for spelling in ["x86_64-windows-gnu", "i686-windows-gnu", "aarch64-windows-gnu"] {
+            let args = line(spelling, LinkMode::Dynamic);
+            assert!(args.contains(&"--no-insert-timestamp".to_owned()), "{spelling} {args:?}");
+            assert!(args.contains(&"--dynamicbase".to_owned()), "{spelling} {args:?}");
+            // The wide address space is a 64-bit idea and i686 has no room for it.
+            let wide = args.contains(&"--high-entropy-va".to_owned());
+            assert_eq!(wide, spelling != "i686-windows-gnu", "{spelling} {args:?}");
+        }
+    }
+
+    #[test]
+    fn the_pe_machine_is_the_one_the_linker_knows_and_not_the_one_the_architecture_is_called() {
+        assert_eq!(pe_machine(target("x86_64-windows-gnu")), Some("i386pep"));
+        assert_eq!(pe_machine(target("i686-windows-gnu")), Some("i386pe"));
+        assert_eq!(pe_machine(target("aarch64-windows-gnu")), Some("arm64pe"));
+        // An ELF target has no PE machine, the same way a PE target has no ELF emulation. And
+        // neither has the MSVC ABI, whose linker takes `/MACHINE:X64` and reads none of these names.
+        assert_eq!(pe_machine(target("x86_64-linux-gnu")), None);
+        assert_eq!(pe_machine(target("x86_64-windows-msvc")), None);
+        assert_eq!(emulation(target("x86_64-windows-gnu")), None);
+        // Which is the other table, and the other way round.
+        assert_eq!(link_machine(target("x86_64-windows-msvc")), Some("x64"));
+        assert_eq!(link_machine(target("aarch64-windows-msvc")), Some("arm64"));
+        assert_eq!(link_machine(target("x86_64-windows-gnu")), None);
+    }
+
+    #[test]
+    fn a_format_with_no_emulation_names_none_rather_than_its_architecture_s() {
+        // An emulation is an ELF idea. A Mach-O target whose architecture is also an ELF one would
+        // otherwise answer `aarch64linux` here, which is a word `ld64` has never heard and exactly
+        // the almost-right answer `spec/cross-compile/06-abis.md` opens by warning about.
+        for spelling in
+            ["aarch64-macos", "x86_64-windows-gnu", "x86_64-windows-msvc", "wasm32-wasi"]
+        {
+            assert_eq!(emulation(target(spelling)), None, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_freestanding_link_has_no_libc_and_no_start_files_and_still_has_our_runtime() {
+        // Section 8.2's first row is nine headers and no link inputs, so there is no `crt1.o` to
+        // name and no `libc.a` either. The builtins stay, because a 32-bit target doing 64-bit
+        // arithmetic reaches them whether a libc exists or not.
+        let args = line("armv7m-none-eabi", LinkMode::Static);
+        assert!(!args.iter().any(|arg| arg.ends_with("crt1.o")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("crti.o")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("crtn.o")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("libc.a")), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        // And it is a static link with nothing to interpret it, which is what a bare metal target is.
+        assert!(args.contains(&"-static".to_owned()), "{args:?}");
+        assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_wasi_command_is_crt1_command_the_objects_libc_and_our_runtime_and_no_elf_flags() {
+        let args = line("wasm32-wasip1", LinkMode::Dynamic);
+        let lib = sysroot("wasm32-wasip1").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            lib.join("crt1-command.o").display().to_string(),
+            format!("-L{}", lib.display()),
+            "main.o".to_owned(),
+            lib.join("libsetjmp.a").display().to_string(),
+            lib.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(args, want);
+        // Every mode but a shared one is the same module, because wasm has one kind of image.
+        for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::DynamicNoPie] {
+            assert_eq!(line("wasm32-wasip1", mode), want, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_wasi_reactor_starts_at_initialize_and_wasm32_none_has_no_entry() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let reactor = Invocation { inputs: &one, reactor: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip1"), &sysroot("wasm32-wasip1"), &reactor).unwrap();
+        let crt = sysroot("wasm32-wasip1").lib().join("crt1-reactor.o").display().to_string();
+        let at = args.iter().position(|arg| *arg == crt).expect("crt1-reactor.o");
+        assert_eq!(args[at + 1..at + 3], ["--entry", "_initialize"]);
+        assert!(!args.iter().any(|arg| arg.ends_with("crt1-command.o")), "{args:?}");
+
+        // No libc, so no start file, no `_start`, and no directory of a sysroot nobody fetched.
+        let args = line("wasm32-none", LinkMode::Dynamic);
+        assert!(args.contains(&"--no-entry".to_owned()), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("-L") || arg.ends_with(".o") && arg != "main.o")
+        );
+        assert!(args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        // An entry the user named wins, and `--no-entry` would take it away.
+        let named = [Item::Linker("--entry=go".to_owned())];
+        let options = Invocation { inputs: &named, ..Invocation::default() };
+        let args = argv(target("wasm32-none"), &sysroot("wasm32-none"), &options).unwrap();
+        assert!(!args.contains(&"--no-entry".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_shared_wasm_library_is_refused_by_name() {
+        let shared = Invocation { mode: LinkMode::Shared, ..Invocation::default() };
+        let error = argv(target("wasm32-wasip1"), &sysroot("wasm32-wasip1"), &shared).unwrap_err();
+        assert!(matches!(error, Unsupported::WasmShared { .. }), "{error:?}");
+        assert!(error.to_string().contains("dylink.0"), "{error}");
+    }
+
+    /// The line of clang 23 for each preview, for `wasm-component-ld` on the two that make a
+    /// component. wasip3 adds the cooperative threads and their library, and a reactor has the
+    /// same entry on every preview.
+    #[test]
+    fn a_wasi_component_has_the_line_of_its_preview() {
+        let p2 = sysroot("wasm32-wasip2").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            p2.join("crt1-command.o").display().to_string(),
+            format!("-L{}", p2.display()),
+            "main.o".to_owned(),
+            p2.join("libsetjmp.a").display().to_string(),
+            p2.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(line("wasm32-wasip2", LinkMode::Dynamic), want);
+
+        let p3 = sysroot("wasm32-wasip3").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            p3.join("crt1-command.o").display().to_string(),
+            format!("-L{}", p3.display()),
+            "main.o".to_owned(),
+            "--cooperative-threading".to_owned(),
+            p3.join("libpthread.a").display().to_string(),
+            p3.join("libsetjmp.a").display().to_string(),
+            p3.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(line("wasm32-wasip3", LinkMode::Dynamic), want);
+
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let options = Invocation { inputs: &one, no_defaultlibs: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip3"), &sysroot("wasm32-wasip3"), &options).unwrap();
+        assert_eq!(args.last().map(String::as_str), Some("--cooperative-threading"), "{args:?}");
+        let reactor = Invocation { inputs: &one, reactor: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip2"), &sysroot("wasm32-wasip2"), &reactor).unwrap();
+        let crt = p2.join("crt1-reactor.o").display().to_string();
+        let at = args.iter().position(|arg| *arg == crt).expect("crt1-reactor.o");
+        assert_eq!(args[at + 1..at + 3], ["--entry", "_initialize"]);
+    }
+
+    #[test]
+    fn the_platforms_whose_libc_we_stub_refuse_a_static_link_too_and_not_only_glibc() {
+        // The refusal follows from the sysroot holding a stub rather than from the target being a
+        // glibc one. bionic and the BSDs are in the same position for the same reason, and a line
+        // that pretended otherwise would fail in the linker instead of here.
+        for spelling in ["aarch64-linux-android", "x86_64-freebsd", "x86_64-illumos"] {
+            let options = Invocation { mode: LinkMode::Static, ..Invocation::default() };
+            let error = argv(target(spelling), &sysroot(spelling), &options).expect_err("refused");
+            assert!(matches!(error, Unsupported::StaticStub { .. }), "{spelling} {error:?}");
+        }
+    }
+
+    #[test]
+    fn the_same_line_comes_out_every_time_it_is_asked_for() {
+        // Claim 5 in the smallest form it has: the function reads nothing but its arguments, so
+        // two calls agree and so do two hosts.
+        for mode in [LinkMode::Dynamic, LinkMode::Shared] {
+            assert_eq!(line("aarch64-linux-gnu", mode), line("aarch64-linux-gnu", mode));
+        }
+    }
+}

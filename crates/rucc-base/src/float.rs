@@ -1,0 +1,1514 @@
+//! Binary floating point, in software, for every format the compiler has to produce.
+//!
+//! A compiler cannot ask the machine it is running on what a floating constant means. The host
+//! may not have the format at all, `long double` is eighty bits on x86-64 and a hundred and
+//! twenty eight on AArch64 Linux and sixty four on Apple, and `strtod` is the host's libc
+//! rather than the target's semantics. Reproducible output means the same source gives the same
+//! bits whoever compiles it, so the conversion is done here, exactly, in integer arithmetic.
+//!
+//! [`Float`] is a sign, a category, an exponent and a significand of up to a hundred and
+//! thirteen bits, which is every IEEE encoding in [`Format`] including the x87 eighty bit one
+//! with its stored leading bit. The value of a finite number is `significand * 2^(exponent -
+//! precision + 1)`, so the significand is an integer rather than a fraction and the exponent is
+//! that of its leading bit.
+//!
+//! [`Format::DoubleDouble`] is the one format that shape does not fit, because a double-double is
+//! a pair of doubles rather than one number with one exponent, and the two halves can sit two
+//! thousand bits apart. [`Float`] refuses it, at [`Format::is_ieee`], in every constructor rather
+//! than at the point some later arithmetic gives a wrong answer. Representing one is what a
+//! PowerPC backend will need and there is no PowerPC backend, so the format is here to be
+//! described by `rucc-abi` and named in a data layout, which is what the fifteen psABIs of
+//! `spec/cross-compile/06-abis.md` section 6.1 want from it today.
+//!
+//! Conversion from text is correctly rounded, round to nearest with ties to even, which is the
+//! only rounding mode a translation-time constant uses. The decimal path scales the number by
+//! powers of two until it is in `[1, 2)` and then reads the significand off it, using the exact
+//! decimal in `decimal.rs` so that no step ever loses a bit. A naive `mantissa * 10^exponent`
+//! in `f64` is wrong in the last place for a noticeable fraction of literals, and the last
+//! place is exactly what a differential test against another compiler notices. Hexadecimal
+//! constants are exact by construction and only have to be rounded once.
+//!
+//! ```
+//! use rucc_base::float::{Float, Format};
+//!
+//! let (value, status) = Float::parse("0.1", Format::Double).expect("a number");
+//! assert_eq!(value.to_bits(), (0.1f64).to_bits() as u128);
+//! assert!(status.has(rucc_base::float::Status::INEXACT));
+//! ```
+//!
+//! The arithmetic is in `arith.rs`, on the same terms: every operation is correctly rounded, to
+//! nearest with ties to even, in integer operations that the host cannot get wrong.
+
+use crate::decimal::{Decimal, Fraction};
+
+mod arith;
+mod dec;
+
+pub use crate::float::arith::Integral;
+
+/// A floating point format.
+///
+/// Seven of the eleven are IEEE 754 binary encodings and the other four are not, which is why
+/// [`Format::is_ieee`] exists and why most of the questions below are answerable for seven of them.
+/// The four are the double-double and the three decimal formats.
+/// The split is the same one the psABIs make, so this is the enum `rucc-abi` describes a target's
+/// scalar types with as well as the one [`Float`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Format {
+    /// IEEE binary16, which C spells `_Float16`.
+    Half,
+    /// The brain float, an IEEE binary32 with the low sixteen bits of its significand cut off,
+    /// which C spells `__bf16`. It has the range of a `float` and less than half its precision.
+    BFloat16,
+    /// IEEE binary32, which C spells `float`.
+    Single,
+    /// IEEE binary64, which C spells `double`.
+    Double,
+    /// The x87 eighty bit format, which is `long double` on x86. It is the one format here that
+    /// stores the leading significand bit rather than leaving it implied.
+    X87Extended,
+    /// The x87 eighty bit format with every result rounded to fifty three bits, which is `long
+    /// double` on i386 FreeBSD and DragonFly. GCC calls it `ieee_extended_intel_96_round_53` and
+    /// uses it there because those systems start a program with the x87 precision control set to
+    /// fifty three bits, so the unit itself never makes a sixty four bit result.
+    ///
+    /// The encoding is the x87 one and so is the exponent range, which is why the smallest
+    /// subnormal is two to the minus 16434 rather than the minus 16445 of the full format. Only
+    /// the place a result is rounded at is different, which is [`Format::rounding`]. A number
+    /// read out of its bits keeps all sixty four of them, as GCC's does: the bits are what the
+    /// program stored, and only the next operation on them rounds.
+    X87Round53,
+    /// IEEE binary128, which C spells `_Float128`, and which is `long double` on AArch64 Linux,
+    /// on s390x and on RISC-V.
+    Quad,
+    /// IBM double-double, a pair of `double`s whose sum is the value, which is `long double` on
+    /// 64-bit PowerPC.
+    ///
+    /// Not an IEEE encoding and not a binary floating point format in IEEE's sense. It has no
+    /// exponent field of its own, no significand field of its own, and no single precision: the
+    /// gap between the two halves is whatever the value needs, so the number of significand bits
+    /// between the top of the first and the bottom of the second is a hundred and six for some
+    /// values and two thousand for others. `__LDBL_MANT_DIG__` says 106 because a macro has to
+    /// say something, and 106 is the figure everyone quotes, but it is the precision you get near
+    /// the top of the significand rather than a property of the format.
+    ///
+    /// [`Float`] does not represent one, per [`Format::is_ieee`].
+    DoubleDouble,
+    /// IEEE decimal32 in the binary integer decimal encoding, which C spells `_Decimal32`.
+    ///
+    /// The three decimal formats are IEEE 754 formats but not binary ones, and nothing about a
+    /// binary format's precision, exponent or significand fields means anything for them, so
+    /// [`Format::is_ieee`] answers false for them as it does for the double-double and [`Float`]
+    /// refuses them. What a decimal constant is made of is in [`crate::dfp`].
+    Decimal32,
+    /// IEEE decimal64 in the binary integer decimal encoding, which C spells `_Decimal64`.
+    Decimal64,
+    /// IEEE decimal128 in the binary integer decimal encoding, which C spells `_Decimal128`.
+    Decimal128,
+}
+
+/// What every IEEE binary question on a double-double or a decimal format fails with.
+///
+/// A function rather than a `panic!` in each arm, because the same sentence in five places drifts
+/// into five sentences, and because `panic!` in a `const fn` takes a literal and will not take a
+/// constant.
+const fn not_ieee() -> ! {
+    panic!(
+        "the double-double format is a pair of doubles and the decimal formats count in tens, so \
+         neither has a binary precision, exponent range or significand field to ask about"
+    )
+}
+
+impl Format {
+    /// The short name this format is written under, which is its width in bits for all of them
+    /// but the two whose width does not tell them apart from something else.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Format::Half => "f16",
+            Format::BFloat16 => "bf16",
+            Format::Single => "f32",
+            Format::Double => "f64",
+            Format::X87Extended => "f80",
+            Format::X87Round53 => "f80r53",
+            Format::Quad => "f128",
+            Format::DoubleDouble => "ppc-f128",
+            Format::Decimal32 => "d32",
+            Format::Decimal64 => "d64",
+            Format::Decimal128 => "d128",
+        }
+    }
+
+    /// The format of that name, and [`None`] for a word that is not one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "f16" => Format::Half,
+            "bf16" => Format::BFloat16,
+            "f32" => Format::Single,
+            "f64" => Format::Double,
+            "f80" => Format::X87Extended,
+            "f80r53" => Format::X87Round53,
+            "f128" => Format::Quad,
+            "ppc-f128" => Format::DoubleDouble,
+            "d32" => Format::Decimal32,
+            "d64" => Format::Decimal64,
+            "d128" => Format::Decimal128,
+            _ => return None,
+        })
+    }
+
+    /// Whether the format is an IEEE 754 binary encoding, which is every one of them but the
+    /// double-double and the three decimal ones.
+    ///
+    /// This is the guard on the rest of this type and on [`Float`]. A number in an IEEE encoding
+    /// is a sign, an exponent and one significand, which is what [`Float`] stores, so every
+    /// format that answers true here has a precision, an exponent range and a bit layout and can
+    /// be parsed, encoded and folded. The double-double is a pair, so it has none of those and
+    /// [`Float`] refuses it rather than answering with the nominal figures, which are close
+    /// enough to right to be believed and wrong often enough to matter.
+    #[must_use]
+    pub const fn is_ieee(self) -> bool {
+        !matches!(
+            self,
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128
+        )
+    }
+
+    /// The decimal format this is, and [`None`] for every binary one.
+    ///
+    /// ```
+    /// use rucc_base::dfp::Width;
+    /// use rucc_base::float::Format;
+    ///
+    /// assert_eq!(Format::Decimal64.decimal(), Some(Width::D64));
+    /// assert_eq!(Format::Double.decimal(), None);
+    /// ```
+    #[must_use]
+    pub const fn decimal(self) -> Option<crate::dfp::Width> {
+        match self {
+            Format::Decimal32 => Some(crate::dfp::Width::D32),
+            Format::Decimal64 => Some(crate::dfp::Width::D64),
+            Format::Decimal128 => Some(crate::dfp::Width::D128),
+            _ => None,
+        }
+    }
+
+    /// The number of significand bits, counting the leading one whether it is stored or not.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn precision(self) -> u32 {
+        match self {
+            Format::Half => 11,
+            Format::BFloat16 => 8,
+            Format::Single => 24,
+            Format::Double => 53,
+            Format::X87Extended | Format::X87Round53 => 64,
+            Format::Quad => 113,
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
+        }
+    }
+
+    /// The number of significand bits a result is rounded to, which is [`Format::precision`] for
+    /// every format but [`Format::X87Round53`].
+    ///
+    /// That one stores sixty four bits like the x87 format it is, and rounds every result it
+    /// makes to fifty three of them. The subnormals are rounded at the same distance below the
+    /// smallest normal, so the smallest subnormal is eleven bits above the x87 format's one.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn rounding(self) -> u32 {
+        match self {
+            Format::X87Round53 => 53,
+            _ => self.precision(),
+        }
+    }
+
+    /// Whether this is one of the two x87 formats, which have one encoding and one register
+    /// file and differ only in where a result is rounded.
+    #[must_use]
+    pub const fn is_x87(self) -> bool {
+        matches!(self, Format::X87Extended | Format::X87Round53)
+    }
+
+    /// The format whose bits this one is, which is itself for every format but
+    /// [`Format::X87Round53`]. That one is the x87 format with another rounding, so an ABI, a
+    /// register file and an encoding see the x87 format.
+    #[must_use]
+    pub const fn storage(self) -> Format {
+        match self {
+            Format::X87Round53 => Format::X87Extended,
+            _ => self,
+        }
+    }
+
+    /// The exponent of the largest finite number, which is also the exponent bias.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn max_exponent(self) -> i32 {
+        match self {
+            Format::Half => 15,
+            Format::BFloat16 | Format::Single => 127,
+            Format::Double => 1023,
+            Format::X87Extended | Format::X87Round53 | Format::Quad => 16383,
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
+        }
+    }
+
+    /// The exponent of the smallest normal number.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn min_exponent(self) -> i32 {
+        1 - self.max_exponent()
+    }
+
+    /// The width of the encoding in bits, which for x87 is the eighty bits that matter and not
+    /// the ninety six or hundred and twenty eight an ABI pads them out to.
+    ///
+    /// Answered for every format, the double-double included, because a width is the one fact a
+    /// pair of doubles does have: it is the two of them and nothing else, so it is a hundred and
+    /// twenty eight bits the same way binary128 is.
+    #[must_use]
+    pub const fn width(self) -> u32 {
+        match self {
+            Format::Half | Format::BFloat16 => 16,
+            Format::Single | Format::Decimal32 => 32,
+            Format::Double | Format::Decimal64 => 64,
+            Format::X87Extended | Format::X87Round53 => 80,
+            Format::Quad | Format::DoubleDouble | Format::Decimal128 => 128,
+        }
+    }
+
+    /// Whether the leading significand bit is stored rather than implied.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn has_explicit_integer_bit(self) -> bool {
+        match self {
+            Format::X87Extended | Format::X87Round53 => true,
+            Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad => {
+                false
+            }
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
+        }
+    }
+
+    /// The width of the exponent field.
+    const fn exponent_bits(self) -> u32 {
+        self.width() - self.significand_bits() - 1
+    }
+
+    /// The width of the stored significand field.
+    const fn significand_bits(self) -> u32 {
+        if self.has_explicit_integer_bit() { self.precision() } else { self.precision() - 1 }
+    }
+
+    /// A decimal exponent above which every number is too large for the format.
+    ///
+    /// The value is at least `10^(point - 1)`, so a point past this cannot be finite. It is
+    /// deliberately loose: it exists to stop the scaling loop from walking a million powers of
+    /// ten, not to decide anything.
+    const fn max_decimal_exponent(self) -> i32 {
+        (self.max_exponent() + 1) * 30103 / 100000 + 2
+    }
+
+    /// A decimal exponent below which every number rounds to zero.
+    const fn min_decimal_exponent(self) -> i32 {
+        (self.min_exponent() - self.precision() as i32) * 30103 / 100000 - 2
+    }
+}
+
+/// What a conversion had to do to the number to fit it in the format.
+///
+/// A bitmask, so that one conversion can report several. The names are IEEE 754's exceptions,
+/// which is what the diagnostics are ultimately about: GCC warns that a floating constant
+/// exceeds the range of its type, or that it was truncated to zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Status(u8);
+
+impl Status {
+    /// The value is exactly what was written.
+    pub const NONE: Status = Status(0);
+    /// The value had to be rounded, so it is not what was written.
+    pub const INEXACT: Status = Status(1);
+    /// The value is too large for the format and became an infinity.
+    pub const OVERFLOW: Status = Status(2);
+    /// The value is too small for the format and became a subnormal or a zero.
+    pub const UNDERFLOW: Status = Status(4);
+    /// The operation has no answer at all, such as an infinity minus an infinity.
+    pub const INVALID: Status = Status(8);
+    /// A number that is not zero was divided by one that is, so the answer is an infinity.
+    pub const DIVIDE_BY_ZERO: Status = Status(16);
+
+    /// Whether every flag in `other` is set here.
+    #[inline]
+    #[must_use]
+    pub const fn has(self, other: Status) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// This set with `other` added.
+    #[inline]
+    #[must_use]
+    pub const fn with(self, other: Status) -> Status {
+        Status(self.0 | other.0)
+    }
+
+    /// Whether nothing happened to the number.
+    #[inline]
+    #[must_use]
+    pub const fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Why a spelling is not a number.
+///
+/// The caller is expected to have checked the shape of the token already, so these are the
+/// cases a lexer cannot rule out rather than a full grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseError {
+    /// There is no digit anywhere in it.
+    NoDigits,
+    /// There is an exponent marker with no digits after it.
+    NoExponentDigits,
+    /// There is a character in it that a number does not have.
+    Invalid,
+}
+
+/// What kind of number this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Category {
+    Zero,
+    Finite,
+    Infinite,
+    Nan,
+}
+
+/// A floating point number in a given format.
+///
+/// A finite value is `significand * 2^(exponent - precision + 1)`. A normal number has its
+/// leading significand bit set, a subnormal does not and has the format's minimum exponent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Float {
+    format: Format,
+    category: Category,
+    sign: bool,
+    exponent: i32,
+    significand: u128,
+}
+
+/// The format a [`Float`] is being built in, or a panic naming why it cannot be.
+///
+/// Every way of making a [`Float`] goes through here, so the one format this type does not
+/// represent is rejected where it is asked for rather than several steps later where the reason
+/// is no longer in view.
+const fn ieee(format: Format) -> Format {
+    if format.is_ieee() { format } else { not_ieee() }
+}
+
+/// The format a [`Float`] is being built in where a decimal one is as good as a binary one, which
+/// is the zeros, the infinities and the encoding. See `float/dec.rs` for what a decimal is here.
+const fn carried(format: Format) -> Format {
+    if format.is_ieee() || format.decimal().is_some() { format } else { not_ieee() }
+}
+
+impl Float {
+    /// A zero of the given sign.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn zero(format: Format, sign: bool) -> Float {
+        Float {
+            format: carried(format),
+            category: Category::Zero,
+            sign,
+            exponent: 0,
+            significand: 0,
+        }
+    }
+
+    /// An infinity of the given sign.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn infinity(format: Format, sign: bool) -> Float {
+        Float {
+            format: carried(format),
+            category: Category::Infinite,
+            sign,
+            exponent: 0,
+            significand: 0,
+        }
+    }
+
+    /// The smallest normal number of the given sign, which is the boundary `isnormal` asks
+    /// about.
+    ///
+    /// A normal number is one whose leading significand bit is set, so the smallest of them is
+    /// that bit alone at the format's lowest exponent. Every value below it is a subnormal or a
+    /// zero, which is why the question can be a comparison against this rather than a mask and a
+    /// shift over the exponent field.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn smallest_normal(format: Format, sign: bool) -> Float {
+        Float {
+            format: ieee(format),
+            category: Category::Finite,
+            sign,
+            exponent: format.min_exponent(),
+            significand: 1u128 << (format.precision() - 1),
+        }
+    }
+
+    /// A nan with a payload, which is the one thing `__builtin_nan` and its family can spell
+    /// that nothing else in C can.
+    ///
+    /// The payload is the low bits of the significand and is cut to the bits there are below the
+    /// quiet bit, which is what gcc does with one that does not fit. A quiet nan is the payload
+    /// with that bit set. A signalling one is the payload without it, and a signalling nan with
+    /// nothing in it is an infinity rather than a nan, so a payload of zero becomes the highest
+    /// bit that is left, which is the value gcc gives `__builtin_nans("")`.
+    ///
+    /// A decimal nan takes no payload here and is the one gcc writes for `__builtin_nand32("")`,
+    /// with the exponent saying whether it signals the way [`Float::to_bits`] reads it.
+    ///
+    /// # Panics
+    ///
+    /// If the format is neither an IEEE encoding, per [`Format::is_ieee`], nor a decimal one.
+    #[must_use]
+    pub const fn nan_with(format: Format, sign: bool, quiet: bool, payload: u128) -> Float {
+        if format.decimal().is_some() {
+            let exponent = if quiet { 0 } else { 1 };
+            return Float { format, category: Category::Nan, sign, exponent, significand: 0 };
+        }
+        let format = ieee(format);
+        let mut significand = payload & (Float::quiet_bit(format) - 1);
+        if quiet {
+            significand |= Float::quiet_bit(format);
+        } else if significand == 0 {
+            significand = Float::quiet_bit(format) >> 1;
+        }
+        Float {
+            format,
+            category: Category::Nan,
+            sign,
+            exponent: 0,
+            significand: significand | Float::leading_bit(format),
+        }
+    }
+
+    /// The bit that tells a quiet nan from a signalling one, which is the highest bit of the
+    /// stored fraction in every format IEEE 754 defines.
+    const fn quiet_bit(format: Format) -> u128 {
+        1u128 << (format.precision() - 2)
+    }
+
+    /// The leading significand bit, in the one format that stores it rather than implying it. It
+    /// is set in every value of that format that is not a zero, a nan and an infinity included.
+    const fn leading_bit(format: Format) -> u128 {
+        if format.has_explicit_integer_bit() { 1u128 << (format.precision() - 1) } else { 0 }
+    }
+
+    /// The format this number is in.
+    #[must_use]
+    pub const fn format(self) -> Format {
+        self.format
+    }
+
+    /// Whether the number is negative, which a zero can be.
+    #[must_use]
+    pub const fn is_negative(self) -> bool {
+        self.sign
+    }
+
+    /// Whether the number is a zero.
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        matches!(self.category, Category::Zero)
+    }
+
+    /// Whether the number is an infinity.
+    #[must_use]
+    pub const fn is_infinite(self) -> bool {
+        matches!(self.category, Category::Infinite)
+    }
+
+    /// Whether the number is finite, which a zero is and a nan is not.
+    #[must_use]
+    pub const fn is_finite(self) -> bool {
+        matches!(self.category, Category::Zero | Category::Finite)
+    }
+
+    /// Whether the number is normal, which is finite with the leading significand bit set.
+    ///
+    /// A zero is not, a subnormal is not, and an infinity and a nan are not, which is the five
+    /// way split `fpclassify` asks about with the subnormal case being whatever is left.
+    #[must_use]
+    pub fn is_normal(self) -> bool {
+        if let Some(width) = self.format.decimal() {
+            return self.decimal_is_normal(width);
+        }
+        matches!(self.category, Category::Finite)
+            && self.significand >> (self.format.precision() - 1) != 0
+    }
+
+    /// Converts a decimal or hexadecimal spelling into the nearest number in `format`, rounding
+    /// to nearest with ties to even.
+    ///
+    /// The spelling is the number alone: no suffix, because the suffix is what chose the
+    /// format, and no infinity or nan, because C has no spelling for those. A sign is accepted
+    /// even though a C constant never has one, since the value the constant evaluator folds
+    /// does. C23 digit separators are stripped here.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError`], for a spelling that is not a number at all.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`]. A bad format is the
+    /// caller's bug and a bad spelling is the program's, which is why one is a panic and the
+    /// other is an error.
+    pub fn parse(text: &str, format: Format) -> Result<(Float, Status), ParseError> {
+        if let Some(width) = format.decimal() {
+            let (bits, status) = crate::dfp::parse(text, width)?;
+            return Ok((Float::decimal_from_bits(format, width, bits), status));
+        }
+        let format = ieee(format);
+        let bytes = text.as_bytes();
+        let (sign, rest) = match bytes.first() {
+            Some(b'-') => (true, &bytes[1..]),
+            Some(b'+') => (false, &bytes[1..]),
+            _ => (false, bytes),
+        };
+        if rest.len() > 1 && rest[0] == b'0' && rest[1] | 32 == b'x' {
+            hexadecimal(&rest[2..], sign, format)
+        } else {
+            decimal(rest, sign, format)
+        }
+    }
+
+    /// The bits of the encoding, in the low [`Format::width`] bits.
+    ///
+    /// The x87 format keeps its leading significand bit, so its eightieth bit is the sign and
+    /// its sixty fourth is the one every other format leaves implied.
+    #[must_use]
+    pub fn to_bits(self) -> u128 {
+        let format = self.format;
+        if let Some(width) = format.decimal() {
+            return self.decimal_bits(width);
+        }
+        let significand_mask = (1u128 << format.significand_bits()) - 1;
+        let (exponent_field, significand_field) = match self.category {
+            Category::Zero => (0, 0),
+            Category::Infinite => (
+                (1u128 << format.exponent_bits()) - 1,
+                if format.has_explicit_integer_bit() {
+                    1u128 << (format.precision() - 1)
+                } else {
+                    0
+                },
+            ),
+            // The significand of a nan is the whole of what it is, since the quiet bit and the
+            // payload are both in it and the exponent is the same for every nan there is.
+            Category::Nan => ((1u128 << format.exponent_bits()) - 1, self.significand),
+            Category::Finite => {
+                let subnormal = self.significand >> (format.precision() - 1) == 0;
+                let field =
+                    if subnormal { 0 } else { (self.exponent + format.max_exponent()) as u128 };
+                (field, self.significand & significand_mask)
+            }
+        };
+        let sign = u128::from(self.sign) << (format.width() - 1);
+        sign | (exponent_field << format.significand_bits()) | significand_field
+    }
+
+    /// Reads a number back out of its encoding, which is what makes [`Float::to_bits`] testable
+    /// and what a constant folded in the IR is stored as.
+    ///
+    /// A nan comes back with the quiet bit and the payload it went in with, so a value that came
+    /// from `__builtin_nan` survives being written down and read back, which is the round trip
+    /// every constant in the IR takes.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub fn from_bits(format: Format, bits: u128) -> Float {
+        if let Some(width) = format.decimal() {
+            return Float::decimal_from_bits(format, width, bits);
+        }
+        let format = ieee(format);
+        let significand_bits = format.significand_bits();
+        let sign = (bits >> (format.width() - 1)) & 1 == 1;
+        let exponent_field =
+            ((bits >> significand_bits) & ((1u128 << format.exponent_bits()) - 1)) as i32;
+        let stored = bits & ((1u128 << significand_bits) - 1);
+        if exponent_field == (1 << format.exponent_bits()) - 1 {
+            // The fraction is what tells an infinity from a nan, and in the x87 format the bit
+            // above the fraction is stored rather than implied and is set in both.
+            let fraction = stored & ((1u128 << (format.precision() - 1)) - 1);
+            if fraction == 0 {
+                return Float::infinity(format, sign);
+            }
+            return Float {
+                format,
+                category: Category::Nan,
+                sign,
+                exponent: 0,
+                significand: stored,
+            };
+        }
+        let implicit = if format.has_explicit_integer_bit() || exponent_field == 0 {
+            0
+        } else {
+            1u128 << (format.precision() - 1)
+        };
+        let significand = stored | implicit;
+        if significand == 0 {
+            return Float::zero(format, sign);
+        }
+        let exponent = if exponent_field == 0 {
+            format.min_exponent()
+        } else {
+            exponent_field - format.max_exponent()
+        };
+        Float { format, category: Category::Finite, sign, exponent, significand }
+    }
+
+    /// A hexadecimal spelling that [`Float::parse`] turns back into exactly this number.
+    ///
+    /// Hexadecimal rather than decimal, because a hexadecimal constant is exact by construction
+    /// and a decimal one is not: printing a number in decimal so that it reads back unchanged
+    /// needs a shortest-round-trip algorithm, and printing it in decimal without one silently
+    /// changes the program. A printer that changes a constant is worse than a printer whose
+    /// output is unfamiliar, so this is `0x1p+0` where a reader would rather see `1.0`.
+    ///
+    /// The significand is written as an integer and the exponent scales it, so the spelling is
+    /// `significand * 2^exponent` with no leading digit to argue about. Trailing zero digits are
+    /// taken off, which is what makes a round number short.
+    ///
+    /// An infinity has no spelling in C at all. What comes back for one is an exponent past the
+    /// top of the format, which converts back to an infinity with the overflow that a constant
+    /// only ever became an infinity by. A nan is spelled `nan` and does not read back, since
+    /// there is no exponent that gives one and no constant that is one.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        if self.format.decimal().is_some() {
+            return self.decimal_spelling();
+        }
+        let sign = if self.sign { "-" } else { "" };
+        match self.category {
+            Category::Nan => format!("{sign}nan"),
+            Category::Infinite => format!("{sign}0x1p+{}", self.format.max_exponent() + 1),
+            Category::Zero => format!("{sign}0x0p+0"),
+            Category::Finite => {
+                let mut significand = self.significand;
+                let mut exponent = self.exponent - (self.format.precision() as i32 - 1);
+                while significand & 0xf == 0 {
+                    significand >>= 4;
+                    exponent += 4;
+                }
+                format!("{sign}0x{significand:x}p{exponent:+}")
+            }
+        }
+    }
+}
+
+/// Converts a decimal spelling.
+fn decimal(bytes: &[u8], sign: bool, format: Format) -> Result<(Float, Status), ParseError> {
+    let mut digits = Vec::new();
+    let mut integer_digits = 0i32;
+    let mut seen_point = false;
+    let mut seen_digit = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            byte @ b'0'..=b'9' => {
+                digits.push(byte - b'0');
+                if !seen_point {
+                    integer_digits += 1;
+                }
+                seen_digit = true;
+            }
+            b'\'' => {}
+            b'.' if !seen_point => seen_point = true,
+            b'e' | b'E' => break,
+            _ => return Err(ParseError::Invalid),
+        }
+        index += 1;
+    }
+    if !seen_digit {
+        return Err(ParseError::NoDigits);
+    }
+    let mut point = integer_digits;
+    if index < bytes.len() {
+        point = point.saturating_add(exponent_of(&bytes[index + 1..])?);
+    }
+    Ok(convert(Decimal::new(digits, point), sign, format))
+}
+
+/// Converts a hexadecimal spelling, which is exact until the one rounding at the end.
+fn hexadecimal(bytes: &[u8], sign: bool, format: Format) -> Result<(Float, Status), ParseError> {
+    let mut significand: u128 = 0;
+    let mut exponent = 0i32;
+    let mut sticky = false;
+    let mut seen_point = false;
+    let mut seen_digit = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            b'\'' => {
+                index += 1;
+                continue;
+            }
+            b'.' if !seen_point => {
+                seen_point = true;
+                index += 1;
+                continue;
+            }
+            b'p' | b'P' => break,
+            _ => return Err(ParseError::Invalid),
+        };
+        seen_digit = true;
+        if significand.leading_zeros() >= 4 {
+            significand = (significand << 4) | u128::from(digit);
+            if seen_point {
+                exponent -= 4;
+            }
+        } else {
+            // Past a hundred and twenty eight bits the digits cannot change the value, only
+            // whether it is exactly halfway, which is what the sticky bit is for.
+            sticky |= digit != 0;
+            if !seen_point {
+                exponent += 4;
+            }
+        }
+        index += 1;
+    }
+    if !seen_digit {
+        return Err(ParseError::NoDigits);
+    }
+    if index < bytes.len() {
+        exponent = exponent.saturating_add(exponent_of(&bytes[index + 1..])?);
+    }
+    Ok(round(significand, exponent, sticky, sign, format))
+}
+
+/// Reads the digits of an exponent, which may be signed.
+fn exponent_of(bytes: &[u8]) -> Result<i32, ParseError> {
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() {
+        return Err(ParseError::NoExponentDigits);
+    }
+    let mut value = 0i32;
+    for &byte in digits {
+        if byte == b'\'' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return Err(ParseError::Invalid);
+        }
+        // An exponent far past the format's range is the same as one at the edge of it, so it
+        // saturates rather than overflowing.
+        value = value.saturating_mul(10).saturating_add(i32::from(byte - b'0'));
+    }
+    Ok(if negative { -value } else { value })
+}
+
+/// Scales an exact decimal down to the format's significand and rounds it.
+fn convert(mut value: Decimal, sign: bool, format: Format) -> (Float, Status) {
+    if value.is_zero() {
+        return (Float::zero(format, sign), Status::NONE);
+    }
+    if value.point() > format.max_decimal_exponent() {
+        return (Float::infinity(format, sign), Status::OVERFLOW.with(Status::INEXACT));
+    }
+    if value.point() < format.min_decimal_exponent() {
+        return (Float::zero(format, sign), Status::UNDERFLOW.with(Status::INEXACT));
+    }
+
+    // Scale until the value is in `[1, 2)`, counting the powers of two taken out of it. Each
+    // step is an underestimate of the distance left, so no step overshoots and the loop always
+    // moves, which is what stops it oscillating.
+    let mut exponent = 0i32;
+    loop {
+        let point = value.point();
+        if point > 1 || (point == 1 && value.first_digit() >= 2) {
+            let step = binary_digits(point - 1).clamp(1, 60);
+            value.shift(-step);
+            exponent += step;
+        } else if point < 1 {
+            let step = (1 + binary_digits(-point)).clamp(1, 60);
+            value.shift(step);
+            exponent -= step;
+        } else {
+            break;
+        }
+    }
+
+    // The significand is the value scaled by this many powers of two, clamped so that a number
+    // below the smallest normal loses precision instead of exponent.
+    let rounding = format.rounding() as i32;
+    let scale = (exponent - rounding + 1).max(format.min_exponent() - rounding + 1);
+    value.shift(exponent - scale);
+    let (integer, fraction) = value.round_to_u128();
+    let rounded = match fraction {
+        Fraction::Zero | Fraction::BelowHalf => integer,
+        Fraction::Half => integer + (integer & 1),
+        Fraction::AboveHalf => integer + 1,
+    };
+    let (rounded, scale) = stored(rounded, scale, format);
+    finish(rounded, scale, fraction != Fraction::Zero, sign, format)
+}
+
+/// Roughly how many binary digits a decimal one of this many digits has, never overestimating.
+const fn binary_digits(decimal: i32) -> i32 {
+    decimal * 33219 / 10000
+}
+
+/// Rounds `significand * 2^exponent` into the format, with `sticky` saying that something
+/// nonzero was already dropped below it.
+fn round(
+    significand: u128,
+    exponent: i32,
+    sticky: bool,
+    sign: bool,
+    format: Format,
+) -> (Float, Status) {
+    if significand == 0 {
+        return (Float::zero(format, sign), Status::NONE);
+    }
+    let rounding = format.rounding() as i32;
+    let leading = (128 - significand.leading_zeros()) as i32;
+    let scale = (exponent + leading - rounding).max(format.min_exponent() - rounding + 1);
+    let mut sticky = sticky;
+    let (integer, half) = if scale <= exponent {
+        (significand << (exponent - scale), false)
+    } else {
+        let drop = (scale - exponent) as u32;
+        if drop >= 128 {
+            sticky = true;
+            (0, false)
+        } else {
+            let half = (significand >> (drop - 1)) & 1 == 1;
+            sticky |= drop > 1 && significand & ((1u128 << (drop - 1)) - 1) != 0;
+            (significand >> drop, half)
+        }
+    };
+    let rounded = if half && (sticky || integer & 1 == 1) { integer + 1 } else { integer };
+    let (rounded, scale) = stored(rounded, scale, format);
+    finish(rounded, scale, half || sticky, sign, format)
+}
+
+/// A significand rounded to [`Format::rounding`] bits, moved up to the [`Format::precision`] bits
+/// the format stores, with the scale moved down to keep the value.
+///
+/// Nothing moves in a format that rounds where it stores, which is every format but one.
+fn stored(significand: u128, scale: i32, format: Format) -> (u128, i32) {
+    let spare = format.precision() - format.rounding();
+    (significand << spare, scale - spare as i32)
+}
+
+/// Turns a rounded significand and the power of two it is scaled by into a number, handling the
+/// carry out of the significand and the two ends of the format's range.
+fn finish(
+    significand: u128,
+    scale: i32,
+    inexact: bool,
+    sign: bool,
+    format: Format,
+) -> (Float, Status) {
+    let precision = format.precision();
+    let mut significand = significand;
+    let mut scale = scale;
+    if significand >> precision != 0 {
+        // Rounding up carried out of the top bit, which only ever gives a power of two.
+        significand >>= 1;
+        scale += 1;
+    }
+    let mut status = if inexact { Status::INEXACT } else { Status::NONE };
+    if significand == 0 {
+        return (Float::zero(format, sign), status.with(Status::UNDERFLOW));
+    }
+    let exponent = scale + precision as i32 - 1;
+    if exponent > format.max_exponent() {
+        return (
+            Float::infinity(format, sign),
+            status.with(Status::OVERFLOW).with(Status::INEXACT),
+        );
+    }
+    let normal = significand >> (precision - 1) != 0;
+    if !normal && inexact {
+        status = status.with(Status::UNDERFLOW);
+    }
+    let exponent = if normal { exponent } else { format.min_exponent() };
+    (Float { format, category: Category::Finite, sign, exponent, significand }, status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bits a `double` conversion gives, next to what Rust's own parser gives.
+    fn double(text: &str) -> u128 {
+        Float::parse(text, Format::Double).expect("a number").0.to_bits()
+    }
+
+    /// The bits a `float` conversion gives.
+    fn single(text: &str) -> u128 {
+        Float::parse(text, Format::Single).expect("a number").0.to_bits()
+    }
+
+    #[test]
+    fn the_ordinary_numbers_land_where_the_host_would_put_them() {
+        for text in ["0", "1", "2", "0.5", "1.5", "3.14159", "2.718281828459045", "100", "1e10"] {
+            let host = text.parse::<f64>().expect("a number Rust reads too");
+            assert_eq!(double(text), u128::from(host.to_bits()), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_number_that_needs_the_last_bit_rounded_gets_it_right() {
+        // Every one of these is a literal a naive `mantissa * 10^exponent` gets wrong, and the
+        // last is the longest one a `double` conversion has to read to round correctly.
+        let hard = [
+            "0.1",
+            "0.3",
+            "2.2250738585072011e-308",
+            "2.2250738585072014e-308",
+            "1.7976931348623157e308",
+            "4.9406564584124654e-324",
+            "5e-324",
+            "8.98846567431158e307",
+            "9007199254740993",
+            "123456789012345678901234567890",
+            "1.000000000000000000000000000000000000000000000000000000000000000001",
+            "7.8459735791271921e65",
+            "3.518437208883201171875e13",
+            "0.500000000000000166533453693773481063544750213623046875",
+        ];
+        for text in hard {
+            let host = text.parse::<f64>().expect("a number Rust reads too");
+            assert_eq!(double(text), u128::from(host.to_bits()), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_number_that_takes_seven_hundred_and_sixty_seven_digits() {
+        // The exact decimal of a `double` halfway case. A conversion that truncates its input
+        // rounds this one the wrong way, which is the bug this buffer size exists to avoid.
+        let text = concat!(
+            "2.47032822920623272088284396434110686182529901307162382",
+            "35378852574870103599108683372845652890455735483022221802",
+            "58573249056416711547735232764105795166208503595426876755",
+            "62317084535693494535245273750735013572761315046354601316",
+            "12127849863326369238975694273040488011871029093711789936",
+            "42245692702737764465109076580131048946378905599180391359",
+            "70011386455512221706120629864144453927884519445934871524",
+            "63344875888932891414823975864211858166195965106373837732",
+            "34435703331457550505022232309998195892058070506176382679",
+            "16323484472119097902806154870514036458498974142754747141",
+            "39683784321102080606305920253373777969877864922227306716",
+            "01324339457879181214233820577228206278891620001855078759",
+            "16278352090142077553206262229158550205643778244387017277",
+            "94459649305087139089301871550805125768938177360937844105",
+            "63661045147381814281647890691181239104545396303476425117",
+            "7562185422741845851144691421326303120484712594187004993e-324"
+        );
+        let host = text.parse::<f64>().expect("a number Rust reads too");
+        assert_eq!(double(text), u128::from(host.to_bits()));
+    }
+
+    #[test]
+    fn a_sweep_of_random_numbers_agrees_with_rust_in_every_bit() {
+        // A conversion that is wrong in the last place is wrong on a small fraction of inputs,
+        // so this is a sweep rather than a handful. The generator is a fixed sequence, so a
+        // failure names the same number on every machine.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..4000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let digits = state >> 11;
+            let exponent = (state % 600) as i32 - 300;
+            let text = format!("{digits}e{exponent}");
+            let host = text.parse::<f64>().expect("a number Rust reads too");
+            assert_eq!(double(&text), u128::from(host.to_bits()), "{text}");
+            let host = text.parse::<f32>().expect("a number Rust reads too");
+            assert_eq!(single(&text), u128::from(host.to_bits()), "{text} as a float");
+        }
+    }
+
+    #[test]
+    fn the_ends_of_the_range_are_an_infinity_and_a_zero() {
+        let (value, status) = Float::parse("1e400", Format::Double).expect("a number");
+        assert!(value.is_infinite() && status.has(Status::OVERFLOW));
+        let (value, status) = Float::parse("1e-400", Format::Double).expect("a number");
+        assert!(value.is_zero() && status.has(Status::UNDERFLOW) && status.has(Status::INEXACT));
+        // The largest `double` is finite and the next number up is not.
+        let (value, status) = Float::parse("1.7976931348623157e308", Format::Double).expect("one");
+        assert!(value.is_finite() && !status.has(Status::OVERFLOW));
+        let (value, _) = Float::parse("1.8e308", Format::Double).expect("a number");
+        assert!(value.is_infinite());
+        // Half the smallest subnormal rounds to zero, and just over half rounds up to it.
+        assert_eq!(double("2.4e-324"), u128::from((0f64).to_bits()));
+        assert_eq!(double("2.5e-324"), 1);
+    }
+
+    #[test]
+    fn a_number_that_is_exactly_what_was_written_says_so() {
+        assert!(Float::parse("1", Format::Double).expect("a number").1.is_none());
+        assert!(Float::parse("0.5", Format::Double).expect("a number").1.is_none());
+        assert!(Float::parse("0.1", Format::Double).expect("a number").1.has(Status::INEXACT));
+        // A number small enough to lose bits is inexact and underflowed, both.
+        let (_, status) = Float::parse("1e-320", Format::Double).expect("a number");
+        assert!(status.has(Status::INEXACT) && status.has(Status::UNDERFLOW));
+    }
+
+    #[test]
+    fn a_hexadecimal_constant_is_exact_and_needs_no_scaling() {
+        assert_eq!(double("0x1p0"), u128::from((1f64).to_bits()));
+        assert_eq!(double("0x1.8p1"), u128::from((3f64).to_bits()));
+        assert_eq!(double("0x1p-1074"), 1);
+        assert_eq!(double("0xa.bp-4"), u128::from((0.66796875f64).to_bits()));
+        assert_eq!(double("0X1.FFFFFFFFFFFFFP+1023"), u128::from(f64::MAX.to_bits()));
+        assert!(Float::parse("0x1p0", Format::Double).expect("a number").1.is_none());
+        // Seventeen hexadecimal digits is more than a `double` has, so this one rounds.
+        let (_, status) = Float::parse("0x1.00000000000008p0", Format::Double).expect("a number");
+        assert!(status.has(Status::INEXACT));
+        assert_eq!(double("0x1.00000000000008p0"), u128::from((1f64).to_bits()));
+        assert_eq!(double("0x1.00000000000018p0"), u128::from((1f64).to_bits() + 2));
+    }
+
+    #[test]
+    fn digit_separators_are_not_part_of_the_number() {
+        assert_eq!(double("1'000.000'1"), double("1000.0001"));
+        assert_eq!(double("0x1'0p0"), double("16.0"));
+        assert_eq!(double("1e1'0"), double("1e10"));
+    }
+
+    #[test]
+    fn a_spelling_that_is_not_a_number_says_which_way_it_is_wrong() {
+        assert_eq!(Float::parse("", Format::Double), Err(ParseError::NoDigits));
+        assert_eq!(Float::parse(".", Format::Double), Err(ParseError::NoDigits));
+        assert_eq!(Float::parse("1e", Format::Double), Err(ParseError::NoExponentDigits));
+        assert_eq!(Float::parse("1e+", Format::Double), Err(ParseError::NoExponentDigits));
+        assert_eq!(Float::parse("0x1p", Format::Double), Err(ParseError::NoExponentDigits));
+        assert_eq!(Float::parse("0xp1", Format::Double), Err(ParseError::NoDigits));
+        assert_eq!(Float::parse("1x0", Format::Double), Err(ParseError::Invalid));
+    }
+
+    /// GCC's `ieee_extended_intel_96_round_53`, which is `long double` on i386 FreeBSD: the x87
+    /// encoding and range, with every number rounded to fifty three bits.
+    #[test]
+    fn the_x87_format_of_i386_freebsd_rounds_to_fifty_three_bits() {
+        let round53 = |text: &str| Float::parse(text, Format::X87Round53).expect("a number");
+        let x87 = |text: &str| Float::parse(text, Format::X87Extended).expect("a number").0;
+        // A tenth is the `double` nearest to it, in the x87 encoding.
+        let tenth = Float::parse("0.1", Format::Double).expect("a tenth").0;
+        let wide = tenth.to_format(Format::X87Extended).0.to_bits();
+        assert_eq!(round53("0.1").0.to_bits(), wide);
+        assert_ne!(x87("0.1").to_bits(), wide);
+        // Two to the fifty three plus one is a tie at fifty three bits and goes to the even one,
+        // where the full format holds it exactly.
+        let (value, status) = round53("9007199254740993");
+        assert!(status.has(Status::INEXACT));
+        assert_eq!(value.to_bits(), 0x4034_8000_0000_0000_0000);
+        assert_eq!(x87("9007199254740993").to_bits(), 0x4034_8000_0000_0000_0400);
+        // The smallest subnormal is two to the minus 16434, eleven bits up from the full format's,
+        // and half of it is a tie that goes to zero.
+        assert_eq!(round53("0x1p-16434").0.to_bits(), 0x800);
+        assert!(round53("0x1p-16435").0.is_zero());
+        assert!(round53("0x1p-16445").0.is_zero());
+        assert_eq!(x87("0x1p-16445").to_bits(), 1);
+        // The largest finite number has fifty three ones, and a tie above it is an infinity.
+        let largest = round53("0x1.fffffffffffffp16383");
+        assert!(largest.1.is_none());
+        assert_eq!(largest.0.to_bits(), 0x7ffe_ffff_ffff_ffff_f800);
+        assert!(round53("0x1.fffffffffffff8p16383").0.is_infinite());
+        // The arithmetic rounds there too, and a conversion from an integer does.
+        let (one, three) = (round53("1").0, round53("3").0);
+        let third = Float::parse("1", Format::Double).expect("one").0;
+        let third = third.quotient(Float::parse("3", Format::Double).expect("three").0).0;
+        assert_eq!(
+            one.quotient(three).0.to_bits(),
+            third.to_format(Format::X87Extended).0.to_bits()
+        );
+        let big = Float::from_unsigned((1 << 53) + 1, Format::X87Round53).0;
+        assert_eq!(big.to_bits(), 0x4034_8000_0000_0000_0000);
+        // A number read out of its bits keeps all sixty four of them, as GCC's does.
+        let bits = 0x4034_8000_0000_0000_0400;
+        assert_eq!(Float::from_bits(Format::X87Round53, bits).to_bits(), bits);
+        assert_eq!(Format::X87Round53.precision(), 64);
+        assert_eq!(Format::X87Round53.rounding(), 53);
+        assert!(Format::X87Round53.is_x87() && Format::X87Extended.is_x87());
+        assert!(!Format::Double.is_x87());
+        assert_eq!(Format::X87Round53.storage(), Format::X87Extended);
+        assert_eq!(Format::Double.storage(), Format::Double);
+    }
+
+    #[test]
+    fn a_sign_is_accepted_although_a_c_constant_never_has_one() {
+        let (value, _) = Float::parse("-1.5", Format::Double).expect("a number");
+        assert!(value.is_negative());
+        assert_eq!(value.to_bits(), u128::from((-1.5f64).to_bits()));
+        let (value, _) = Float::parse("-0.0", Format::Double).expect("a number");
+        assert!(value.is_zero() && value.is_negative());
+        assert_eq!(value.to_bits(), u128::from((-0.0f64).to_bits()));
+    }
+
+    #[test]
+    fn every_format_says_how_wide_its_fields_are() {
+        for format in [
+            Format::Half,
+            Format::BFloat16,
+            Format::Single,
+            Format::Double,
+            Format::X87Extended,
+            Format::X87Round53,
+            Format::Quad,
+        ] {
+            assert_eq!(
+                format.exponent_bits() + format.significand_bits() + 1,
+                format.width(),
+                "{format:?}"
+            );
+            assert_eq!(format.min_exponent(), 1 - format.max_exponent());
+        }
+        assert_eq!(Format::Half.exponent_bits(), 5);
+        assert_eq!(Format::BFloat16.exponent_bits(), 8);
+        assert_eq!(Format::Single.exponent_bits(), 8);
+        assert_eq!(Format::Double.exponent_bits(), 11);
+        assert_eq!(Format::X87Extended.exponent_bits(), 15);
+        assert_eq!(Format::Quad.exponent_bits(), 15);
+    }
+
+    #[test]
+    fn a_number_survives_a_trip_through_its_encoding() {
+        for format in [
+            Format::Half,
+            Format::BFloat16,
+            Format::Single,
+            Format::Double,
+            Format::X87Extended,
+            Format::X87Round53,
+            Format::Quad,
+        ] {
+            for text in ["0", "-0", "1", "-1.5", "3.14159", "1e-5", "65504", "0x1p-20"] {
+                let (value, _) = Float::parse(text, format).expect("a number");
+                let bits = value.to_bits();
+                assert_eq!(Float::from_bits(format, bits).to_bits(), bits, "{text} in {format:?}");
+            }
+            assert_eq!(
+                Float::from_bits(format, Float::infinity(format, false).to_bits()).to_bits(),
+                Float::infinity(format, false).to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hexadecimal_spelling_reads_back_as_the_number_it_came_from() {
+        for format in [
+            Format::Half,
+            Format::BFloat16,
+            Format::Single,
+            Format::Double,
+            Format::X87Extended,
+            Format::Quad,
+        ] {
+            for text in [
+                "0", "-0", "1", "-1", "0.5", "-1.5", "3.14159", "1e-5", "0x1p-20", "0.1", "255",
+                "1e30",
+            ] {
+                let (value, _) = Float::parse(text, format).expect("a number");
+                let spelling = value.to_hex();
+                let (again, status) = Float::parse(&spelling, format).expect("a number");
+                assert_eq!(again.to_bits(), value.to_bits(), "{text} as {spelling} in {format:?}");
+                // Exact, except where the number was already an infinity, which reading the
+                // spelling back has to overflow into rather than land on.
+                let rounded = status.has(Status::INEXACT) || status.has(Status::OVERFLOW);
+                assert_eq!(rounded, !value.is_finite(), "{spelling} in {format:?}");
+            }
+            // A subnormal, which has leading zeros where a normal number has its implied one.
+            let tiny = Float::from_bits(format, 1);
+            let (again, _) = Float::parse(&tiny.to_hex(), format).expect("a number");
+            assert_eq!(again.to_bits(), tiny.to_bits(), "the smallest subnormal in {format:?}");
+            // An infinity, which C cannot spell and which comes back by overflowing again.
+            let huge = Float::infinity(format, true);
+            let (again, status) = Float::parse(&huge.to_hex(), format).expect("a number");
+            assert!(again.is_infinite() && again.is_negative(), "{format:?}");
+            assert!(status.has(Status::OVERFLOW));
+        }
+    }
+
+    #[test]
+    fn a_round_number_gets_a_short_spelling() {
+        let hex = |text: &str| Float::parse(text, Format::Double).expect("a number").0.to_hex();
+        assert_eq!(hex("1"), "0x1p+0");
+        assert_eq!(hex("-1"), "-0x1p+0");
+        assert_eq!(hex("0"), "0x0p+0");
+        assert_eq!(hex("-0"), "-0x0p+0");
+        assert_eq!(hex("2"), "0x1p+1");
+        assert_eq!(hex("0.5"), "0x1p-1");
+        assert_eq!(hex("0.1"), "0x1999999999999ap-56");
+    }
+
+    #[test]
+    fn the_narrow_formats_round_where_they_are_supposed_to() {
+        // `_Float16` has eleven bits, so its largest finite number is 65504 and the next power
+        // of two is an infinity. `__bf16` has eight, so it loses a `float`'s low bits and keeps
+        // its range, which is the whole point of the format.
+        let (value, status) = Float::parse("65504", Format::Half).expect("a number");
+        assert!(value.is_finite() && status.is_none());
+        assert_eq!(value.to_bits(), 0x7bff);
+        let (value, _) = Float::parse("65536", Format::Half).expect("a number");
+        assert!(value.is_infinite());
+        assert_eq!(Float::parse("1", Format::Half).expect("one").0.to_bits(), 0x3c00);
+        assert_eq!(Float::parse("1", Format::BFloat16).expect("one").0.to_bits(), 0x3f80);
+        assert_eq!(Float::parse("1e30", Format::BFloat16).expect("big").0.to_bits(), 0x714a);
+        // The smallest `_Float16` subnormal, and half of it.
+        assert_eq!(Float::parse("0x1p-24", Format::Half).expect("tiny").0.to_bits(), 1);
+        assert!(Float::parse("0x1p-26", Format::Half).expect("tinier").0.is_zero());
+    }
+
+    #[test]
+    fn the_x87_format_stores_the_bit_the_others_leave_implied() {
+        // 1.0 is 0x3fff8000000000000000: the exponent field, then a significand whose top bit
+        // is stored rather than implied. Every other format here would have zeros there.
+        let one = Float::parse("1", Format::X87Extended).expect("one").0;
+        assert_eq!(one.to_bits(), 0x3fff_8000_0000_0000_0000);
+        assert_eq!(
+            Float::parse("2", Format::X87Extended).expect("two").0.to_bits(),
+            0x4000_8000_0000_0000_0000
+        );
+        // Sixty four bits of precision, so this is exact where a `double` would round it.
+        let (value, status) = Float::parse("9007199254740993", Format::X87Extended).expect("one");
+        assert!(status.is_none());
+        assert_eq!(value.to_bits(), 0x4034_8000_0000_0000_0400);
+        // Measured, by compiling the constant with gcc 13.3 on x86-64 and reading the ten
+        // bytes back out of the program rather than trusting a table.
+        assert_eq!(
+            Float::parse("0.1", Format::X87Extended).expect("a tenth").0.to_bits(),
+            0x3ffb_cccc_cccc_cccc_cccd
+        );
+        // A subnormal four thousand powers of ten down, which is three of the smallest number
+        // the format has. gcc puts the same three there.
+        assert_eq!(Float::parse("1e-4950", Format::X87Extended).expect("tiny").0.to_bits(), 3);
+    }
+
+    #[test]
+    fn the_quad_format_has_a_hundred_and_thirteen_bits_of_it() {
+        assert_eq!(
+            Float::parse("1", Format::Quad).expect("one").0.to_bits(),
+            0x3fff_0000_0000_0000_0000_0000_0000_0000
+        );
+        // 0.1 in binary128, which is the same digits a `double` gets and then sixty more bits.
+        assert_eq!(
+            Float::parse("0.1", Format::Quad).expect("a tenth").0.to_bits(),
+            0x3ffb_9999_9999_9999_9999_9999_9999_999a
+        );
+        // Also measured against gcc, through `__float128`.
+        assert_eq!(
+            Float::parse("3.14159", Format::Quad).expect("pi, roughly").0.to_bits(),
+            0x4000_921f_9f01_b866_e43a_a79b_badc_0981
+        );
+        let (value, status) = Float::parse("1e5000", Format::Quad).expect("a number");
+        assert!(value.is_infinite() && status.has(Status::OVERFLOW));
+        let (value, _) = Float::parse("1e-5000", Format::Quad).expect("a number");
+        assert!(value.is_zero());
+    }
+
+    /// Every number here is what gcc 16 puts in the object for the `__builtin_nan` that spells
+    /// it, read back out of the object rather than reasoned about.
+    #[test]
+    fn a_nan_with_a_payload_has_the_bits_gcc_gives_it() {
+        let double = |quiet, payload| Float::nan_with(Format::Double, false, quiet, payload);
+        assert_eq!(double(true, 0).to_bits(), 0x7ff8_0000_0000_0000, "__builtin_nan(\"\")");
+        assert_eq!(double(true, 1).to_bits(), 0x7ff8_0000_0000_0001, "__builtin_nan(\"0x1\")");
+        assert_eq!(double(true, 8).to_bits(), 0x7ff8_0000_0000_0008, "__builtin_nan(\"010\")");
+        // A signalling nan with nothing in it would be an infinity, so the highest bit below the
+        // quiet one goes in instead.
+        assert_eq!(double(false, 0).to_bits(), 0x7ff4_0000_0000_0000, "__builtin_nans(\"\")");
+        assert_eq!(double(false, 1).to_bits(), 0x7ff0_0000_0000_0001, "__builtin_nans(\"0x1\")");
+        // A payload that fills the fraction, and one bit more than fits, which is cut.
+        assert_eq!(double(true, 0xf_ffff_ffff_ffff).to_bits(), 0x7fff_ffff_ffff_ffff);
+        assert_eq!(double(true, 1 << 52).to_bits(), 0x7ff8_0000_0000_0000);
+        assert_eq!(
+            Float::nan_with(Format::Single, false, true, 1).to_bits(),
+            0x7fc0_0001,
+            "__builtin_nanf(\"0x1\")"
+        );
+        assert_eq!(
+            Float::nan_with(Format::Single, false, false, 0).to_bits(),
+            0x7fa0_0000,
+            "__builtin_nansf(\"\")"
+        );
+        // The x87 format stores the leading significand bit, which is set in a nan as in
+        // everything else that is not a zero.
+        assert_eq!(
+            Float::nan_with(Format::X87Extended, false, true, 1).to_bits(),
+            0x7fff_c000_0000_0000_0001,
+            "__builtin_nanl(\"0x1\") on x86"
+        );
+        assert_eq!(
+            Float::nan_with(Format::X87Extended, false, false, 0).to_bits(),
+            0x7fff_a000_0000_0000_0000,
+            "__builtin_nansl(\"\") on x86"
+        );
+    }
+
+    /// A payload is part of the value, so it has to survive being written down and read back.
+    #[test]
+    fn a_payload_comes_back_out_of_the_encoding_it_went_into() {
+        for format in [Format::Half, Format::Single, Format::Double, Format::X87Extended] {
+            for (quiet, payload) in [(true, 0), (true, 1), (false, 3), (true, 5)] {
+                let nan = Float::nan_with(format, false, quiet, payload);
+                assert!(nan.is_nan(), "{format:?}");
+                assert_eq!(Float::from_bits(format, nan.to_bits()), nan, "{format:?} {payload}");
+            }
+            // The sign of a nan is its own, and negating one leaves the payload alone.
+            let nan = Float::nan_with(format, true, true, 7);
+            assert!(nan.is_negative() && nan.negated().negated() == nan, "{format:?}");
+        }
+    }
+
+    /// The smallest normal is what `isnormal` compares against, so it has to be the exact value
+    /// the host calls `MIN_POSITIVE` and the bit below it has to be a subnormal.
+    #[test]
+    fn the_smallest_normal_is_the_number_below_which_nothing_is_normal() {
+        assert_eq!(
+            Float::smallest_normal(Format::Single, false).to_bits(),
+            u128::from(f32::MIN_POSITIVE.to_bits())
+        );
+        assert_eq!(
+            Float::smallest_normal(Format::Double, false).to_bits(),
+            u128::from(f64::MIN_POSITIVE.to_bits())
+        );
+        // The x87 format stores its leading bit, so the smallest normal has the lowest exponent
+        // field that is not the subnormal one and that bit alone.
+        assert_eq!(
+            Float::smallest_normal(Format::X87Extended, false).to_bits(),
+            (1u128 << 64) | (1u128 << 63)
+        );
+        for format in [Format::Half, Format::BFloat16, Format::Single, Format::Double] {
+            let normal = Float::smallest_normal(format, false);
+            assert!(normal.is_finite() && !normal.is_zero(), "{format:?}");
+            assert_eq!(Float::from_bits(format, normal.to_bits()), normal, "{format:?}");
+            // One less in the encoding is the largest subnormal, which is what the boundary
+            // being in the right place means.
+            let below = Float::from_bits(format, normal.to_bits() - 1);
+            assert_eq!(below.compare(normal), Some(std::cmp::Ordering::Less), "{format:?}");
+            // And the negative one is the same number with the sign bit set.
+            let negative = Float::smallest_normal(format, true);
+            assert!(negative.is_negative() && negative.negated() == normal, "{format:?}");
+        }
+    }
+
+    /// Every format there is, so that a new one has to be added here and answered for below.
+    const EVERY_FORMAT: [Format; 10] = [
+        Format::Half,
+        Format::BFloat16,
+        Format::Single,
+        Format::Double,
+        Format::X87Extended,
+        Format::Quad,
+        Format::DoubleDouble,
+        Format::Decimal32,
+        Format::Decimal64,
+        Format::Decimal128,
+    ];
+
+    #[test]
+    fn the_double_double_and_the_decimals_are_the_formats_that_are_not_binary_ieee() {
+        for format in EVERY_FORMAT {
+            let binary = format != Format::DoubleDouble && format.decimal().is_none();
+            assert_eq!(format.is_ieee(), binary, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn every_format_has_a_name_that_reads_back_as_itself() {
+        // The names are what a data layout is written in and what a diagnostic says, so a format
+        // whose name does not round trip is a format something else will read as another one.
+        for format in EVERY_FORMAT {
+            assert_eq!(Format::from_name(format.name()), Some(format), "{format:?}");
+        }
+        assert_eq!(Format::from_name("f128"), Some(Format::Quad));
+        assert_eq!(Format::from_name("ppc-f128"), Some(Format::DoubleDouble));
+        assert_eq!(Format::from_name("f256"), None);
+    }
+
+    #[test]
+    fn a_width_is_the_one_question_the_double_double_answers() {
+        // It is a hundred and twenty eight bits the same way binary128 is, which is why the two
+        // cannot be told apart by width and why `spec/cross-compile/06-abis.md` section 6.2 item
+        // 1 says the format is carried beside it.
+        assert_eq!(Format::DoubleDouble.width(), 128);
+        assert_eq!(Format::Quad.width(), Format::DoubleDouble.width());
+        assert_ne!(Format::Quad, Format::DoubleDouble);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn asking_a_double_double_for_a_precision_says_why_there_is_not_one() {
+        let _ = Format::DoubleDouble.precision();
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn a_double_double_cannot_be_parsed_into() {
+        // The refusal is at the format rather than at the spelling, so a well formed number in a
+        // format this type does not represent fails, and fails saying which of the two is wrong.
+        let _ = Float::parse("1.0", Format::DoubleDouble);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn a_double_double_cannot_be_read_out_of_its_bits_either() {
+        let _ = Float::from_bits(Format::DoubleDouble, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "pair of doubles")]
+    fn not_even_a_double_double_zero_can_be_made() {
+        // A zero looks harmless and is the one that would get through, because it needs no
+        // precision and no exponent to build. Letting it through is how a value in a format
+        // nothing here can encode reaches `to_bits`, which is several steps from the mistake.
+        let _ = Float::zero(Format::DoubleDouble, false);
+    }
+}

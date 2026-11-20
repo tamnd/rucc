@@ -1,0 +1,19 @@
+[package]
+name = "rucc-9p"
+description = "A 9P2000 client and a small read-only 9P server, so that the rucc C compiler can read a Plan 9 tree over the network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 0, beside rucc-unpack, and it depends on nothing at all. xtask/layers.toml says why.
+[dependencies]

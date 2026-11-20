@@ -1,0 +1,4307 @@
+//! The IR rewrites the machine needs before a rule can be asked anything.
+//!
+//! Design: `spec/10-backend.md` section 10.2, which is where the ordering comes from.
+//!
+//! Everything else in this crate turns an instruction into instructions. There are two things a
+//! rule cannot do, and one of them is dealt with here and one next door.
+//!
+//! The one next door is a new shape of control flow. A rule replaces a term with a term and the
+//! replacement has nowhere to put a block, so a construct that becomes blocks has to be rewritten
+//! before selection rather than during it. There is one such construct and it is `switch`. Every
+//! other terminator leaves a block with one successor or two, which is what the block layout
+//! writes jumps for, and a `switch` leaves it with as many as the program had cases. What it
+//! becomes is a decision large enough to have a document of its own, so it has a module of its
+//! own, which is [`crate::switch`].
+//!
+//! The one here is arithmetic on what a rule matched. A rule may name a constant and pass it along,
+//! and it may not add to one or read it as something else, because the pattern language is a
+//! pattern language and giving it a way to compute would make a rule set a program the solver has
+//! to reason about rather than a table it can check a line of at a time. So an instruction whose
+//! lowering needs a value worked out from another one is rewritten here into instructions whose
+//! lowerings do not. Four of them are floats: a float constant, a negation, and the two conversions
+//! between a float and an unsigned integer. The other two move a block of memory, where the
+//! arithmetic is the offset of each word from the front of it.
+//!
+//! # Why a copy is a run of moves and not a call
+//!
+//! A `memcpy` in the IR is not a call to `memcpy`. It is what the front end writes for a structure
+//! assigned, passed or returned by value, and a `memset` is what it writes for the part of an
+//! object an initialiser left unnamed, so a program with a `struct` in it reaches one almost at
+//! once and the size is a constant every time. It is also what the front end writes for a call to
+//! `memcpy`, `memset` or `memmove` of a constant length up to sixty four bytes, as gcc does and as
+//! the kernel counts on, so that `memcpy(&a, &b, sizeof(a))` is moves and not a call.
+//!
+//! A constant size is what makes the moves the right answer. A four byte copy written as a call
+//! costs the call and the two arguments and gives back four bytes moved, which is more instructions
+//! than the move it replaced and slower than all of them. Every real compiler writes the moves
+//! under some threshold for that reason, and above the threshold writes the call, which is where
+//! this stops: the call needs a `memcpy` to exist, and a statically linked program has nowhere to
+//! get one from until the compiler runtime in tamnd/rucc#277 exists. So a copy larger than the
+//! threshold is refused by name rather than written wrong.
+
+use std::cmp::Ordering;
+
+use rucc_base::hash::Map;
+use rucc_base::{Idx, Interner};
+use rucc_cost::{Goal, heuristics};
+use rucc_diag::Span;
+use rucc_ir::{
+    AsmInfo, AsmOperand, AsmOperands, AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred,
+    Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Signature, Type, Value,
+};
+use rucc_target::{BitCount, CallRegs, CountInst, PhysReg};
+
+use crate::capability;
+
+/// Rewrites every ordered access into the plain access this machine already makes ordered, and
+/// leaves a barrier where the machine needs one.
+///
+/// This is the one pass here whose reason is a memory model rather than a missing instruction, so
+/// it is worth writing down what the model says. x86-64 is total store order. Every load is an
+/// acquire, every store is a release, and an aligned access no wider than a word is indivisible
+/// whether or not anybody asked for one. So an `atomic_load` at any ordering is the same `mov` a
+/// `load` is, and so is an `atomic_store` at every ordering except the strongest, and rewriting
+/// them into the plain access is not an approximation: it is the whole of what the machine does.
+///
+/// The one thing total store order does not give is a store followed by a load of a different
+/// address staying in that order, and that is exactly what sequential consistency is missing. So a
+/// sequentially consistent store is the same `mov` with an `mfence` behind it, which is the pair
+/// gcc 16.2.0 writes. The fence is left in the IR as a `fence` rather than written here, because
+/// what a barrier costs is a target question and [`crate::lower`] is where the target answers are.
+///
+/// A `fence` the program wrote is left alone for the same reason. Every ordering below the
+/// strongest is nothing at all on this machine and the strongest is one instruction, and both of
+/// those are decided by name in [`crate::lower`] where the instruction lives.
+///
+/// # Why the width is checked
+///
+/// An access is only indivisible if the machine can do it in one go, which here means one, two,
+/// four or eight bytes at an address aligned to its own width. Anything else is a run of accesses
+/// and a run of accesses is not atomic at all, so it is left as the opcode it was and no rule
+/// covers it, which is a compile error naming the instruction. That is the right answer: an
+/// atomic access the machine cannot make atomic has no correct lowering, and a wrong one that
+/// looks right is worse than a refusal. C says the same thing through `__atomic_is_lock_free`.
+///
+/// `word` is how many bytes the widest indivisible access carries, which is the same number the
+/// widest move carries and is read from the machine for the reason [`bulk`] reads it.
+///
+/// # A machine that is not total store order
+///
+/// All of the above is x86-64, and `total_store_order` says whether it holds. AArch64 lets a plain
+/// load or store move past the accesses around it, so there only a relaxed access is the plain
+/// one. An acquire, a release and anything stronger are left as the ordered access they are, and
+/// [`crate::lower`] writes each as the `ldar` or `stlr` the machine has for it. A sequentially
+/// consistent store needs no fence behind it there either, because `stlr` already keeps it in
+/// order with a later `ldar`, which is the one pair a fence would be for.
+///
+/// RISC-V is weakly ordered too and has no ordered load or store, so `fenced` says to write each
+/// as the plain access with the fences the RISC-V psABI puts around it, which is what gcc 14.2.0
+/// writes. See `fenced`.
+///
+/// This runs before every other pass here, so that what it produces is an ordinary load or store
+/// that the width legalisation and everything after it get to see. An ordered access at a width the
+/// machine has no register for would otherwise be a shape nothing later understands, since every
+/// pass after this one is written about `load` and `store` by name.
+pub fn orderings(func: &mut Func, word: u32, total_store_order: bool, fenced: bool) {
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        let plain = match func[inst].opcode {
+            Opcode::AtomicLoad => Opcode::Load,
+            Opcode::AtomicStore => Opcode::Store,
+            _ => continue,
+        };
+        if !total_store_order && !unordered(func, inst) {
+            if fenced {
+                self::fenced(func, inst, plain, word);
+            }
+            continue;
+        }
+        relaxed(func, inst, plain, word);
+    }
+}
+
+/// Whether an ordered access asks for nothing beyond being done in one go.
+fn unordered(func: &Func, inst: Inst) -> bool {
+    let Extra::Mem(mem) = func[inst].extra else { return false };
+    matches!(func[mem].order, MemOrder::NotAtomic | MemOrder::Relaxed)
+}
+
+/// One ordered access as the plain one, with a barrier behind it when the ordering asked for more
+/// than the machine gives for free.
+///
+/// The ordering is taken off the access rather than left on it, because the IR verifier refuses an
+/// ordering on a plain access, and it refuses one for a good reason: a plain load may be moved,
+/// duplicated and dropped, and an ordering that survived on one would be a claim nothing downstream
+/// honours. What is true after this pass is that the ordering has been discharged, and the way to
+/// say that is to stop carrying it.
+///
+/// A sequentially consistent store becomes the store and then the fence, and it is built that way
+/// round: the plain store is put in front of the instruction and the instruction itself becomes the
+/// fence. Doing it the other way would need somewhere to insert behind an instruction, and there is
+/// nothing to gain from having two ways to insert.
+fn relaxed(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    if !accessed(func, inst, plain).is_some_and(|ty| indivisible(ty, info, word)) {
+        return;
+    }
+    let unordered = MemInfo { order: MemOrder::NotAtomic, ..info };
+
+    if plain == Opcode::Store && info.order == MemOrder::SeqCst {
+        let [value, addr] = func[func[inst].args] else { return };
+        write(func, inst, value, addr, unordered);
+        let none = func.push_values(&[]);
+        let data = &mut func[inst];
+        data.opcode = Opcode::Fence;
+        data.args = none;
+        data.extra = Extra::Order(MemOrder::SeqCst);
+        data.flags = data.flags.intersection(Flags::legal_on(Opcode::Fence));
+        return;
+    }
+
+    plainly(func, inst, plain, unordered);
+}
+
+/// One ordered access on a machine that orders with fences, as the plain access with a fence in
+/// front of it, behind it or both.
+///
+/// The fences are the ones in the RISC-V psABI's table, which gcc 14.2.0 writes. An acquiring
+/// load is the load and then `fence r, rw`, and a sequentially consistent one has `fence rw, rw`
+/// in front as well. A releasing store is `fence rw, w` and then the store, and a sequentially
+/// consistent one has `fence rw, rw` behind it too. gcc puts that last fence there so that code
+/// built this way stays right beside code built for the newer mapping, which leaves it off the
+/// store and puts it on the load, and this does the same.
+///
+/// A fence is an `Opcode::Fence` at the ordering it keeps, so `fence r, rw` is an acquire and
+/// `fence rw, w` a release, and [`crate::lower`] writes each as the instruction this machine has.
+fn fenced(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    if !accessed(func, inst, plain).is_some_and(|ty| indivisible(ty, info, word)) {
+        return;
+    }
+    let (before, after) = match (plain, info.order) {
+        (Opcode::Load, MemOrder::SeqCst) => (Some(MemOrder::SeqCst), Some(MemOrder::Acquire)),
+        (Opcode::Load, _) => (None, Some(MemOrder::Acquire)),
+        (_, MemOrder::SeqCst) => (Some(MemOrder::Release), Some(MemOrder::SeqCst)),
+        _ => (Some(MemOrder::Release), None),
+    };
+    plainly(func, inst, plain, MemInfo { order: MemOrder::NotAtomic, ..info });
+    let span = func.span(inst);
+    if let Some(order) = before {
+        let fence = fence(func, order, span);
+        func.insert_before(fence, inst);
+    }
+    if let Some(order) = after {
+        let fence = fence(func, order, span);
+        func.insert_after(fence, inst);
+    }
+}
+
+/// A fence at that ordering, in no block yet.
+fn fence(func: &mut Func, order: MemOrder, span: Span) -> Inst {
+    let args = func.push_values(&[]);
+    let data = InstData { args, extra: Extra::Order(order), ..InstData::new(Opcode::Fence) };
+    func.create_inst(data, &[], span)
+}
+
+/// The type an ordered access moves, which is the value a store writes or the one a load reads.
+fn accessed(func: &Func, inst: Inst, plain: Opcode) -> Option<Type> {
+    match plain {
+        Opcode::Store => func[func[inst].args].first().map(|&value| func[value].ty),
+        _ => Some(produced(func, inst)),
+    }
+}
+
+/// The ordered access as the plain one, with the ordering taken off it.
+fn plainly(func: &mut Func, inst: Inst, plain: Opcode, unordered: MemInfo) {
+    let plainly = func.add_mem(unordered);
+    let data = &mut func[inst];
+    data.opcode = plain;
+    data.extra = Extra::Mem(plainly);
+    data.flags = data.flags.intersection(Flags::legal_on(plain));
+}
+
+/// Whether this machine does an access of this type in one go.
+///
+/// One, two, four or eight bytes, at an address aligned to at least that many. The alignment is the
+/// front end's answer for the type being accessed, which for every type C can spell is its own
+/// width, so what this actually refuses is a `long double` and an access the program underaligned
+/// on purpose.
+///
+/// The width is the storage the value takes and not the bits it holds, because that is what the
+/// access moves. A `bool` is one bit of value in one byte of memory and one byte is indivisible, so
+/// rounding up is what makes an ordered access of one work rather than a refusal nobody wanted. An
+/// address is the exception the other way: the IR gives a pointer no width at all, since how wide
+/// one is belongs to the target, so the target's number is used for it.
+fn indivisible(ty: Type, info: MemInfo, word: u32) -> bool {
+    let bytes = if ty.is_ptr() { word } else { ty.bits().div_ceil(8) };
+    ty.is_scalar() && bytes.is_power_of_two() && bytes <= word && info.align >= bytes
+}
+
+/// Rewrites the float instructions no rule can be written for, and leaves the rest alone.
+///
+/// Each of them needs a value worked out from one the pattern matched, which is the one thing the
+/// rule language deliberately cannot do. A float constant is an integer constant read as a float,
+/// and reading it is arithmetic on the immediate. A negation is an exclusive or with a mask that
+/// depends on the format. A conversion between a float and an integer is that conversion at a
+/// width the machine has, which is a width neither the pattern nor the replacement can work out.
+///
+/// What is left after this is a function whose float instructions are each one machine
+/// instruction, so what a rule is asked stays a table. The conversions between a float and an
+/// unsigned sixty four bit integer are the two that are not a widening or a narrowing away from a
+/// signed one, because there is no signed width that holds those values, and each gets a rewrite
+/// of its own below.
+///
+/// On a machine whose words are four bytes a `double` is wider than any integer register, so the
+/// integer that spells one is two words and the exchange goes through a slot in the frame. See
+/// `spilled_constant` and `spilled_negate`.
+pub fn floats(func: &mut Func, word: u32) {
+    // The conversions first, because what one of them writes has float constants in it and those
+    // are the next walk's to spell.
+    let register = word * 8;
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::SIToFP | Opcode::UIToFP => widen_then_convert(func, inst, register),
+            Opcode::FPToSI | Opcode::FPToUI => convert_then_narrow(func, inst, register),
+            _ => {}
+        }
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let narrow = |func: &Func, inst: Inst| produced(func, inst).bits() > register;
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::FConst if narrow(func, inst) => spilled_constant(func, inst, word),
+            Opcode::FNeg if narrow(func, inst) => spilled_negate(func, inst, word),
+            Opcode::FConst => constant(func, inst),
+            Opcode::FNeg => negate(func, inst),
+            _ => {}
+        }
+    }
+}
+
+/// A float constant, as the integer that spells it and a reading of those bits as the float.
+///
+/// This is the whole of what a `movsd` from a literal would be if there were a section to put the
+/// literal in, and there is not one yet. Two instructions in a register beats a constant pool that
+/// nothing else needs, and it is exactly what the bits of the immediate already say, since the IR
+/// holds a float constant as its bit pattern rather than as a number.
+///
+/// Not above sixty four bits, for the reason [`negate`] is not: the integer that would spell an
+/// eighty bit constant has no register either, so the exchange gains nothing. A back end with a
+/// float that wide writes the bits where the value lives, which for this one is a stack slot.
+fn constant(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Extra::Imm(imm) = func[inst].extra else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let int = Type::int(ty.bits());
+    let bits = func[imm].bits();
+    // The cast is the bits as they are stored, and `Imm::int` keeps the width, so a constant whose
+    // top bit is set stays the negative integer that spells it rather than becoming a wider one.
+    let spelled = ahead_const(func, inst, Imm::int(bits as i128, int), int);
+    becomes(func, inst, Opcode::Bitcast, &[spelled]);
+}
+
+/// A float constant wider than a word, as its words written into a slot and the float read back.
+///
+/// The words go in low first, the way the machine stores the float, and each is an integer
+/// constant of a word. Not above sixty four bits, for the reason [`constant`] gives.
+fn spilled_constant(func: &mut Func, inst: Inst, word: u32) {
+    let ty = produced(func, inst);
+    let Extra::Imm(imm) = func[inst].extra else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let bits = func[imm].bits();
+    let slot = frame_slot(func, inst, ty);
+    let int = Type::int(word * 8);
+    let mask = (1u128 << (word * 8)) - 1;
+    for at in 0..ty.bits() / (word * 8) {
+        let piece = (bits >> (at * word * 8)) & mask;
+        let piece = i128::try_from(piece).unwrap_or(0);
+        let value = ahead_const(func, inst, Imm::int(piece, int), int);
+        let into = step_at(func, inst, slot, at * word, word);
+        write(func, inst, value, into, local(u64::from(word), word));
+    }
+    read_in_place(func, inst, slot, ty);
+}
+
+/// A negation of a float wider than a word, as the word holding its sign flipped where it lies.
+///
+/// The value goes into a slot, the top word of it comes out, has the sign bit flipped, goes back,
+/// and the float is read again. It is the same exclusive or [`negate`] writes, done on the one word
+/// of the float the sign is in.
+fn spilled_negate(func: &mut Func, inst: Inst, word: u32) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let size = u64::from(ty.bits() / 8);
+    let slot = frame_slot(func, inst, ty);
+    write(func, inst, arg, slot, local(size, word));
+    let int = Type::int(word * 8);
+    let top = step_at(func, inst, slot, ty.bits() / 8 - word, word);
+    let high = read(func, inst, top, local(u64::from(word), word), int);
+    let mask = ahead_const(func, inst, Imm::int(1i128 << (word * 8 - 1), int), int);
+    let flipped = ahead(func, inst, Opcode::Xor, &[high, mask], int);
+    write(func, inst, flipped, top, local(u64::from(word), word));
+    read_in_place(func, inst, slot, ty);
+}
+
+/// A slot in the frame the size of that float, aligned to its size.
+fn frame_slot(func: &mut Func, inst: Inst, ty: Type) -> Value {
+    let size = ty.bits() / 8;
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+}
+
+/// The address that far into a slot, with the distance at the width of an address.
+fn step_at(func: &mut Func, inst: Inst, slot: Value, at: u32, word: u32) -> Value {
+    if at == 0 {
+        return slot;
+    }
+    let int = Type::int(word * 8);
+    let step = ahead_const(func, inst, Imm::int(i128::from(at), int), int);
+    ahead(func, inst, Opcode::PtrAdd, &[slot, step], Type::PTR)
+}
+
+/// The instruction turned into the load of its own type from the slot.
+fn read_in_place(func: &mut Func, inst: Inst, slot: Value, ty: Type) {
+    let size = ty.bits() / 8;
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    let args = func.push_values(&[slot]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Load;
+    data.args = args;
+    data.extra = extra;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Load));
+}
+
+/// An access to a slot of this compiler's own, which nothing else can see.
+fn local(size: u64, align: u32) -> MemInfo {
+    MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: rucc_ir::Restrict::NONE,
+    }
+}
+
+/// A negation, as an exclusive or with the sign bit.
+///
+/// C says negation flips the sign and says nothing else about it, which is not what subtracting
+/// from zero does to a zero or to a not a number, so this is the operation the IR already calls
+/// out as not being `0 - x`. Flipping the bit is the whole of it, and it is right for every value
+/// a float can hold, the payload of a not a number included, because no other bit is touched.
+///
+/// The bit is flipped in a general purpose register rather than in the one the float is in. The
+/// other way is one instruction rather than three and it wants the mask in memory aligned to the
+/// register, which is the same section a constant pool would need.
+///
+/// Not above sixty four bits, where the exchange stops being one. An `i80` is as far from a
+/// register as an `f80` is, so what this would hand the back end is three instructions it cannot
+/// write instead of one it can: a machine with a float that wide has a sign flip for it, because a
+/// machine with no way to flip the sign of its own widest float would be a strange machine.
+fn negate(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let int = Type::int(ty.bits());
+    let bits = ahead(func, inst, Opcode::Bitcast, &[arg], int);
+    let mask = ahead_const(func, inst, Imm::int(1i128 << (ty.bits() - 1), int), int);
+    let flipped = ahead(func, inst, Opcode::Xor, &[bits, mask], int);
+    becomes(func, inst, Opcode::Bitcast, &[flipped]);
+}
+
+/// An integer becoming a float, as a widening and the signed conversion at a width there is one at.
+///
+/// The widening is with the sign for a signed integer and with zeroes for an unsigned one, and
+/// after it the value is the same number in a signed integer the machine converts from, so the
+/// conversion is the same value and the same rounding. That is the whole of why the machine needs
+/// no unsigned conversion and none at a width narrower than an `int`.
+///
+/// On a machine of thirty two bits there is no wider signed integer for an unsigned `int` to go
+/// into, so it takes the path an unsigned sixty four bit integer takes on a machine of sixty four.
+fn widen_then_convert(func: &mut Func, inst: Inst, register: u32) {
+    let signed = func[inst].opcode == Opcode::SIToFP;
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let from = func[arg].ty;
+    if !from.is_int() || !from.is_scalar() {
+        return;
+    }
+    let Some(width) = holder(from.bits(), signed).filter(|&width| width <= register) else {
+        from_unsigned_word(func, inst, arg, from);
+        return;
+    };
+    if width == from.bits() {
+        return;
+    }
+    let widen = if signed { Opcode::SExt } else { Opcode::ZExt };
+    let wide = ahead(func, inst, widen, &[arg], Type::int(width));
+    becomes(func, inst, Opcode::SIToFP, &[wide]);
+}
+
+/// A float becoming an integer, as the signed conversion at such a width and a narrowing.
+///
+/// The same argument the other way round. A float the program says fits in the integer it asked
+/// for fits in the signed one that holds every value of it, so converting there and keeping the
+/// low bits is that value however it is read, and a float that does not fit is undefined in C and
+/// unspecified in the model at either width.
+///
+/// And on a machine of thirty two bits an unsigned `int` is the unsigned word, the way it is for
+/// the conversion the other way.
+fn convert_then_narrow(func: &mut Func, inst: Inst, register: u32) {
+    let signed = func[inst].opcode == Opcode::FPToSI;
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_int() || !ty.is_scalar() {
+        return;
+    }
+    let Some(width) = holder(ty.bits(), signed).filter(|&width| width <= register) else {
+        to_unsigned_word(func, inst, arg, ty);
+        return;
+    };
+    if width == ty.bits() {
+        return;
+    }
+    let wide = ahead(func, inst, Opcode::FPToSI, &[arg], Type::int(width));
+    becomes(func, inst, Opcode::Trunc, &[wide]);
+}
+
+/// An unsigned sixty four bit integer becoming a float, without a branch.
+///
+/// This is the one conversion into a float that is not the signed one at some width, because there
+/// is no signed width that holds every value of it. What the machine can do is the signed
+/// conversion, so the value has to be brought under half of its range first and put back after.
+///
+/// Halving it is a shift, and a shift throws away the bit it shifts out, which is the difference
+/// between a number that rounds up and one that rounds down. So the bit is put back as the lowest
+/// bit of the half: a half that was exact stays exact, and one that was not comes out odd, which is
+/// never a value the conversion rounds to and so never a value it rounds the wrong way from. That
+/// is round to odd, and rounding to odd and then to nearest is the same answer as rounding to
+/// nearest once, at every width a float here has. Doubling afterwards is exact, since a float
+/// multiplied by two is the same digits with one more on the exponent and nothing here is near the
+/// top of the range.
+///
+/// A value whose top bit is clear needs none of that and is the signed conversion as it stands, so
+/// there are two answers and the machine has to pick one. gcc writes a branch. This writes the
+/// choice as arithmetic, because a branch here would mean splitting the block this instruction is
+/// in, and every rewrite in this pass stays inside one block. A mask that is every bit or no bit
+/// picks the source, and the same mask over the bits of the result picks between doubling it and
+/// adding a zero to it. That is more instructions than gcc's and no branch to predict wrong.
+fn from_unsigned_word(func: &mut Func, inst: Inst, arg: Value, from: Type) {
+    let ty = produced(func, inst);
+    if !ty.is_float() || !ty.is_scalar() {
+        return;
+    }
+    if exact(ty, from) {
+        from_unsigned_word_wide(func, inst, arg, from);
+        return;
+    }
+    let spread = spread_top_bit(func, inst, arg, from);
+
+    // The value halved, with the bit the halving lost put back as the lowest bit of it.
+    let one = ahead_const(func, inst, Imm::int(1, from), from);
+    let lost = ahead(func, inst, Opcode::And, &[arg, one], from);
+    let half = ahead(func, inst, Opcode::LShr, &[arg, one], from);
+    let odd = ahead(func, inst, Opcode::Or, &[half, lost], from);
+
+    // The source, as the value with the difference between the two conditionally taken out of it.
+    let differ = ahead(func, inst, Opcode::Xor, &[arg, odd], from);
+    let taken = ahead(func, inst, Opcode::And, &[differ, spread], from);
+    let source = ahead(func, inst, Opcode::Xor, &[arg, taken], from);
+    let converted = ahead(func, inst, Opcode::SIToFP, &[source], ty);
+
+    // The doubling, as the result added to itself or to a zero. The mask is the same one narrowed
+    // to the width of the float, since the top bit it came from is a fact about the integer.
+    let bits = Type::int(ty.bits());
+    let narrow = same_width(func, inst, spread, from, bits);
+    let raw = ahead(func, inst, Opcode::Bitcast, &[converted], bits);
+    let again = ahead(func, inst, Opcode::And, &[raw, narrow], bits);
+    let addend = ahead(func, inst, Opcode::Bitcast, &[again], ty);
+    becomes(func, inst, Opcode::FAdd, &[converted, addend]);
+}
+
+/// A float becoming an unsigned sixty four bit integer, without a branch.
+///
+/// The same argument the other way round, and the same reason there is no branch. A float below
+/// half the range converts as the signed one and is already the answer. One at or above it has half
+/// the range subtracted first, which is exact because the two have the same exponent or a smaller
+/// one, converts into the signed integer that now holds it, and gets the top bit put back on.
+///
+/// The subtraction is of a constant that is either half the range or a positive zero, which is the
+/// same mask trick as above written over the bits of the float, and subtracting a positive zero
+/// leaves every value alone including a negative zero. A float too big for the answer, or a not a
+/// number, is undefined in C and unspecified in the model, so the comparison being false for a not
+/// a number costs nothing: it takes the path whose answer was never promised either way.
+fn to_unsigned_word(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
+    let from = func[arg].ty;
+    if !from.is_float() || !from.is_scalar() {
+        return;
+    }
+    if exact(from, ty) {
+        to_unsigned_word_wide(func, inst, arg, ty);
+        return;
+    }
+    // Half the range, as the float that spells it and the bits that spell the float.
+    let bits = Type::int(from.bits());
+    let pattern = Imm::int(half_the_range(from.bits(), ty.bits()), bits);
+    let spelled = ahead_const(func, inst, pattern, bits);
+    let half = ahead(func, inst, Opcode::Bitcast, &[spelled], from);
+
+    let over = ahead_cmp(func, inst, Opcode::FCmp, Extra::FloatPred(FloatPred::Oge), &[arg, half]);
+    let wide = ahead(func, inst, Opcode::ZExt, &[over], bits);
+    let zero = ahead_const(func, inst, Imm::int(0, bits), bits);
+    let spread = ahead(func, inst, Opcode::Sub, &[zero, wide], bits);
+
+    let amount = ahead(func, inst, Opcode::And, &[spread, spelled], bits);
+    let taken = ahead(func, inst, Opcode::Bitcast, &[amount], from);
+    let under = ahead(func, inst, Opcode::FSub, &[arg, taken], from);
+    let low = ahead(func, inst, Opcode::FPToSI, &[under], ty);
+
+    // The top bit back on, from the same comparison at the width of the answer.
+    let again = ahead(func, inst, Opcode::ZExt, &[over], ty);
+    let up = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
+    let top = ahead(func, inst, Opcode::Shl, &[again, up], ty);
+    becomes(func, inst, Opcode::Xor, &[low, top]);
+}
+
+/// An unsigned sixty four bit integer becoming a float wider than that, without a branch.
+///
+/// Neither sequence above can be written at this width, and for the same reason both of them end in
+/// a `bitcast`: the mask that picks between the two answers is laid over the bits of the result, and
+/// a float this wide has no integer holding its bits any more than it has a register holding it. So
+/// the choice has to be made somewhere other than in the bits, and the somewhere is the float
+/// arithmetic itself.
+///
+/// What replaces it is also smaller than what it replaces, because a float this wide has sixty four
+/// bits of significand and so holds every value of a sixty four bit integer exactly. Nothing rounds,
+/// so there is nothing to round to odd first, and the halving and the doubling both go away. The
+/// value is converted as a signed integer, which is the number when the top bit is clear and the
+/// number less two to the sixty fourth when it is set, and that constant is added back in the second
+/// case. Both of those additions are exact, since either operand of one is a value the significand
+/// holds and so is the answer.
+///
+/// The choice is a comparison turned into a one or a zero, converted into a float and multiplied by
+/// the constant, which is where the mask would have been. A float times one is itself and a float
+/// times a positive zero is a positive zero, so what the addition gets is the constant or a zero it
+/// leaves every value alone including a negative zero, and the conversion never produces one of
+/// those anyway.
+fn from_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, from: Type) {
+    let ty = produced(func, inst);
+    let zero = ahead_const(func, inst, Imm::int(0, from), from);
+    let over = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Slt), &[arg, zero]);
+
+    let signed = ahead(func, inst, Opcode::SIToFP, &[arg], ty);
+    let range = ahead_float(func, inst, power_of_two(from.bits(), ty), ty);
+    let flag = flag_as_float(func, inst, over, from, ty);
+    let addend = ahead(func, inst, Opcode::FMul, &[range, flag], ty);
+    becomes(func, inst, Opcode::FAdd, &[signed, addend]);
+}
+
+/// A float wider than sixty four bits becoming an unsigned sixty four bit integer, without a branch.
+///
+/// The same argument the other way round and the same answer to it. The shape is the sequence above
+/// this one with the two `bitcast`s gone: half the range is a constant of the float's own type
+/// rather than an integer read as one, and the conditional subtraction is that constant multiplied
+/// by a one or a zero rather than masked with one.
+///
+/// Subtracting is exact here for the reason it is at the narrower widths, since the value is at
+/// least as large as what is taken off it. A value too big for the answer, or a not a number, takes
+/// the path whose answer C never promised, which is the same place the comparison being false for a
+/// not a number puts it.
+fn to_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
+    let from = func[arg].ty;
+    let half = ahead_float(func, inst, power_of_two(ty.bits() - 1, from), from);
+    let over = ahead_cmp(func, inst, Opcode::FCmp, Extra::FloatPred(FloatPred::Oge), &[arg, half]);
+
+    let flag = flag_as_float(func, inst, over, ty, from);
+    let taken = ahead(func, inst, Opcode::FMul, &[half, flag], from);
+    let under = ahead(func, inst, Opcode::FSub, &[arg, taken], from);
+    let low = ahead(func, inst, Opcode::FPToSI, &[under], ty);
+
+    // The top bit back on, from the same comparison at the width of the answer.
+    let again = ahead(func, inst, Opcode::ZExt, &[over], ty);
+    let up = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
+    let top = ahead(func, inst, Opcode::Shl, &[again, up], ty);
+    becomes(func, inst, Opcode::Xor, &[low, top]);
+}
+
+/// A condition as a float that is a one or a positive zero, which is what stands in for a mask.
+///
+/// The widening is to the integer on the other side of the conversion rather than to whatever the
+/// float came from, since the value is a one or a zero and the conversion wants an integer the
+/// machine converts from. Neither of the two numbers is anywhere near needing rounding.
+fn flag_as_float(func: &mut Func, inst: Inst, cond: Value, int: Type, ty: Type) -> Value {
+    let wide = ahead(func, inst, Opcode::ZExt, &[cond], int);
+    ahead(func, inst, Opcode::SIToFP, &[wide], ty)
+}
+
+/// Whether every value of the integer is one the float holds exactly, which is what lets the
+/// conversions between them go without the halving and the bit tricks: an eighty bit float and a
+/// sixty four bit integer, and a `double` and a thirty two bit integer on a machine with no wider
+/// signed one.
+fn exact(float: Type, int: Type) -> bool {
+    float.bits() > 64 || float.bits() == 64 && int.bits() <= 32
+}
+
+/// The bits of the float of that type that is two to this power, for the two formats [`exact`]
+/// lets through.
+fn power_of_two(power: u32, ty: Type) -> u128 {
+    if ty.bits() > 64 { two_to_the(power) } else { u128::from(1023 + power) << 52 }
+}
+
+/// The bits of the eighty bit float that is two to this power.
+///
+/// The significand of a power of two is the leading bit and nothing else, which in this format is
+/// written down rather than implied, and the exponent is the power with the bias on it.
+const fn two_to_the(power: u32) -> u128 {
+    ((0x3fff + power as u128) << 64) | 0x8000_0000_0000_0000
+}
+
+/// The top bit of an integer spread over every bit of one, which is every bit or no bit.
+///
+/// A comparison against zero rather than a shift, because the answer wanted is a mask and the
+/// machine writes a mask out of a condition the same way either way, and the comparison says what
+/// the question was.
+fn spread_top_bit(func: &mut Func, inst: Inst, arg: Value, ty: Type) -> Value {
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let set = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Slt), &[arg, zero]);
+    let wide = ahead(func, inst, Opcode::ZExt, &[set], ty);
+    ahead(func, inst, Opcode::Sub, &[zero, wide], ty)
+}
+
+/// A value brought to another integer width, and itself when the two are already the same.
+fn same_width(func: &mut Func, inst: Inst, value: Value, from: Type, to: Type) -> Value {
+    match to.bits().cmp(&from.bits()) {
+        Ordering::Equal => value,
+        Ordering::Less => ahead(func, inst, Opcode::Trunc, &[value], to),
+        Ordering::Greater => ahead(func, inst, Opcode::SExt, &[value], to),
+    }
+}
+
+/// The bits of the float of width `float` that is half the range of an unsigned integer of width
+/// `int`, which is two to the power one less than `int`.
+///
+/// That is the one number both conversions above are written around. It is two to the sixty third
+/// for an unsigned sixty four bit integer, and two to the thirty first for an unsigned `int` on a
+/// machine of thirty two bits. The exponent is biased and the significand is zero in both formats,
+/// so it is the bias plus the power shifted up past the significand.
+fn half_the_range(float: u32, int: u32) -> i128 {
+    let (bias, significand) = match float {
+        32 => (127, 23),
+        _ => (1023, 52),
+    };
+    (bias + i128::from(int) - 1) << significand
+}
+
+/// Rewrites every byte swap the machine has no instruction for into the shifts and masks that are
+/// one, and leaves the rest alone.
+///
+/// A byte swap is a rule on a machine that has the instruction and this everywhere else. `kept` is
+/// the widths the target's rules select one at, which is [`rucc_target::CallRegs::byte_swaps`], so
+/// on x86-64 every width stays one instruction and on a target with no rule yet every width comes
+/// here. What is written below is correct at every width and slower than the one instruction, which
+/// is the trade `spec/10-backend.md` section 10.3 says the fast path makes everywhere.
+///
+/// It is here rather than in the front end because the masks are worked out from the width, and
+/// arithmetic on a value a pattern matched is the one thing the rule language deliberately cannot
+/// do. It is here rather than in the walk to the IR because a byte swap is one instruction in the
+/// IR and should stay one for as long as anything is reading the IR, which is what let the rules
+/// arrive without anything above the backend changing.
+///
+/// A bit reversal comes here at every width on every target, since no target has a rule for one
+/// yet. It is the same run of exchanges as a byte swap carried on past the byte down to single bits,
+/// so it is the same code with a different place to stop. Nothing in the front end writes one today,
+/// but the IR has the opcode and a selector that met one would refuse the function, and three more
+/// rounds of shifts and masks is a small price for that never happening.
+pub fn bytes(func: &mut Func, kept: &[u32]) {
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::Bswap if !kept.contains(&produced(func, inst).bits()) => {
+                let bits = produced(func, inst).bits();
+                if bits % 2 == 0 && kept.contains(&(bits / 2)) {
+                    halved(func, inst);
+                } else {
+                    swap(func, inst, u8::BITS);
+                }
+            }
+            // The smallest group a bit reversal exchanges is one bit.
+            Opcode::Bitreverse => swap(func, inst, 1),
+            _ => {}
+        }
+    }
+}
+
+/// A byte swap twice as wide as one the machine has, as that one over each half with the halves
+/// crossed.
+///
+/// A `__builtin_bswap64` on i386 is two `bswapl` and the two words handed back the other way
+/// round, which is what gcc writes. The run of shifts and masks below came to forty eight
+/// instructions over the pair, and the kernel's `be64_to_cpu` is in the middle of `sha512` and
+/// `gf128mul`, where it made both about three times the size gcc makes them.
+fn halved(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let half = Type::int(ty.bits() / 2);
+    let count = ahead_const(func, inst, Imm::int(i128::from(half.bits()), ty), ty);
+    let low = ahead(func, inst, Opcode::Trunc, &[arg], half);
+    let shifted = ahead(func, inst, Opcode::LShr, &[arg, count], ty);
+    let high = ahead(func, inst, Opcode::Trunc, &[shifted], half);
+    let low = ahead(func, inst, Opcode::Bswap, &[low], half);
+    let high = ahead(func, inst, Opcode::Bswap, &[high], half);
+    let wide = ahead(func, inst, Opcode::ZExt, &[low], ty);
+    let up = ahead(func, inst, Opcode::Shl, &[wide, count], ty);
+    let down = ahead(func, inst, Opcode::ZExt, &[high], ty);
+    becomes(func, inst, Opcode::Or, &[up, down]);
+}
+
+/// One byte swap, as a halving run of swaps of adjacent groups of bits.
+///
+/// Reversing eight bytes is swapping the two halves, then the two halves of each half, then the two
+/// bytes of each of those, and the three steps commute because each is a permutation of positions
+/// the others do not touch. So the run goes from the widest group down to a byte, and every step is
+/// the same five instructions: keep the even numbered groups, move them up, move the odd numbered
+/// ones down, keep those, and put the two together.
+///
+/// Nine instructions for two bytes, seventeen for four, twenty five for eight, before the constants.
+/// Writing it as a shift and a mask per byte instead is fewer steps to read and more instructions at
+/// every width above two, since the cost there grows with the number of bytes rather than with the
+/// logarithm of it.
+///
+/// `lowest` is the smallest group exchanged, which is a byte for a byte swap and a single bit for a
+/// bit reversal. The rounds below a byte are the same five instructions with narrower masks, so a
+/// bit reversal at sixty four bits is six rounds where a byte swap is three.
+///
+/// A width the halving does not come out even on is left alone. That is a width that is not a whole
+/// number of `lowest` groups, or one that halves past `lowest` without landing on it, or one that
+/// is no wider than one group so there is nothing to exchange. The verifier allows none of these at
+/// the sizes C has, and silently reversing something else would be worse than the instruction
+/// surviving to a selector that has no rule for it and says so.
+fn swap(func: &mut Func, inst: Inst, lowest: u32) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let bits = ty.bits();
+    if !ty.is_int() || !ty.is_scalar() || bits <= lowest || bits % lowest != 0 {
+        return;
+    }
+    // The number of groups has to be a power of two for every round to split whole groups in half
+    // and for the last round to be the one at `lowest`.
+    if !(bits / lowest).is_power_of_two() {
+        return;
+    }
+
+    let mut value = arg;
+    let mut group = bits / 2;
+    while group >= lowest {
+        // The pattern that keeps every other run of `group` bits, counting the run at the bottom as
+        // the first one kept. It is what says which half of each pair moves up and which moves down.
+        let mask = alternating(bits, group);
+        let keep = ahead_const(func, inst, Imm::int(mask, ty), ty);
+        let count = ahead_const(func, inst, Imm::int(i128::from(group), ty), ty);
+        let low = ahead(func, inst, Opcode::And, &[value, keep], ty);
+        let up = ahead(func, inst, Opcode::Shl, &[low, count], ty);
+        let down = ahead(func, inst, Opcode::LShr, &[value, count], ty);
+        let high = ahead(func, inst, Opcode::And, &[down, keep], ty);
+        // The last step of the last round is the instruction itself, so the value everything
+        // downstream already reads is the answer and nothing has to be substituted.
+        if group == lowest {
+            becomes(func, inst, Opcode::Or, &[up, high]);
+            return;
+        }
+        value = ahead(func, inst, Opcode::Or, &[up, high], ty);
+        group /= 2;
+    }
+}
+
+/// The mask that keeps every other run of `group` bits out of `width` of them, starting with the
+/// run at the bottom.
+///
+/// Sixteen bits in groups of eight is `0x00ff`, thirty two in groups of eight is `0x00ff00ff`, and
+/// thirty two in groups of sixteen is `0x0000ffff`. Built rather than written down because there is
+/// one of these per width per group and a table of them is a table to get wrong.
+///
+/// The top group is always one of the dropped ones, since the run at the bottom is kept and the
+/// width is an even number of groups, so the answer never has its sign bit set and reads the same
+/// as a number as it does as a pattern.
+fn alternating(width: u32, group: u32) -> i128 {
+    every(width, group * 2, group)
+}
+
+/// The pattern with the low `run` bits of every `step` bit group set, out of `width` of them.
+///
+/// `every(32, 2, 1)` is `0x55555555` and `every(64, 8, 1)` is `0x0101010101010101`. Built rather
+/// than written down for the reason the byte swap masks are: there is one of these per width per
+/// group and a table of them is a table to get wrong.
+///
+/// The top group is never a full one when `run` is less than `step`, so the answer never has its
+/// sign bit set and reads the same as a number as it does as a pattern.
+fn every(width: u32, step: u32, run: u32) -> i128 {
+    let ones = (1i128 << run) - 1;
+    let mut mask = 0i128;
+    let mut at = 0;
+    while at < width {
+        mask |= ones << at;
+        at += step;
+    }
+    mask
+}
+
+/// Which count an IR instruction is, when it is one.
+#[must_use]
+pub fn bit_count(opcode: Opcode) -> Option<BitCount> {
+    match opcode {
+        Opcode::Ctpop => Some(BitCount::Ones),
+        Opcode::Ctlz => Some(BitCount::LeadingZeros),
+        Opcode::Cttz => Some(BitCount::TrailingZeros),
+        _ => None,
+    }
+}
+
+/// Rewrites every bit count the machine is not left to answer into the arithmetic that is one, and
+/// leaves the rest alone.
+///
+/// `kept` is the counts the selector has a rule for on the processor this function is built for,
+/// which on x86-64 is `popcnt`, `lzcnt` and `tzcnt` where `-mpopcnt`, a `-march=` or a `target`
+/// attribute says the processor has them (tamnd/rucc#310), and on AArch64 is `clz`, alone for the
+/// leading zeros and after `rbit` for the trailing ones, on every processor. Everything else is
+/// written out here, and that is every count on a plain x86-64, whose searches `bsr` and `bsf` leave a different answer
+/// for a zero on different processors. The trade is the one `spec/10-backend.md` section 10.3
+/// describes and `expand::bytes` above makes for the same reason: slower than the instruction,
+/// right on every target, and built only out of rules the verifier has already discharged.
+///
+/// The two searches are rewritten first, into a set bit count and a little arithmetic, and then
+/// every set bit count is rewritten. That is one pass rather than two because the second sweep picks
+/// up what the first one wrote, and it means there is one place that knows how to count bits rather
+/// than three. A search written out as a set bit count is one instruction after all on a processor
+/// that has `popcnt` and not `lzcnt`, since the second sweep keeps the count it became.
+///
+/// A count `kept` names as guarded is neither left alone nor written out. It is written as the
+/// choice `chosen` writes, which is the only shape the rule for it takes, and that is how a
+/// plain x86-64 gets `bsr` and `bsf` for its zero counts in place of the arithmetic.
+pub fn counts(func: &mut Func, kept: &[CountInst]) {
+    let answered = |func: &Func, inst: Inst, guarded: bool| {
+        let bits = produced(func, inst).bits();
+        bit_count(func[inst].opcode).is_some_and(|of| {
+            kept.iter().any(|count| {
+                count.of == of && count.guarded == guarded && count.widths.contains(&bits)
+            })
+        })
+    };
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        let Some(of) = bit_count(func[inst].opcode) else { continue };
+        let word = kept.iter().any(|count| count.of == of && count.widths.contains(&32));
+        let whole = answered(func, inst, false) || answered(func, inst, true);
+        if of != BitCount::Ones && word && !whole && produced(func, inst).bits() == 64 {
+            worded(func, inst, of == BitCount::LeadingZeros);
+        }
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        if answered(func, inst, false) {
+            continue;
+        }
+        if answered(func, inst, true) {
+            chosen(func, inst);
+            continue;
+        }
+        match func[inst].opcode {
+            Opcode::Ctlz => searched(func, inst, true),
+            Opcode::Cttz => searched(func, inst, false),
+            _ => {}
+        }
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        if func[inst].opcode == Opcode::Ctpop && !answered(func, inst, false) {
+            counted(func, inst);
+        }
+    }
+}
+
+/// A zero count of a value two words wide, on a machine that counts a word and not two, as the
+/// count of the word the first set bit is in.
+///
+/// That is the high word for the leading zeros and the low one for the trailing ones, and when it
+/// is zero the answer is the other word's count and the thirty two bits of the first. A zero has
+/// both words empty and comes to sixty four, the width, as the count it was does. On i386, which
+/// is the machine this is for, each word is a `bsr` or a `bsf` and the choice is a `cmov`, where
+/// the count written out at sixty four bits was some seventy instructions.
+fn worded(func: &mut Func, inst: Inst, leading: bool) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let word = Type::int(32);
+    let opcode = func[inst].opcode;
+    let low = ahead(func, inst, Opcode::Trunc, &[arg], word);
+    let by = ahead_const(func, inst, Imm::int(32, ty), ty);
+    let up = ahead(func, inst, Opcode::LShr, &[arg, by], ty);
+    let high = ahead(func, inst, Opcode::Trunc, &[up], word);
+    let (first, second) = if leading { (high, low) } else { (low, high) };
+    let zero = ahead_const(func, inst, Imm::int(0, word), word);
+    let empty = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Eq), &[first, zero]);
+    let near = ahead(func, inst, opcode, &[first], word);
+    let far = ahead(func, inst, opcode, &[second], word);
+    let width = ahead_const(func, inst, Imm::int(32, word), word);
+    let past = ahead(func, inst, Opcode::Add, &[far, width], word);
+    let count = ahead(func, inst, Opcode::Select, &[empty, past, near], word);
+    becomes(func, inst, Opcode::ZExt, &[count]);
+}
+
+/// A zero count as a choice between the width, for a zero, and the same count, for anything else.
+///
+/// The choice says no more than the count does, since the count answers the width for a zero
+/// already, so the function means what it meant. What it is for is the rule. `bsr` and `bsf` leave
+/// the destination as it was for a zero on some processors and say nothing about it on others, so
+/// a rule may reach one only where something else answers the zero, and the choice written here
+/// is what the rule matches and what the conditional move after the search stands for.
+fn chosen(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let opcode = func[inst].opcode;
+    let count = ahead(func, inst, opcode, &[arg], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let none = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Eq), &[arg, zero]);
+    let width = ahead_const(func, inst, Imm::int(i128::from(ty.bits()), ty), ty);
+    becomes(func, inst, Opcode::Select, &[none, width, count]);
+}
+
+/// A leading or trailing zero count, as the set bit count of a value with those zeroes turned into
+/// the only bits that are set.
+///
+/// For trailing zeroes that is `~x & (x - 1)`, which is exactly the run of zeroes below the lowest
+/// set bit and nothing else, because `x - 1` sets that run and clears the bit above it while `~x`
+/// keeps only positions `x` did not have.
+///
+/// For leading zeroes it is the same idea upside down. Smearing every set bit downwards, by folding
+/// the value into itself shifted right by one, two, four and so on, leaves ones everywhere at or
+/// below the highest set bit, so the complement is exactly the leading zeroes. That is five extra
+/// steps at thirty two bits and six at sixty four, which is why the search instruction is worth
+/// having and why #310 stays open for it.
+///
+/// Both answer the width for a zero argument, which is what they have to answer for `ffs` to be
+/// masked correctly and is more than C asks for: `__builtin_clz(0)` and `__builtin_ctz(0)` are
+/// undefined, so nothing may rely on this, and the point of writing it down is that it is defined
+/// here rather than being whatever a register happened to hold.
+fn searched(func: &mut Func, inst: Inst, leading: bool) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let ones = ahead_const(func, inst, Imm::int(-1, ty), ty);
+    if leading {
+        let mut value = arg;
+        let mut by = 1;
+        while by < ty.bits() {
+            let count = ahead_const(func, inst, Imm::int(i128::from(by), ty), ty);
+            let down = ahead(func, inst, Opcode::LShr, &[value, count], ty);
+            value = ahead(func, inst, Opcode::Or, &[value, down], ty);
+            by *= 2;
+        }
+        let above = ahead(func, inst, Opcode::Xor, &[value, ones], ty);
+        becomes(func, inst, Opcode::Ctpop, &[above]);
+        return;
+    }
+    let missing = ahead(func, inst, Opcode::Xor, &[arg, ones], ty);
+    let less = ahead(func, inst, Opcode::Add, &[arg, ones], ty);
+    let below = ahead(func, inst, Opcode::And, &[missing, less], ty);
+    becomes(func, inst, Opcode::Ctpop, &[below]);
+}
+
+/// One set bit count, as the halving sum every bit counting routine is written as.
+///
+/// Adjacent bits are added into pairs, pairs into nibbles, nibbles into bytes, and then the bytes
+/// are added together at once by a multiply whose top byte is their sum. The first step is written
+/// as a subtraction rather than as two masks and an add, which is the usual form and is one
+/// instruction shorter: a two bit field minus its own high bit is the number of bits set in it.
+///
+/// Twelve instructions and four constants at sixty four bits, against one `popcnt`, which is the
+/// size of what #310 is worth.
+///
+/// The multiply is the last step only because the byte sums are each at most eight and there are at
+/// most eight of them, so the running total in the top byte cannot carry out of it. At eight bits
+/// there are no bytes to add and the third step is already the answer.
+fn counted(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let width = ty.bits();
+    let pairs = ahead_const(func, inst, Imm::int(alternating(width, 1), ty), ty);
+    let two = ahead_const(func, inst, Imm::int(2, ty), ty);
+    let one = ahead_const(func, inst, Imm::int(1, ty), ty);
+    let high = ahead(func, inst, Opcode::LShr, &[arg, one], ty);
+    let odd = ahead(func, inst, Opcode::And, &[high, pairs], ty);
+    let bits = ahead(func, inst, Opcode::Sub, &[arg, odd], ty);
+
+    let quads = ahead_const(func, inst, Imm::int(alternating(width, 2), ty), ty);
+    let low = ahead(func, inst, Opcode::And, &[bits, quads], ty);
+    let up = ahead(func, inst, Opcode::LShr, &[bits, two], ty);
+    let rest = ahead(func, inst, Opcode::And, &[up, quads], ty);
+    let nibbles = ahead(func, inst, Opcode::Add, &[low, rest], ty);
+
+    let four = ahead_const(func, inst, Imm::int(4, ty), ty);
+    let bytes = ahead_const(func, inst, Imm::int(alternating(width, 4), ty), ty);
+    let folded = ahead(func, inst, Opcode::LShr, &[nibbles, four], ty);
+    let summed = ahead(func, inst, Opcode::Add, &[nibbles, folded], ty);
+    if width == 8 {
+        becomes(func, inst, Opcode::And, &[summed, bytes]);
+        return;
+    }
+    let held = ahead(func, inst, Opcode::And, &[summed, bytes], ty);
+
+    let spread = ahead_const(func, inst, Imm::int(every(width, 8, 1), ty), ty);
+    let top = ahead_const(func, inst, Imm::int(i128::from(width - 8), ty), ty);
+    let total = ahead(func, inst, Opcode::Mul, &[held, spread], ty);
+    becomes(func, inst, Opcode::LShr, &[total, top]);
+}
+
+/// Rewrites every overflow checked instruction into the arithmetic and the test that is one.
+///
+/// Six instructions and no rules, which is tamnd/rucc#309. The trade is the one `expand::bytes` and
+/// `expand::counts` above make, with one thing on top of it: these are the only instructions in the
+/// IR whose result is two things, a value and a bit, and the rule language has no way to write a
+/// term that produces two. So even on a machine whose add sets a carry flag, a rule for one of
+/// these could not name both halves of what it answers, and the rewrite would have to happen
+/// somewhere. Here is that somewhere.
+///
+/// Because the instruction goes away rather than becoming another one, the values the rest of the
+/// function read have to be pointed at what replaced them. That is what `substitute` below does,
+/// once, after every instruction has been rewritten.
+///
+/// `register` is how many bits a register holds, which decides how a multiply finds the high half
+/// of its product. See `product_high`.
+pub fn overflows(func: &mut Func, register: u32) {
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let mut forward = Map::default();
+    for inst in found {
+        let checked = match func[inst].opcode {
+            Opcode::UAddOverflow => Checked::Add(false),
+            Opcode::SAddOverflow => Checked::Add(true),
+            Opcode::USubOverflow => Checked::Sub(false),
+            Opcode::SSubOverflow => Checked::Sub(true),
+            Opcode::UMulOverflow => Checked::Mul(false),
+            Opcode::SMulOverflow => Checked::Mul(true),
+            _ => continue,
+        };
+        overflowed(func, inst, checked, register, &mut forward);
+    }
+    if !forward.is_empty() {
+        substitute(func, &forward);
+    }
+}
+
+/// Which of the six an instruction is, as the arithmetic and whether the operands are signed.
+#[derive(Debug, Clone, Copy)]
+enum Checked {
+    /// An add, whose answer wraps when the exact sum needed one more bit at the top.
+    Add(bool),
+    /// A subtract.
+    Sub(bool),
+    /// A multiply, which is the expensive one because the test needs the high half of the product.
+    Mul(bool),
+}
+
+/// One overflow checked instruction, as the ordinary arithmetic and a test on the operands.
+///
+/// The value is always the ordinary instruction, because that is what the wrapped answer is. What
+/// differs between the six is how the bit is worked out.
+///
+/// The two adds and the two subtracts are one comparison each. An unsigned sum wraps exactly when
+/// it came out below either operand, and an unsigned difference wraps exactly when the left operand
+/// was below the right. A signed sum wraps exactly when both operands had the same sign and the
+/// answer had the other one, which `(a ^ v) & (b ^ v)` has the sign bit of, and a signed difference
+/// wraps exactly when the operands had different signs and the answer took the right one's, which
+/// `(a ^ b) & (a ^ v)` has the sign bit of.
+///
+/// The multiplies are the high half of the product against what the low half implies it should be.
+/// For an unsigned multiply the product fits exactly when the high half is zero, and for a signed
+/// one it fits exactly when the high half is the sign extension of the low half, which is the low
+/// half shifted right arithmetically by every bit but one.
+fn overflowed(
+    func: &mut Func,
+    inst: Inst,
+    checked: Checked,
+    register: u32,
+    forward: &mut Map<Value, Value>,
+) {
+    let ty = produced(func, inst);
+    let [a, b] = func[func[inst].args] else { return };
+    if !checkable(ty) {
+        return;
+    }
+    let (value, bit) = match checked {
+        Checked::Add(signed) => {
+            let value = ahead(func, inst, Opcode::Add, &[a, b], ty);
+            let bit = if signed {
+                let left = ahead(func, inst, Opcode::Xor, &[a, value], ty);
+                let right = ahead(func, inst, Opcode::Xor, &[b, value], ty);
+                let both = ahead(func, inst, Opcode::And, &[left, right], ty);
+                negative(func, inst, both, ty)
+            } else {
+                compared(func, inst, IntPred::Ult, value, a)
+            };
+            (value, bit)
+        }
+        Checked::Sub(signed) => {
+            let value = ahead(func, inst, Opcode::Sub, &[a, b], ty);
+            let bit = if signed {
+                let apart = ahead(func, inst, Opcode::Xor, &[a, b], ty);
+                let moved = ahead(func, inst, Opcode::Xor, &[a, value], ty);
+                let both = ahead(func, inst, Opcode::And, &[apart, moved], ty);
+                negative(func, inst, both, ty)
+            } else {
+                compared(func, inst, IntPred::Ult, a, b)
+            };
+            (value, bit)
+        }
+        Checked::Mul(signed) => {
+            let value = ahead(func, inst, Opcode::Mul, &[a, b], ty);
+            let high = product_high(func, inst, a, b, signed, ty, register);
+            let bit = if signed {
+                let sign = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
+                let wanted = ahead(func, inst, Opcode::AShr, &[value, sign], ty);
+                compared(func, inst, IntPred::Ne, high, wanted)
+            } else {
+                let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+                compared(func, inst, IntPred::Ne, high, zero)
+            };
+            (value, bit)
+        }
+    };
+    let mut answers = func[inst].results();
+    if let (Some(wrapped), Some(flag)) = (answers.next(), answers.next()) {
+        forward.insert(wrapped, value);
+        forward.insert(flag, bit);
+    }
+    func.remove_inst(inst);
+}
+
+/// The high half of a checked multiply's product, in the cheapest shape the machine has for it.
+///
+/// At the width of a register it is `umulh` or `smulh`, which every machine here has a rule for at
+/// that width: one `mull` on i386, one `mulq` on x86-64 and one `umulh` on AArch64. Below it the
+/// operands are widened to twice the width, multiplied there and the top shifted down, which is
+/// four instructions. Only above a register, the `long long` on i386 and the `__int128`, is it the
+/// long multiplication of [`high_half`].
+///
+/// The kernel checks every size it allocates with `check_mul_overflow`, behind `array_size`,
+/// `struct_size` and `kcalloc`, and the long multiplication made each of those some thirty
+/// instructions where gcc writes a `mul` and a `jo`.
+fn product_high(
+    func: &mut Func,
+    inst: Inst,
+    a: Value,
+    b: Value,
+    signed: bool,
+    ty: Type,
+    register: u32,
+) -> Value {
+    let width = ty.bits();
+    if width == register {
+        let opcode = if signed { Opcode::SMulHigh } else { Opcode::UMulHigh };
+        return ahead(func, inst, opcode, &[a, b], ty);
+    }
+    if width * 2 > register {
+        return high_half(func, inst, a, b, signed, ty);
+    }
+    let wide = Type::int(width * 2);
+    let widen = if signed { Opcode::SExt } else { Opcode::ZExt };
+    let a = ahead(func, inst, widen, &[a], wide);
+    let b = ahead(func, inst, widen, &[b], wide);
+    let product = ahead(func, inst, Opcode::Mul, &[a, b], wide);
+    let shift = ahead_const(func, inst, Imm::int(i128::from(width), wide), wide);
+    let top = ahead(func, inst, Opcode::LShr, &[product, shift], wide);
+    ahead(func, inst, Opcode::Trunc, &[top], ty)
+}
+
+/// The high half of the product of two values, at the width they are.
+///
+/// Both operands are split into halves of half the width and multiplied four ways, which is long
+/// multiplication in base two to the half width. The three partial products that reach the top are
+/// added with the carry out of the bottom ones, and every step of that fits in the width because
+/// the total is the high half of the product and that is what a high half is.
+///
+/// The whole of it is unsigned, and a signed high half is the unsigned one with a correction: a
+/// negative operand contributed the width's worth of sign bits to the unsigned product that it
+/// should not have, so the other operand is subtracted off once for each negative operand. Spreading
+/// the sign bit of each with an arithmetic shift is what turns that into a mask rather than a
+/// branch.
+///
+/// This is the expensive one. Six multiplies and a dozen other instructions at sixty four bits,
+/// against one `mul` on a machine whose multiply writes the high half into a second register. That
+/// is most of what #309 is worth and it is what makes the multiply the one to give a rule to first.
+///
+/// [`crate::wide`] calls it as well, for the carry out of the low halves of a multiply at a hundred
+/// and twenty eight bits, which is the same question asked at the width below. That pass runs
+/// before this one, so what it writes here is already at a width the machine has and nothing in
+/// this module needs to look at it again.
+pub(crate) fn high_half(
+    func: &mut Func,
+    inst: Inst,
+    a: Value,
+    b: Value,
+    signed: bool,
+    ty: Type,
+) -> Value {
+    let width = ty.bits();
+    let half = width / 2;
+    let shift = ahead_const(func, inst, Imm::int(i128::from(half), ty), ty);
+    let mask = ahead_const(func, inst, Imm::int((1i128 << half) - 1, ty), ty);
+
+    let al = ahead(func, inst, Opcode::And, &[a, mask], ty);
+    let ah = ahead(func, inst, Opcode::LShr, &[a, shift], ty);
+    let bl = ahead(func, inst, Opcode::And, &[b, mask], ty);
+    let bh = ahead(func, inst, Opcode::LShr, &[b, shift], ty);
+
+    let ll = ahead(func, inst, Opcode::Mul, &[al, bl], ty);
+    let lh = ahead(func, inst, Opcode::Mul, &[al, bh], ty);
+    let hl = ahead(func, inst, Opcode::Mul, &[ah, bl], ty);
+    let hh = ahead(func, inst, Opcode::Mul, &[ah, bh], ty);
+
+    // The carry out of the low half, which is the top of the smallest partial product plus the
+    // bottoms of the two middle ones.
+    let over = ahead(func, inst, Opcode::LShr, &[ll, shift], ty);
+    let lh_low = ahead(func, inst, Opcode::And, &[lh, mask], ty);
+    let hl_low = ahead(func, inst, Opcode::And, &[hl, mask], ty);
+    let some = ahead(func, inst, Opcode::Add, &[over, lh_low], ty);
+    let carry = ahead(func, inst, Opcode::Add, &[some, hl_low], ty);
+
+    let lh_high = ahead(func, inst, Opcode::LShr, &[lh, shift], ty);
+    let hl_high = ahead(func, inst, Opcode::LShr, &[hl, shift], ty);
+    let up = ahead(func, inst, Opcode::LShr, &[carry, shift], ty);
+    let first = ahead(func, inst, Opcode::Add, &[hh, lh_high], ty);
+    let second = ahead(func, inst, Opcode::Add, &[first, hl_high], ty);
+    let high = ahead(func, inst, Opcode::Add, &[second, up], ty);
+    if !signed {
+        return high;
+    }
+    let top = ahead_const(func, inst, Imm::int(i128::from(width - 1), ty), ty);
+    let a_sign = ahead(func, inst, Opcode::AShr, &[a, top], ty);
+    let b_sign = ahead(func, inst, Opcode::AShr, &[b, top], ty);
+    let a_owes = ahead(func, inst, Opcode::And, &[a_sign, b], ty);
+    let b_owes = ahead(func, inst, Opcode::And, &[b_sign, a], ty);
+    let once = ahead(func, inst, Opcode::Sub, &[high, a_owes], ty);
+    ahead(func, inst, Opcode::Sub, &[once, b_owes], ty)
+}
+
+/// Whether a value's sign bit is set, as a comparison against zero.
+fn negative(func: &mut Func, inst: Inst, value: Value, ty: Type) -> Value {
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    compared(func, inst, IntPred::Slt, value, zero)
+}
+
+/// A comparison written in front of an instruction, which [`ahead`] cannot write because a
+/// comparison carries its predicate where everything else carries nothing.
+fn compared(func: &mut Func, inst: Inst, pred: IntPred, lhs: Value, rhs: Value) -> Value {
+    let ty = func[lhs].ty.with_lane(Type::I1);
+    let args = func.push_values(&[lhs, rhs]);
+    let extra = Extra::IntPred(pred);
+    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::ICmp) }, ty)
+}
+
+/// Points every reader of a removed instruction's results at what replaced them.
+///
+/// The arguments of each instruction and the arguments of the blocks it branches to, which between
+/// them are everything an instruction can read. Nothing chases here, the way the same walk in
+/// `rucc_opt::simplify` does, because every value this map answers with is one written above and so
+/// is never itself a key.
+fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
+    let with = |value: Value| forward.get(&value).copied().unwrap_or(value);
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<Inst>>() {
+            let args = func[inst].args;
+            func.rewrite(args, with);
+            for call in func.successors(inst).collect::<Vec<_>>() {
+                func.rewrite(call.args, with);
+            }
+        }
+    }
+}
+
+/// Whether the arithmetic in this file works correctly at this type.
+///
+/// A whole number of bytes and a power of two of them, which every width the front end can ask about
+/// is. Anything else is left as the instruction it was, so a selector with no rule for it says so
+/// rather than the program getting a number that was counted, or checked, in the wrong shape.
+///
+/// The bit counts need it because a halving sum halves, and the overflow checks need it because
+/// splitting a value into two halves of equal width needs the width to be even and the halves to be
+/// what a shift by half of it separates.
+fn countable(ty: Type) -> bool {
+    ty.is_int()
+        && ty.is_scalar()
+        && ty.bits() >= 8
+        && ty.bits() <= 64
+        && ty.bits().is_power_of_two()
+}
+
+/// The same for an overflow check, which reaches one width further up than the bit counts do.
+///
+/// The arithmetic a check becomes is adds, subtracts, multiplies, shifts and comparisons, and
+/// `crate::wide` splits every one of those into the two registers a value that wide travels in. So
+/// the checks run before that pass and it finishes the job, where the bit counts run after it and
+/// have nothing above sixty four bits to finish. The halving argument the function above makes
+/// holds here for the same reason it holds one width down.
+fn checkable(ty: Type) -> bool {
+    countable(ty) || (ty.is_int() && ty.is_scalar() && ty.bits() == 128)
+}
+
+/// Rounds up the bytes every variable length array asks for, so that the stack pointer stays where
+/// a call can be made from.
+///
+/// The size of one is whatever the program wrote in the brackets times the size of an element, so
+/// it is any number at all, and the bytes come off the stack pointer where the declaration stands.
+/// A stack pointer moved by an odd number is one no call can be made through afterwards: the
+/// convention says a call arrives with the stack pointer on a multiple of `to`, and every argument
+/// passed on the stack, every spill of a vector register and the alignment of every local below the
+/// array is counted from there. So the number that comes off is the size rounded up, which is
+/// `(size + to - 1) & -to` and is three instructions the machine already has.
+///
+/// Here rather than in the front end because `to` is the convention's and the front end writes one
+/// IR for every target. Here rather than in [`crate::lower`] because it is arithmetic, which is the
+/// one thing a lowering rule deliberately cannot do, and that is what this module is for.
+///
+/// An array asking for more alignment than `to` asks for `to` bytes more than it needs and takes
+/// the address it wanted out of the middle of them, which `aligns` below writes. The stack pointer
+/// itself is left where a call can be made from, so nothing about a frame like that is different
+/// from any other frame that grows.
+///
+/// A fixed local asking for more than `to` in a frame that grows is given its alignment the same
+/// way, which is the other half of it. The prologue cannot force the alignment of a frame whose
+/// stack pointer moves afterwards, so the local takes `align - to` bytes more than it needs at
+/// `to` and hands out the address inside them. `word` is the width of an address in bytes, which
+/// is what that arithmetic is done at. rseq's `param_test` has a `pthread_t` array as long as the
+/// number of threads next to a record aligned to 128.
+pub fn rounds(func: &mut Func, to: u32, word: u32) {
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let grows = found.iter().any(|&inst| match func[inst].opcode {
+        Opcode::Alloca => !func[func[inst].args].is_empty(),
+        Opcode::StackRestore => true,
+        _ => false,
+    });
+    for inst in found {
+        if func[inst].opcode != Opcode::Alloca {
+            continue;
+        }
+        let Some(&size) = func[func[inst].args].first() else {
+            if grows {
+                lifts(func, inst, to, Type::int(word * 8));
+            }
+            continue;
+        };
+        let ty = func[size].ty;
+        if !ty.is_int() {
+            continue;
+        }
+        let Extra::Mem(mem) = func[inst].extra else { continue };
+        let align = func[mem].align;
+        let up = ahead_const(func, inst, Imm::int(i128::from(to) - 1, ty), ty);
+        let mask = ahead_const(func, inst, Imm::int(-i128::from(to), ty), ty);
+        let over = ahead(func, inst, Opcode::Add, &[size, up], ty);
+        let mut rounded = ahead(func, inst, Opcode::And, &[over, mask], ty);
+        if align > to {
+            // The whole of the alignment rather than the difference between the two, so that the
+            // number coming off the stack pointer is still a multiple of `to` and so that the
+            // room is there wherever the outgoing argument area below the array happens to leave
+            // the first byte of it.
+            let slack = ahead_const(func, inst, Imm::int(i128::from(align), ty), ty);
+            rounded = ahead(func, inst, Opcode::Add, &[rounded, slack], ty);
+        }
+        let args = func.push_values(&[rounded]);
+        func[inst].args = args;
+        if align > to {
+            aligns(func, inst, mem, align, to);
+        }
+    }
+}
+
+/// Splits an over-aligned variable length array into the bytes it takes and the address it hands
+/// out, which are not the same address any more.
+///
+/// The bytes come off the stack pointer, and a call leaves the stack pointer on a multiple of the
+/// convention's alignment and no more than that, so an array wanting more has to be given an
+/// address inside the block rather than the block's own first byte. Rounding the stack pointer
+/// down again instead would work for the array and for nothing else: the outgoing argument area
+/// sits below it, the rest of the frame is reached from a register at a constant distance, and a
+/// register that has been masked is at no constant distance from where it was.
+///
+/// So the instruction that was the array becomes `ptr_add` of the offset that rounds the block's
+/// address up, and a new `alloca` above it takes the block. The value the rest of the function
+/// reads is the one the `ptr_add` writes, which is the value the `alloca` used to write, so
+/// nothing that referred to the array has to be pointed anywhere else. The block asked for `to`
+/// and gets it, which is the truth about it: what wanted the larger alignment is the object, and
+/// the object is now the offset into the block rather than the block.
+///
+/// The offset is `-address & (align - 1)`, which is how far up the next multiple of the alignment
+/// is, and [`rounds`] took the room for it above. It is computed at the width the size was
+/// written at, which is `size_t` on the target, and a target whose pointers are wider than its
+/// `size_t` would be counting the low bits of the address either way: every bit the mask keeps is
+/// a bit below the alignment, and the alignment is smaller than the narrower of the two.
+fn aligns(func: &mut Func, inst: Inst, mem: Idx<MemInfo>, align: u32, to: u32) {
+    let ty = func[func[func[inst].args][0]].ty;
+    let mut info = func[mem];
+    info.align = to;
+    let block = InstData {
+        args: func[inst].args,
+        extra: Extra::Mem(func.add_mem(info)),
+        ..InstData::new(Opcode::Alloca)
+    };
+    let raw = written(func, inst, block, Type::PTR);
+    let address = ahead(func, inst, Opcode::PtrToInt, &[raw], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let below = ahead(func, inst, Opcode::Sub, &[zero, address], ty);
+    let bits = ahead_const(func, inst, Imm::int(i128::from(align) - 1, ty), ty);
+    let offset = ahead(func, inst, Opcode::And, &[below, bits], ty);
+    becomes(func, inst, Opcode::PtrAdd, &[raw, offset]);
+}
+
+/// Gives a fixed local in a frame that grows the alignment it asked for, when that is more than
+/// `to`, by taking more bytes at `to` and handing out the address inside them. See [`rounds`].
+fn lifts(func: &mut Func, inst: Inst, to: u32, ty: Type) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let mut info = func[mem];
+    let align = info.align;
+    if align <= to {
+        return;
+    }
+    info.size += u64::from(align - to);
+    info.align = to;
+    let block = InstData { extra: Extra::Mem(func.add_mem(info)), ..InstData::new(Opcode::Alloca) };
+    let raw = written(func, inst, block, Type::PTR);
+    let address = ahead(func, inst, Opcode::PtrToInt, &[raw], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let below = ahead(func, inst, Opcode::Sub, &[zero, address], ty);
+    let bits = ahead_const(func, inst, Imm::int(i128::from(align) - 1, ty), ty);
+    let offset = ahead(func, inst, Opcode::And, &[below, bits], ty);
+    becomes(func, inst, Opcode::PtrAdd, &[raw, offset]);
+}
+
+/// The most moves a copy becomes before it is left alone for a call to `memcpy` instead, which is
+/// gcc's `move_ratio`: [`heuristics::BLOCK_COPY_MOVES_FOR_SPEED`], or
+/// [`heuristics::BLOCK_COPY_MOVES_FOR_SIZE`] in a function built for size.
+///
+/// It is a count of moves and not a count of bytes because that is what the cost is. A copy of
+/// sixty four bytes between two addresses aligned to eight is eight moves and a copy of the same
+/// sixty four bytes between two addresses aligned to one is sixty four, and the second is the
+/// expensive one whatever the size says. `cargo xtask stringop` times the two sides of it on the
+/// machine it runs on, and section 40.7 has what it found.
+pub fn copies(goal: Goal) -> usize {
+    let moves = match goal {
+        Goal::Speed => rucc_cost::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED),
+        Goal::Size => rucc_cost::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE),
+    };
+    moves as usize
+}
+
+/// The same for a fill and `memset`, which is gcc's `clear_ratio`:
+/// [`heuristics::BLOCK_CLEAR_MOVES_FOR_SPEED`], or [`heuristics::BLOCK_CLEAR_MOVES_FOR_SIZE`] in a
+/// function built for size.
+pub fn fills(goal: Goal) -> usize {
+    let moves = match goal {
+        Goal::Speed => rucc_cost::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SPEED),
+        Goal::Size => rucc_cost::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SIZE),
+    };
+    moves as usize
+}
+
+/// Rewrites every bulk copy and bulk fill, into moves when that is worth it and into a call to the
+/// runtime when it is not.
+///
+/// A copy of more than [`copies`] moves for the goal becomes a call, and so does a fill of more than
+/// [`fills`]. A fill whose byte is worked out
+/// at runtime spreads it across a word with one multiply, which is what gcc writes. A `memmove` of
+/// no more than [`MOVE`] moves reads every word before it writes any, so it is right whichever way
+/// the two sides overlap, and a larger one is a call.
+///
+/// `word` is how many bytes the widest move on this machine carries, and `unaligned` whether that
+/// move may be at any address, which on x86 lets a copy through a `void *` move words rather than
+/// bytes and cover an odd tail with one more word that overlaps the one before it, as gcc does.
+/// Where it may, a call to `memcpy` or `memset` of a small constant size is taken apart here too,
+/// which catches the sizes that were only constant once a function was inlined, unless the unit
+/// said those names are not the library's. See `small`. Where it may not, a load or store less
+/// aligned than its width is taken apart instead. See `pieces`.
+///
+/// `moving` is whether a copy too large to write out calls `memmove` and not `memcpy`, which is
+/// [`rucc_target::CallRegs::copies_by_moving`].
+pub fn bulk(
+    func: &mut Func,
+    names: &mut Interner,
+    word: u32,
+    unaligned: bool,
+    goal: Goal,
+    moving: bool,
+) {
+    let most = (copies(goal), fills(goal));
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    if unaligned && !func.attrs.set.contains(AttrSet::NO_BUILTIN) {
+        small(func, names, &found, word, most);
+    }
+    if !unaligned {
+        pieces(func, &found, word);
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::Memcpy => copy(func, names, inst, word, unaligned, most.0, moving),
+            Opcode::Memset => fill(func, names, inst, word, unaligned, most.1),
+            Opcode::Memmove => shift(func, names, inst, word, unaligned),
+            _ => {}
+        }
+    }
+}
+
+/// Every load and store less aligned than its width, as accesses no wider than its alignment, on
+/// a machine where a word may not be moved at any address.
+///
+/// That is AArch64 under `-mstrict-align`, which the kernel asks for in the code that runs before
+/// the MMU is on, where all of memory is device memory and an unaligned access faults. A packed
+/// member is the usual case, and so is the load the byte swap pass makes out of byte loads, which
+/// says how aligned its address is and is put back the way it was here. A load becomes a load of
+/// each piece, widened and shifted up to its place and put together with `or`, the lowest piece
+/// first since every target here is little endian. A store becomes a store of each piece of the
+/// value shifted down. A pointer goes through an integer of its width and a float through one of
+/// its bits, and each piece keeps whatever the program said about the access, a volatile one
+/// included, which is what gcc does with it too.
+///
+/// An atomic access is left alone, since one that is not aligned is not atomic whatever is done
+/// with it, and so is a vector.
+fn pieces(func: &mut Func, found: &[Inst], word: u32) {
+    for &inst in found {
+        let load = match func[inst].opcode {
+            Opcode::Load => true,
+            Opcode::Store => false,
+            _ => continue,
+        };
+        let Extra::Mem(mem) = func[inst].extra else { continue };
+        let info = func[mem];
+        let args = func[func[inst].args].to_vec();
+        let ty = if load { produced(func, inst) } else { func[args[0]].ty };
+        let bytes = if ty.is_ptr() { word } else { ty.bits().div_ceil(8) };
+        let piece = info.align.max(1);
+        if !ty.is_scalar()
+            || !bytes.is_power_of_two()
+            || bytes > word
+            || piece >= bytes
+            || info.order != MemOrder::NotAtomic
+        {
+            continue;
+        }
+        let (int, narrow) = (Type::int(bytes * 8), Type::int(piece * 8));
+        let access = MemInfo { size: u64::from(piece), align: piece, ..info };
+        let flags = func[inst].flags;
+        let address = if load { args[0] } else { args[1] };
+        let shift = |func: &mut Func, at: u32| {
+            ahead_const(func, inst, Imm::int(i128::from(at * piece * 8), int), int)
+        };
+        if load {
+            let mut parts = Vec::new();
+            for at in 0..bytes / piece {
+                let there = stepped(func, inst, address, u64::from(at * piece));
+                let args = func.push_values(&[there]);
+                let extra = Extra::Mem(func.add_mem(access));
+                let data = InstData { args, extra, flags, ..InstData::new(Opcode::Load) };
+                let part = written(func, inst, data, narrow);
+                let mut part = ahead(func, inst, Opcode::ZExt, &[part], int);
+                if at > 0 {
+                    let by = shift(func, at);
+                    part = ahead(func, inst, Opcode::Shl, &[part, by], int);
+                }
+                parts.push(part);
+            }
+            // The last `or` is the load itself when the value is an integer, and the conversion
+            // back is when it is not, so what the rest of the function reads stays where it was.
+            let last = parts.pop().expect("a load in pieces has at least two");
+            let low = parts
+                .into_iter()
+                .reduce(|low, part| ahead(func, inst, Opcode::Or, &[low, part], int));
+            let low = low.expect("a load in pieces has at least two");
+            if ty.is_int() {
+                becomes(func, inst, Opcode::Or, &[low, last]);
+            } else {
+                let whole = ahead(func, inst, Opcode::Or, &[low, last], int);
+                let back = if ty.is_ptr() { Opcode::IntToPtr } else { Opcode::Bitcast };
+                becomes(func, inst, back, &[whole]);
+            }
+        } else {
+            let value = match ty {
+                ty if ty.is_int() => args[0],
+                ty if ty.is_ptr() => ahead(func, inst, Opcode::PtrToInt, &[args[0]], int),
+                _ => ahead(func, inst, Opcode::Bitcast, &[args[0]], int),
+            };
+            for at in 0..bytes / piece {
+                let mut part = value;
+                if at > 0 {
+                    let by = shift(func, at);
+                    part = ahead(func, inst, Opcode::LShr, &[part, by], int);
+                }
+                let part = ahead(func, inst, Opcode::Trunc, &[part], narrow);
+                let there = stepped(func, inst, address, u64::from(at * piece));
+                let span = func.span(inst);
+                let args = func.push_values(&[part, there]);
+                let extra = Extra::Mem(func.add_mem(access));
+                let data = InstData { args, extra, flags, ..InstData::new(Opcode::Store) };
+                let made = func.create_inst(data, &[], span);
+                func.insert_before(made, inst);
+            }
+            func.remove_inst(inst);
+        }
+    }
+}
+
+/// Calls to `memcpy` and `memset` of a constant size that [`copies`] or [`fills`] moves cover, as
+/// the same bulk operation the front end writes for a structure copy.
+///
+/// The kernel writes these all the time, as `memcpy(&key, p, sizeof(key))` and as
+/// `memset(&req, 0, sizeof(req))`, and every one left a call where gcc leaves two or three moves.
+/// The call is the C library's function by its reserved name, so what it does is known, and a copy
+/// of a known size is exactly what [`copy`] already takes apart.
+///
+/// Only on a machine where a word may be moved at any address. The call says nothing about how
+/// either pointer is aligned, and a copy planned for an alignment of one is a move per byte, which
+/// is worse than the call. A fill needs its byte to be a constant for the same reason [`fill`]
+/// does. The value the call gives back is its first argument, so where something reads it the
+/// call becomes that pointer and where nothing does it goes.
+///
+/// `most` is how many moves a copy and a fill may be, in that order.
+fn small(func: &mut Func, names: &Interner, found: &[Inst], word: u32, most: (usize, usize)) {
+    let mut answers: Map<Value, Value> = Map::default();
+    for &inst in found {
+        let Some((opcode, into, with, size)) = shrinkable(func, names, inst) else { continue };
+        let most = if opcode == Opcode::Memset { most.1 } else { most.0 };
+        if plan(size, word, word, most).is_none() {
+            continue;
+        }
+        let access = MemInfo {
+            size,
+            align: word,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: rucc_ir::Restrict::NONE,
+        };
+        let extra = Extra::Mem(func.add_mem(access));
+        let args = func.push_values(&[into, with]);
+        let span = func.span(inst);
+        let made = func.create_inst(InstData { args, extra, ..InstData::new(opcode) }, &[], span);
+        func.insert_before(made, inst);
+        if let Some(answer) = func[inst].first_result {
+            answers.insert(answer, into);
+        }
+        func.remove_inst(inst);
+    }
+    if answers.is_empty() {
+        return;
+    }
+    // The destination may itself have been the answer of a call taken apart before this one, so
+    // each answer is followed to the end of the chain before anything is rewritten.
+    let settled = |mut value: Value| {
+        while let Some(&to) = answers.get(&value) {
+            value = to;
+        }
+        value
+    };
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in insts {
+        func.rewrite(func[inst].args, settled);
+        let arms: Vec<BlockCall> = func.successors(inst).collect();
+        for arm in arms {
+            func.rewrite(arm.args, settled);
+        }
+    }
+    for &from in answers.keys() {
+        func.rename_value(from, settled(from));
+    }
+}
+
+/// What a call to `memcpy` or `memset` of a constant size is, as the bulk operation it would be:
+/// the opcode, the destination, the source or the byte, and the size.
+fn shrinkable(func: &Func, names: &Interner, inst: Inst) -> Option<(Opcode, Value, Value, u64)> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Call || func.unwinds_to_pad(inst) {
+        return None;
+    }
+    let Extra::Call(info) = data.extra else { return None };
+    let opcode = match names.resolve(func[info].callee?) {
+        "memcpy" => Opcode::Memcpy,
+        "memset" => Opcode::Memset,
+        _ => return None,
+    };
+    let &[into, with, length] = &func[data.args] else { return None };
+    let size = u64::try_from(number(func, length)?).ok()?;
+    if opcode == Opcode::Memset {
+        literal(func, with)?;
+    }
+    Some((opcode, into, with, size))
+}
+
+/// The integer a value is, where it is a constant.
+///
+/// Through one widening as well, since at `-O0` the size is the `int` the program wrote widened to
+/// `size_t` and nothing has folded the two together. A size is never negative, so whichever of the
+/// two widenings it went through the number is the same.
+pub(crate) fn number(func: &Func, value: Value) -> Option<u128> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if matches!(func[inst].opcode, Opcode::SExt | Opcode::ZExt) {
+        let &[narrow] = &func[func[inst].args] else { return None };
+        let bits = func[narrow].ty.bits();
+        return number(func, narrow).filter(|&n| bits < 128 && n >> (bits - 1) == 0);
+    }
+    let Extra::Imm(imm) = func[inst].extra else { return None };
+    (func[inst].opcode == Opcode::IConst).then(|| func[imm].unsigned())
+}
+/// The most moves a `memmove` is written as rather than called for.
+///
+/// Every word is read before any is written, so each one is a register held until the writes
+/// start, and eight of them is sixty four bytes on a machine with eight byte words.
+pub const MOVE: usize = 8;
+
+/// One `memcpy`, as a load and a store for each word of it.
+///
+/// The words are read two at a time and each two written before the next two are read, rather
+/// than every read being built before any write the way [`crate::varargs`] copies a list. A
+/// `memcpy` is the copy whose two sides the front end promises do not overlap, so what is at the
+/// source when the last word is read is what was there when the first was. Two at a time costs two
+/// registers where reading all of them first would cost as many as the copy has words, and it is
+/// what gcc writes: two loads next to each other and two stores next to each other, which AArch64
+/// does as one `ldp` and one `stp`. A word at a time would leave a store between every two loads,
+/// and nothing after allocation can move a load above a store.
+fn copy(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+    moving: bool,
+) {
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, from) = (bulk.to, bulk.with);
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    // A plan is a list of offsets, so there is none for a copy whose length the program works out.
+    let Some(plan) = chunks(info, word, unaligned, most).filter(|_| bulk.length.is_none()) else {
+        // A `memmove` is right for a copy too, because the two sides of a copy do not overlap.
+        let routine = if moving { Opcode::Memmove } else { Opcode::Memcpy };
+        return library(func, names, inst, routine, word);
+    };
+    for two in plan.chunks(2) {
+        let mut read_two = Vec::with_capacity(2);
+        for &(at, width) in two {
+            let ty = Type::int(width * 8);
+            let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+            let there = stepped(func, inst, from, at);
+            read_two.push((at, access, read(func, inst, there, access, ty)));
+        }
+        for (at, access, word) in read_two {
+            let here = stepped(func, inst, into, at);
+            write(func, inst, word, here, access);
+        }
+    }
+    func.remove_inst(inst);
+}
+
+/// One `memset`, as a store of the byte spread across each word of it.
+///
+/// Where the byte is a constant the word it spreads into is a constant too and the spreading is
+/// done here rather than by the program. The front end writes a `memset` for the part of an object
+/// an initialiser did not name, where the byte is always zero. Where the program works the byte out,
+/// as a call to `memset` with a small constant length may, the widest word is the byte times a word
+/// of ones, gcc's `movzbl` and `imul`, and each narrower one is the low part of it.
+fn fill(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+) {
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, byte) = (bulk.to, bulk.with);
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    let spelled = literal(func, byte);
+    // As in [`copy`]: a fill whose length the program works out has no list of offsets to write.
+    let Some(plan) = chunks(info, word, unaligned, most).filter(|_| bulk.length.is_none()) else {
+        return library(func, names, inst, Opcode::Memset, word);
+    };
+    let widest = plan.iter().map(|&(_, width)| width).max().unwrap_or(1);
+    let wide = Type::int(widest * 8);
+    let worked = match spelled {
+        Some(_) => None,
+        // A fill one byte wide stores the byte as it is.
+        None if widest == 1 => Some(fitted(func, inst, byte, wide)),
+        None => {
+            let ones = ahead_const(func, inst, Imm::int(spread(1, widest) as i128, wide), wide);
+            let byte = fitted(func, inst, byte, Type::int(8));
+            let byte = fitted(func, inst, byte, wide);
+            Some(ahead(func, inst, Opcode::Mul, &[byte, ones], wide))
+        }
+    };
+    // One value per width, built the first time a word of that width asks for it, so a fill of
+    // five words stores one register five times rather than building the same constant five times.
+    let mut made: Vec<(u32, Value)> = Vec::new();
+    for (at, width) in plan {
+        let ty = Type::int(width * 8);
+        let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+        let value = match made.iter().find(|&&(had, _)| had == width) {
+            Some(&(_, value)) => value,
+            None => {
+                let value = match (spelled, worked) {
+                    (Some(spelled), _) => {
+                        ahead_const(func, inst, Imm::int(spread(spelled, width) as i128, ty), ty)
+                    }
+                    (None, Some(worked)) if width == widest => worked,
+                    (None, Some(worked)) => ahead(func, inst, Opcode::Trunc, &[worked], ty),
+                    (None, None) => unreachable!("a byte is either spelled or worked out"),
+                };
+                made.push((width, value));
+                value
+            }
+        };
+        let here = stepped(func, inst, into, at);
+        write(func, inst, value, here, access);
+    }
+    func.remove_inst(inst);
+}
+
+/// One `memmove`, as every word read and then every word written, or a call when that is more
+/// than [`MOVE`] words.
+///
+/// Reading all of it first is what makes the order of the writes not matter, so the two sides may
+/// overlap either way round, which is the one thing a `memmove` promises that a `memcpy` does not.
+fn shift(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned: bool) {
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, from) = (bulk.to, bulk.with);
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    let plan = chunks(info, word, unaligned, MOVE).filter(|_| bulk.length.is_none());
+    let Some(plan) = plan else {
+        return library(func, names, inst, Opcode::Memmove, word);
+    };
+    let mut words = Vec::with_capacity(plan.len());
+    for &(at, width) in &plan {
+        let ty = Type::int(width * 8);
+        let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+        let there = stepped(func, inst, from, at);
+        words.push((read(func, inst, there, access, ty), access));
+    }
+    for (&(at, _), (value, access)) in plan.iter().zip(words) {
+        let here = stepped(func, inst, into, at);
+        write(func, inst, value, here, access);
+    }
+    func.remove_inst(inst);
+}
+
+/// One bulk operation as a call to the routine of that name in the runtime.
+///
+/// This is what a copy too large to unroll becomes, and what a `memmove` and a fill with a
+/// computed byte become whatever their size. The routine is `rucc-builtins`' on a freestanding
+/// target and the C library's on a hosted one, and the call is the same either way because the two
+/// have the same names and the same signatures on purpose.
+///
+/// The arguments are the C ones and not the IR ones. The IR holds the size beside the instruction
+/// where C passes it, and holds a fill byte as a byte where C passes an `int`, so the size becomes
+/// a constant in a register and the byte is widened. The value each returns is its first argument,
+/// which nothing reads, so the call is built as returning nothing rather than as returning a
+/// pointer nobody looks at.
+fn library(func: &mut Func, names: &mut Interner, inst: Inst, opcode: Opcode, word: u32) {
+    // What each of the three is called is in the capability table, since a call standing in for an
+    // operation the machine has no instruction for is exactly what that table is a list of. A copy
+    // and a fill answer at the size this pass gives up at and a move answers at any size, which is
+    // the mode each is written down under there.
+    let mode = if opcode == Opcode::Memmove { "any" } else { "big" };
+    let Some(routine) = capability::libcall(opcode, mode) else { return };
+    let Some(bulk) = func.bulk(inst) else { return };
+    let (into, second) = (bulk.to, bulk.with);
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let size = func[mem].size;
+
+    // `size_t`, which is as wide as a general purpose register on every target here. Taken from
+    // the machine rather than written as sixty four so that a thirty two bit target gets the
+    // argument its own C library declares.
+    let words = Type::int(word * 8);
+    // The operand where the program worked the length out, and the payload's number otherwise.
+    // The operand is fitted to `size_t` here rather than by the front end, because how wide that
+    // is is a fact about the machine and this is the first pass that has been told which one.
+    let count = match bulk.length {
+        Some(length) => fitted(func, inst, length, words),
+        None => ahead_const(func, inst, Imm::int(i128::from(size), words), words),
+    };
+    // A fill passes an `int` where the IR passes the byte itself, and the widening is a zero
+    // extension because the routine looks at the low eight bits and nothing else.
+    let second = if opcode == Opcode::Memset { widened(func, inst, second) } else { second };
+
+    let sig = func.add_signature(Signature::new().with_params(&[
+        Type::PTR,
+        if opcode == Opcode::Memset { Type::int(32) } else { Type::PTR },
+        words,
+    ]));
+    let callee = names.intern(routine);
+    let varargs = func.push_abis(&[]);
+    let info = func.add_call(CallInfo { callee: Some(callee), signature: sig, varargs });
+    let args = func.push_values(&[into, second, count]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Call;
+    data.args = args;
+    data.extra = Extra::Call(info);
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Call));
+}
+
+/// A count brought to the width the routine takes it in, whichever side of it the value started.
+///
+/// The front end builds a length in whatever `size_t` it decided on, so on every target here the
+/// two already agree and this does nothing. It is written anyway because narrowing and widening
+/// are different instructions and picking the wrong one is the kind of mistake that shows up as a
+/// copy of four gigabytes rather than as a build failure. The extension is unsigned, since a
+/// length is a count of bytes and there is no negative one.
+fn fitted(func: &mut Func, inst: Inst, value: Value, want: Type) -> Value {
+    let ty = func[value].ty;
+    if ty == want {
+        return value;
+    }
+    let opcode = if ty.bits() < want.bits() { Opcode::ZExt } else { Opcode::Trunc };
+    ahead(func, inst, opcode, &[value], want)
+}
+
+/// A value widened to an `int`, or the value itself when it is one already.
+///
+/// A constant byte becomes a constant `int`, so the argument is one move of the wide value, as gcc
+/// writes it. Widened as a value, it was a move of the byte and a `movzbl` of the register after
+/// it, which is what every `memset` call for a large zeroed object paid.
+fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
+    let int = Type::int(32);
+    let ty = func[value].ty;
+    if ty == int {
+        return value;
+    }
+    if let Some(byte) = literal(func, value) {
+        return ahead_const(func, inst, Imm::int(i128::from(byte), int), int);
+    }
+    ahead(func, inst, Opcode::ZExt, &[value], int)
+}
+
+/// Where each word of a block of memory starts and how wide it is, or nothing for a block that is
+/// more words than `most`.
+///
+/// The widest word is the smaller of what the machine moves at once and what the block is known to
+/// be aligned to, because a load wider than the alignment is a fault on a machine that checks and
+/// this pass does not know whether the one it is compiling for does. That costs a copy of a
+/// character array a move per byte, which is exactly the copy the threshold sends to a call.
+///
+/// The width halves whenever what is left is narrower than it, so a block of thirteen bytes aligned
+/// to eight is eight, four and one rather than thirteen ones. Every offset is a multiple of the
+/// width at it, since each width divides the sum of the wider ones in front of it, which is what
+/// lets the alignment of each access be written down as the width.
+///
+/// Where the machine moves a word at any address as well as at an aligned one, the alignment does
+/// not narrow the word, and a tail narrower than the word is one more word ending where the block
+/// ends, overlapping the one in front of it. So thirteen bytes are two eight byte moves, at 0 and
+/// at 5, which is gcc's plan, and a block narrower than a word starts at the widest power of two
+/// that fits in it. Writing the overlap twice is harmless for a copy and a fill, whose two sides
+/// do not overlap, and for a move, which reads all of it before writing any.
+///
+/// A tail that is itself a power of two is one move of its own width instead, which is one move
+/// either way and is what gcc writes. The overlapping word costs something the count does not
+/// show: it reads bytes that two different stores wrote, and a load that spans two stores waits
+/// for both to reach the cache rather than taking its bytes from the store buffer. Postgres' item
+/// pointer is six bytes written as three two byte fields, and copied as four bytes at 0 and four
+/// at 2 the second load straddled two of them on every tuple a scan stored in a slot, where four
+/// at 0 and two at 4 reads the last field from the one store that wrote it (tamnd/rucc#1994).
+pub(crate) fn chunks(
+    info: MemInfo,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+) -> Option<Vec<(u64, u32)>> {
+    if unaligned {
+        overlapped(info.size, word, most)
+    } else {
+        plan(info.size, info.align, word, most)
+    }
+}
+
+/// The plan for a machine that moves a word at any address. See [`chunks`].
+fn overlapped(size: u64, word: u32, most: usize) -> Option<Vec<(u64, u32)>> {
+    let mut width = u64::from(word.max(1));
+    if !width.is_power_of_two() {
+        return None;
+    }
+    while width > size && width > 1 {
+        width /= 2;
+    }
+    let mut plan = Vec::new();
+    let mut at = 0;
+    while at + width <= size {
+        plan.push((at, u32::try_from(width).ok()?));
+        at += width;
+    }
+    let tail = size - at;
+    if tail.is_power_of_two() {
+        plan.push((at, u32::try_from(tail).ok()?));
+    } else if tail > 0 {
+        plan.push((size - width, u32::try_from(width).ok()?));
+    }
+    (plan.len() <= most).then_some(plan)
+}
+
+/// The same, as the two numbers rather than as an access, for the one caller that has no access to
+/// ask about.
+///
+/// [`crate::abi`] copies a structure passed by value into the argument area, and that copy is not a
+/// `memcpy` in the IR: it is written straight into the machine IR, because where it goes is an
+/// offset the placement walk gives and nothing before this pass knows it. The plan has to be the
+/// same plan either way, so it is one function.
+pub(crate) fn plan(size: u64, align: u32, word: u32, most: usize) -> Option<Vec<(u64, u32)>> {
+    let widest = word.min(align).max(1);
+    if !widest.is_power_of_two() {
+        return None;
+    }
+    let mut plan = Vec::new();
+    let mut at = 0;
+    let mut width = u64::from(widest);
+    while at < size {
+        while width > size - at {
+            width /= 2;
+        }
+        plan.push((at, u32::try_from(width).ok()?));
+        at += width;
+        if plan.len() > most {
+            return None;
+        }
+    }
+    Some(plan)
+}
+
+/// The byte a fill writes, when the program said which one rather than working it out.
+pub(crate) fn literal(func: &Func, value: Value) -> Option<u8> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IConst {
+        return None;
+    }
+    let Extra::Imm(imm) = func[inst].extra else { return None };
+    u8::try_from(func[imm].bits() & 0xff).ok()
+}
+
+/// One byte repeated across a word of that many bytes, which is what a fill stores.
+pub(crate) fn spread(byte: u8, width: u32) -> u64 {
+    (0..width).fold(0, |word, at| word | u64::from(byte) << (at * 8))
+}
+
+/// The address that far into a block, written in front of an instruction, or the block itself for
+/// the word at the front of it.
+///
+/// A block that is itself a constant distance past another pointer, as `&tuple->t_self` is, is
+/// stepped from that other pointer by the two distances added together. Stepped from the block, the
+/// block had a reader for every word and was worked out into a register for them to share, and
+/// Postgres' copy of an item pointer was two `lea` in front of four moves where gcc writes the four
+/// moves alone.
+fn stepped(func: &mut Func, inst: Inst, block: Value, at: u64) -> Value {
+    if at == 0 {
+        return block;
+    }
+    let (block, at) = match past(func, block) {
+        Some((pointer, by)) if i64::try_from(by + i128::from(at)).is_ok() => {
+            (pointer, by + i128::from(at))
+        }
+        _ => (block, i128::from(at)),
+    };
+    let step = ahead_const(func, inst, Imm::int(at, Type::int(64)), Type::int(64));
+    ahead(func, inst, Opcode::PtrAdd, &[block, step], Type::PTR)
+}
+
+/// The pointer a value is a constant number of bytes past, and the number, where it is one.
+fn past(func: &Func, value: Value) -> Option<(Value, i128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::PtrAdd {
+        return None;
+    }
+    let &[pointer, by] = &func[func[inst].args] else { return None };
+    let Def::Result { inst: made, .. } = func[by].def else { return None };
+    let Extra::Imm(imm) = func[made].extra else { return None };
+    (func[made].opcode == Opcode::IConst).then(|| (pointer, func[imm].signed(func[by].ty)))
+}
+
+/// A load put in front of an instruction, and the value it reads.
+fn read(func: &mut Func, inst: Inst, from: Value, info: MemInfo, ty: Type) -> Value {
+    let extra = Extra::Mem(func.add_mem(info));
+    let args = func.push_values(&[from]);
+    written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, ty)
+}
+
+/// A store put in front of an instruction, which produces nothing and is only its effect.
+fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) {
+    let span = func.span(inst);
+    let extra = Extra::Mem(func.add_mem(info));
+    let args = func.push_values(&[value, into]);
+    let data = InstData { args, extra, ..InstData::new(Opcode::Store) };
+    let made = func.create_inst(data, &[], span);
+    func.insert_before(made, inst);
+}
+
+/// Hands an `asm` operand that may be in a register or in memory over in memory, when the
+/// statement has already taken every register the allocator could put it in.
+///
+/// The front end takes the register when a constraint such as `"rm"` or `"g"` gives the choice,
+/// which is what gcc does too until it runs out. The kernel's 32 bit `hv_do_hypercall` is where it
+/// runs out: `"=A"`, `"+c"`, `"b"`, `"D"` and `"S"` take `eax`, `edx`, `ecx`, `ebx`, `edi` and `esi`
+/// and the call target is `"rm"`. i386 gives the allocator `eax`, `ecx`, `edx` and `ebx` and holds
+/// `esi` and `edi` back to reload through, so the target had no register to go in and nothing was
+/// left to reload it through either, and the build stopped in the allocator. gcc writes the target
+/// from the stack, `call *8(%esp)`, and this does the same: the value is stored to a slot of the
+/// frame in front of the statement and the slot is the operand, under `"m"`.
+///
+/// An output is the same on the other side. dell-smm-hwmon's `i8k_smm_func` pins all six registers
+/// with `"+a"` up to `"+D"` and writes its carry flag to a `"=mr"`, which gcc writes to the frame
+/// and this does too, reading it back from the slot behind the statement.
+///
+/// On x86-64 only the first such operand moves, and only when no operand is in memory already.
+/// One operand in memory is spelled from the stack pointer and needs no register, and a second
+/// needs one for its address in a template the back end reads, which is what moving it was meant
+/// to save.
+///
+/// On i386 the back end reads no template and keeps every one as text, and there each slot of
+/// the frame is spelled from the stack pointer, however many there are. So one operand moves after
+/// another until the statement fits. libgcc's soft-fp `__FP_FRAC_ADD_4` and `__FP_FRAC_SUB_4` for
+/// i386 are four outputs, three of them `"=&r"`, and four inputs under `"g"`, which is eight
+/// registers against four, and the allocator stopped on addtf3.c, subtf3.c and divtf3.c. gcc
+/// reads the four `"g"` inputs from the frame, and this does the same.
+///
+/// `held` is the registers the allocator keeps back from operands nobody pinned. `many` says
+/// whether more than one operand may move, which is true on i386.
+pub fn crowded(
+    func: &mut Func,
+    names: &mut Interner,
+    conv: &CallRegs,
+    held: &[PhysReg],
+    many: bool,
+) {
+    let found: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| matches!(func[inst].extra, Extra::Asm(_)))
+        .collect();
+    for mut inst in found {
+        while let Some(next) = moved_to_memory(func, names, conv, held, inst, many) {
+            if !many {
+                break;
+            }
+            inst = next;
+        }
+    }
+}
+
+/// The operand [`crowded`] moves, if this statement has one to move, and the statement as it is
+/// after the move, which is a new one when an output moved.
+fn moved_to_memory(
+    func: &mut Func,
+    names: &mut Interner,
+    conv: &CallRegs,
+    held: &[PhysReg],
+    inst: Inst,
+    many: bool,
+) -> Option<Inst> {
+    let Extra::Asm(asm) = func[inst].extra else { return None };
+    let info = func[asm];
+    let constraints = names.resolve(info.constraints).to_owned();
+    let results: Vec<Value> = func[inst].results().collect();
+    let args: Vec<Value> = func[func[inst].args].to_vec();
+    let operands = AsmOperands::read(&constraints, &results, &args)?;
+    let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
+    // A slot of the frame in memory is spelled from the stack pointer when the template is kept
+    // as text, and takes no register, so on i386 it is not counted below either.
+    let slot = |operand: &AsmOperand<'_>| {
+        many && operand.memory
+            && operand.value.is_some_and(|value| match func[value].def {
+                Def::Result { inst, .. } => func[inst].opcode == Opcode::Alloca,
+                _ => false,
+            })
+    };
+    if !many && list.iter().any(|operand| operand.memory) {
+        return None;
+    }
+
+    // What the statement holds while it reads: every operand with a value, and an output written
+    // early, since that one is written before the reads are done. A constant the text is handed as
+    // a number takes nothing. Then what it holds once it has written, which is every output in a
+    // register. Each side is the registers its operands are pinned to and the operands nothing
+    // pins, and the registers named in the clobber list and in the text are taken from both, the
+    // way the back end takes them.
+    let constant = |value: Value| match func[value].def {
+        Def::Result { inst, .. } => {
+            matches!(func[inst].opcode, Opcode::IConst | Opcode::GlobalAddr)
+        }
+        _ => false,
+    };
+    let mut reads: (Vec<PhysReg>, Vec<usize>) = (Vec::new(), Vec::new());
+    let mut writes: (Vec<PhysReg>, Vec<usize>) = (Vec::new(), Vec::new());
+    let hold = |side: &mut (Vec<PhysReg>, Vec<usize>), operand: &AsmOperand<'_>, index| {
+        match crate::lower::pinned(operand) {
+            Some(reg) if !side.0.contains(&reg) => side.0.push(reg),
+            Some(_) => {}
+            None => side.1.push(index),
+        }
+    };
+    for (index, operand) in list.iter().enumerate() {
+        if operand.result.is_some() {
+            hold(&mut writes, operand, index);
+        }
+        if slot(operand) {
+            continue;
+        }
+        let read = operand.value.is_some_and(|value| !(operand.immediate && constant(value)));
+        let early = operand.early && operand.value.is_none();
+        if !read && !early {
+            continue;
+        }
+        // An input tied to an output is in the output's register, which an output written early
+        // has counted already.
+        match operand.tied.and_then(|output| list.get(output)) {
+            Some(output) if output.early => {}
+            Some(output) => hold(&mut reads, output, index),
+            None => hold(&mut reads, operand, index),
+        }
+    }
+    let template = names.resolve(info.template).to_owned();
+    let clobbers = names.resolve(info.clobbers).to_owned();
+    let named = clobbers
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"'))
+        .map(|entry| entry.strip_prefix('%').unwrap_or(entry))
+        .filter_map(rucc_target::x86_64::gpr_named)
+        .map(|(reg, _)| reg)
+        .chain(
+            crate::lower::spelled_registers(&template, conv.int_class, conv.sse_class)
+                .into_iter()
+                .filter(|&(_, class)| class == conv.int_class)
+                .map(|(reg, _)| reg),
+        )
+        .collect::<Vec<PhysReg>>();
+    let short = |(pinned, loose): &(Vec<PhysReg>, Vec<usize>)| {
+        let free = conv
+            .int_order
+            .iter()
+            .filter(|reg| !held.contains(reg) && !pinned.contains(reg) && !named.contains(reg))
+            .count();
+        loose.len() > free
+    };
+    let mut wanted = Vec::new();
+    for side in [&reads, &writes] {
+        if short(side) {
+            wanted.extend(side.1.iter().copied());
+        }
+    }
+
+    // The operand to move: one of those the constraint lets go in memory, that nothing pins and
+    // nothing is tied to, holding an integer or an address no wider than a register. An output only
+    // when the statement is not an `asm goto`, whose outputs arrive on more than one edge.
+    //
+    // Not one already in memory, whose value is the address of the object the text names and not
+    // the object. Moved, the slot held the address and the text read and wrote the slot. The
+    // kernel's `__arch_try_cmpxchg64` on i386 is `"+m" (*ptr)` with `eax`, `edx`, `ebx` and `ecx`
+    // pinned, and `sched_clock_local` came out as `lock cmpxchg8b (%esp)` on the pointer it had
+    // just stored there, which never matched, so the clock spun forever and the boot hung.
+    let entries: Vec<&str> = constraints.split(',').collect();
+    let word = conv.word;
+    let goto = !func[info.targets].is_empty();
+    let movable = |&index: &usize| {
+        let operand = &list[index];
+        let Some(value) = operand.result.or(operand.value) else { return false };
+        let ty = func[value].ty;
+        let bits = if ty.is_ptr() { word * 8 } else { ty.bits() };
+        (operand.result.is_none() || !goto)
+            && !operand.memory
+            && operand.tied.is_none()
+            && crate::lower::pinned(operand).is_none()
+            && !list.iter().any(|other| other.tied == Some(index))
+            && entries[index].contains(['m', 'o', 'V', 'g'])
+            && (ty.is_ptr() || ty.is_int())
+            && ty.is_scalar()
+            && matches!(bits, 8 | 16 | 32 | 64)
+            && bits <= word * 8
+    };
+    let index = wanted.into_iter().find(movable)?;
+    let operand = list[index];
+    let ty = func[operand.result.or(operand.value).expect("a movable operand has a value")].ty;
+    let size = if ty.is_ptr() { word } else { ty.bits() / 8 };
+    let at = list[..index].iter().filter(|operand| operand.value.is_some()).count();
+
+    // The slot, what the operand reads written to it in front of the statement, and the slot
+    // where the operand's value was among the statement's operands.
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    let slot = written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+    let mut args = args;
+    match operand.value {
+        Some(value) => {
+            write(func, inst, value, slot, local(u64::from(size), size));
+            args[at] = slot;
+        }
+        None => args.insert(at, slot),
+    }
+    let mut entries: Vec<String> = entries.iter().map(|&entry| entry.to_owned()).collect();
+    let kept: String = entries[index].chars().take_while(|c| "=+&".contains(*c)).collect();
+    entries[index] = format!("{kept}m");
+    let constraints = names.intern(&entries.join(","));
+    let moved = func.add_asm(AsmInfo { constraints, ..info });
+    let Some(result) = operand.result else {
+        func[inst].args = func.push_values(&args);
+        func[inst].extra = Extra::Asm(moved);
+        return Some(inst);
+    };
+
+    // An output has one result fewer, so the statement is made again without it, and what the
+    // program reads of it is read back from the slot behind the statement.
+    let mut data = func[inst];
+    data.args = func.push_values(&args);
+    data.extra = Extra::Asm(moved);
+    let kept: Vec<Value> = results.iter().copied().filter(|&other| other != result).collect();
+    let types: Vec<Type> = kept.iter().map(|&value| func[value].ty).collect();
+    let span = func.span(inst);
+    let made = func.create_inst(data, &types, span);
+    func.insert_before(made, inst);
+    let mut forward: Map<Value, Value> = kept.into_iter().zip(func[made].results()).collect();
+    let loaded = read(func, inst, slot, local(u64::from(size), size), ty);
+    forward.insert(result, loaded);
+    func.remove_inst(inst);
+    substitute(func, &forward);
+    Some(made)
+}
+
+/// Puts every constant distance a pointer is stepped by at the width of an address.
+///
+/// The lowerings above step through a block, a list or a slot by a constant, and they write that
+/// constant at sixty four bits, which is an address on every machine but i386. There an address is
+/// thirty two bits and so is every rule for stepping one, so each such distance is written again at
+/// that width in front of the step. A distance that is not a constant is left alone, since nothing
+/// here writes one and a program's own is already the width of its pointers.
+pub fn offsets(func: &mut Func, word: u32) {
+    let bits = word * 8;
+    if bits != 32 {
+        return;
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        if func[inst].opcode != Opcode::PtrAdd {
+            continue;
+        }
+        let [pointer, by] = func[func[inst].args] else { continue };
+        if func[by].ty.bits() <= bits {
+            continue;
+        }
+        let Some(at) = number(func, by) else { continue };
+        let narrow = Type::int(bits);
+        // The low thirty two bits, read as signed, which is the same step modulo an address.
+        let at = i128::try_from(at & 0xffff_ffff).unwrap_or(0);
+        let at = if at >= 1 << 31 { at - (1 << 32) } else { at };
+        let by = ahead_const(func, inst, Imm::int(at, narrow), narrow);
+        let args = func.push_values(&[pointer, by]);
+        func[inst].args = args;
+    }
+}
+
+/// The width the machine converts at that holds every value of an integer of this one.
+///
+/// The machine converts between a float and a signed integer at thirty two bits and at sixty four
+/// and at no other width, so a conversion anywhere else is one of those two with a widening in
+/// front of it or a narrowing behind it. Which of the two it is, is the narrower one the values
+/// fit in, and an unsigned integer of `bits` bits needs one more bit than that to be signed in.
+///
+/// `None` is a width no signed integer here holds, which is only an unsigned sixty four bit one.
+fn holder(bits: u32, signed: bool) -> Option<u32> {
+    match if signed { bits } else { bits + 1 } {
+        ..=32 => Some(32),
+        33..=64 => Some(64),
+        _ => None,
+    }
+}
+
+/// The type of the one value an instruction produces.
+///
+/// Every opcode this pass touches produces exactly one, so an instruction that produces none is
+/// one the caller has already gone wrong about and the void type says so without panicking.
+fn produced(func: &Func, inst: Inst) -> Type {
+    func[inst].first_result.map_or(Type::VOID, |value| func[value].ty)
+}
+
+/// Puts an instruction over these operands in front of another one, and gives back its value.
+pub(crate) fn ahead(
+    func: &mut Func,
+    inst: Inst,
+    opcode: Opcode,
+    args: &[Value],
+    ty: Type,
+) -> Value {
+    let args = func.push_values(args);
+    written(func, inst, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
+/// The same for a comparison, which carries the predicate and produces one bit.
+pub(crate) fn ahead_cmp(
+    func: &mut Func,
+    inst: Inst,
+    opcode: Opcode,
+    extra: Extra,
+    args: &[Value],
+) -> Value {
+    let args = func.push_values(args);
+    written(func, inst, InstData { args, extra, ..InstData::new(opcode) }, Type::I1)
+}
+
+/// The same for a constant, which carries an immediate rather than operands.
+pub(crate) fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(imm));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
+}
+
+/// The same for a float constant, which carries the bits of its format rather than a number.
+fn ahead_float(func: &mut Func, inst: Inst, bits: u128, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(Imm::from_bits(bits)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::FConst) }, ty)
+}
+
+/// Creates the instruction, puts it where those two asked, and reads its value back out.
+fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
+    let span = func.span(inst);
+    let made = func.create_inst(data, &[ty], span);
+    func.insert_before(made, inst);
+    func[made].first_result.expect("an instruction created with one result has one")
+}
+
+/// Turns an instruction into a different one over different operands, in place.
+///
+/// The last instruction of a rewrite is the original rather than a new one, so the value the rest
+/// of the function reads is the value it already read and nothing has to be substituted anywhere.
+/// The type of that value does not change either, because every rewrite here ends at the type it
+/// started at.
+pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
+    let args = func.push_values(args);
+    let data = &mut func[inst];
+    data.opcode = opcode;
+    data.args = args;
+    data.extra = Extra::None;
+    // What the program said about rounding and about not a numbers is still true of the
+    // instructions it became, and what is no longer meaningful is dropped rather than carried.
+    data.flags = data.flags.intersection(Flags::legal_on(opcode));
+}
+
+#[cfg(test)]
+mod tests {
+    use rucc_base::Interner;
+    use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
+    use rucc_target::{Arch, BitCount, CountInst, Env, Os, TargetInfo, Triple};
+
+    use rucc_cost::Goal;
+    use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
+
+    use super::{
+        alternating, bulk, bytes, chunks, copies, counts, every, fills, floats, orderings,
+        overflows, rounds, spread,
+    };
+
+    fn target() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
+    }
+
+    fn printed(func: &Func, names: &mut Interner) -> String {
+        let module = Module::new(names.intern("sw.c"), &target());
+        rucc_ir::print_func(&module, func, names)
+    }
+
+    /// A function of one parameter and one result, with a body somebody else writes.
+    ///
+    /// The float rewrites are each one instruction becoming several in the middle of a block, so
+    /// what a test needs is a block with something around the instruction rather than a shape.
+    fn one(
+        params: &[Type],
+        returns: &[Type],
+        body: impl FnOnce(&mut Builder<'_>, &[rucc_ir::Value]),
+    ) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new().with_params(params).with_returns(returns),
+        );
+        let entry = func.create_block();
+        let args: Vec<_> = params.iter().map(|&ty| func.append_param(entry, ty)).collect();
+        let mut build = Builder::new(&mut func, entry);
+        body(&mut build, &args);
+        (names, func)
+    }
+
+    fn f64() -> Type {
+        Type::float(Float::F64)
+    }
+
+    fn f32() -> Type {
+        Type::float(Float::F32)
+    }
+
+    fn f80() -> Type {
+        Type::float(Float::F80)
+    }
+
+    /// The unsigned words both of the widest conversions are checked over.
+    ///
+    /// Every boundary is in the list, and so are the values either side of the ones where the two
+    /// paths of a conversion meet, and the ones at the last width a `double` counts to.
+    const CASES: &[u64] = &[
+        0,
+        1,
+        2,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0xFFFF_FFFF,
+        0x0020_0000_0000_0000,
+        0x0020_0000_0000_0001,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0001,
+        0x8000_0000_0000_0400,
+        0xFFFF_FFFF_FFFF_F800,
+        0xFFFF_FFFF_FFFF_FFFF,
+    ];
+
+    /// The obligation every rewrite here has: nothing after this checks the IR again.
+    fn valid(func: &Func, names: &mut Interner) {
+        let module = Module::new(names.intern("f.c"), &target());
+        rucc_ir::verify_func(&module, func, names).expect("the rewrite builds valid IR");
+    }
+
+    /// `double c(void) { return 1.5; }`, which is the constant nothing in the rule set can name.
+    #[test]
+    fn a_float_constant_becomes_the_integer_that_spells_it_and_a_reading_of_those_bits() {
+        let (mut names, mut func) = one(&[], &[f64()], |build, _| {
+            let k = build.fconst(f64(), 0x3ff8_0000_0000_0000);
+            build.ret(&[k]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fconst"), "the float constant is gone: {text}");
+        assert!(text.contains("iconst.i64 4609434218613702656"), "the bits, as an integer: {text}");
+        assert!(text.contains("bitcast"), "read back as the float: {text}");
+    }
+
+    /// The width follows the format rather than being the widest one, so a `float` constant is an
+    /// `i32` and reaches `movd` rather than `movq`.
+    #[test]
+    fn a_constant_at_the_narrow_format_is_an_integer_of_the_narrow_width() {
+        let (mut names, mut func) = one(&[], &[f32()], |build, _| {
+            let k = build.fconst(f32(), 0x4020_0000);
+            build.ret(&[k]);
+        });
+        floats(&mut func, 8);
+        assert!(printed(&func, &mut names).contains("iconst.i32"), "an i32, not an i64");
+    }
+
+    /// `double n(double x) { return -x; }`. Flipping the sign bit is what C means and subtracting
+    /// from zero is not, so what this asserts is the exclusive or and the mask it is given.
+    #[test]
+    fn a_negation_flips_the_sign_bit_and_touches_no_other() {
+        let (mut names, mut func) = one(&[f64()], &[f64()], |build, args| {
+            let n = build.unary(Opcode::FNeg, args[0], f64());
+            build.ret(&[n]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fneg"), "the negation is gone: {text}");
+        assert!(!text.contains("fsub"), "and it did not become a subtraction: {text}");
+        assert!(text.contains("iconst.i64 -9223372036854775808"), "the sign bit alone: {text}");
+        assert_eq!(text.matches("xor").count(), 1, "one exclusive or: {text}");
+        assert_eq!(text.matches("bitcast").count(), 2, "there and back: {text}");
+    }
+
+    /// `double u(unsigned x) { return x; }`, which is a widening and the signed conversion.
+    #[test]
+    fn an_unsigned_integer_becoming_a_float_widens_first_and_then_converts_as_signed() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("zext.i64"), "widened with zeroes: {text}");
+        assert!(text.contains("sitofp.f64"), "converted as signed: {text}");
+    }
+
+    /// `unsigned t(double x) { return x; }`, which is the same argument the other way round.
+    #[test]
+    fn a_float_becoming_an_unsigned_integer_converts_as_signed_first_and_then_narrows() {
+        let (mut names, mut func) = one(&[f64()], &[Type::int(32)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(32));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i64"), "converted as signed: {text}");
+        assert!(text.contains("trunc.i32"), "and narrowed to what was asked: {text}");
+    }
+
+    /// `unsigned t(float x) { return x; }` on a machine of thirty two bits, where no signed integer
+    /// the machine has holds every unsigned `int`. The correction is then around two to the thirty
+    /// first, which is half the range of the answer, and not two to the sixty third.
+    #[test]
+    fn a_float_becoming_an_unsigned_int_on_i386_takes_off_half_of_thirty_two_bits() {
+        let (mut names, mut func) = one(&[f32()], &[Type::int(32)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(32));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 4);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i32"), "converted as signed at the width asked: {text}");
+        // 0x4F00_0000 is the float that is two to the thirty first.
+        assert!(text.contains("iconst.i32 1325400064"), "half of thirty two bits: {text}");
+        valid(&func, &mut names);
+
+        // The same arithmetic in the same order, over the values either side of the boundary.
+        let half = f32::from_bits(0x4F00_0000);
+        for x in [0.0_f32, 1.5, 2_147_483_520.0, 2_147_483_648.0, 3e9, 4_294_967_040.0] {
+            let mask = if x >= half { u32::MAX } else { 0 };
+            let taken = f32::from_bits(half.to_bits() & mask);
+            let low = (x - taken) as i32;
+            let top = u32::from(x >= half) << 31;
+            assert_eq!(low as u32 ^ top, x as u32, "converting {x} into an unsigned int");
+        }
+    }
+
+    /// `signed char a(double x) { return (signed char)x; }`, which the front end writes as a
+    /// conversion straight to eight bits and the machine has no instruction for at that width.
+    #[test]
+    fn a_conversion_narrower_than_the_machine_has_is_one_it_has_and_a_narrowing() {
+        let (mut names, mut func) = one(&[f64()], &[Type::int(8)], |build, args| {
+            let n = build.unary(Opcode::FPToSI, args[0], Type::int(8));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("fptosi.i32"), "converted at a width there is one at: {text}");
+        assert!(text.contains("trunc.i8"), "and narrowed to what was asked: {text}");
+    }
+
+    /// The same the other way, where the widening carries the sign because the value has one.
+    #[test]
+    fn a_signed_integer_narrower_than_the_machine_converts_from_is_widened_with_its_sign() {
+        let (mut names, mut func) = one(&[Type::int(8)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::SIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        floats(&mut func, 8);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("sext.i32"), "widened with the sign and not with zeroes: {text}");
+        assert!(!text.contains("zext"), "widened with the sign and not with zeroes: {text}");
+        assert!(text.contains("sitofp.f64"), "converted at a width there is one at: {text}");
+    }
+
+    /// The table the two of them share, which is where the whole argument about widths lives.
+    #[test]
+    fn the_width_a_conversion_happens_at_is_the_narrowest_one_that_holds_the_values() {
+        use super::holder;
+        for bits in [1, 8, 16, 32] {
+            assert_eq!(holder(bits, true), Some(32), "a signed {bits} bit value fits in an int");
+        }
+        assert_eq!(holder(64, true), Some(64));
+        for bits in [1, 8, 16, 31] {
+            assert_eq!(holder(bits, false), Some(32), "an unsigned {bits} bit value does too");
+        }
+        // The one more bit an unsigned value needs is what makes these two the wider width.
+        assert_eq!(holder(32, false), Some(64));
+        assert_eq!(holder(64, false), None);
+    }
+
+    /// Sixty four bits is where the widening argument runs out, because an unsigned value of that
+    /// width is not a signed value of any width the IR has. Each of the two gets a rewrite of its
+    /// own, and what both leave is the signed conversion the machine has with arithmetic around it.
+    #[test]
+    fn the_unsigned_conversions_at_the_widest_width_become_the_signed_one_and_a_correction() {
+        for float in [f32(), f64()] {
+            let (mut names, mut func) = one(&[Type::int(64)], &[float], |build, args| {
+                let d = build.unary(Opcode::UIToFP, args[0], float);
+                build.ret(&[d]);
+            });
+            floats(&mut func, 8);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
+            assert!(text.contains("sitofp"), "the signed one is what is left: {text}");
+            // The halving that brings the value under the range the signed conversion has, and the
+            // bit it would have thrown away put back so that the rounding is still the right one.
+            assert!(text.contains("lshr"), "the value is halved: {text}");
+            assert!(text.contains("fadd"), "and doubled again afterwards: {text}");
+            valid(&func, &mut names);
+        }
+
+        for float in [f32(), f64()] {
+            let (mut names, mut func) = one(&[float], &[Type::int(64)], |build, args| {
+                let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
+                build.ret(&[n]);
+            });
+            floats(&mut func, 8);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+            assert!(text.contains("fptosi"), "the signed one is what is left: {text}");
+            // Half the range taken off before the conversion and put back on after it.
+            assert!(text.contains("fsub"), "the value is brought down: {text}");
+            assert!(text.contains("shl"), "and the top bit goes back on: {text}");
+            valid(&func, &mut names);
+        }
+    }
+
+    /// Neither of those two has a branch in it, which is the thing about them worth a test of its
+    /// own. Every rewrite in this pass stays inside the block it started in, so a pass that grew a
+    /// second block would be one whose callers all have to be looked at again.
+    #[test]
+    fn the_widest_unsigned_conversions_are_written_without_a_branch() {
+        let (_, mut func) = one(&[Type::int(64)], &[f64()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            build.ret(&[d]);
+        });
+        floats(&mut func, 8);
+        assert_eq!(func.blocks().count(), 1, "the conversion did not split the block");
+
+        let (_, mut func) = one(&[f64()], &[Type::int(64)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 8);
+        assert_eq!(func.blocks().count(), 1, "nor did the other one");
+    }
+
+    /// The arithmetic of those two rewrites, done here in the same order the instructions do it.
+    ///
+    /// This is not the compiler running, it is the sequence written out again in a language that
+    /// can be asked what the answer should have been. What it checks is the part that is easy to
+    /// get wrong and impossible to see in the assembly, which is whether the halving rounds the way
+    /// the conversion would have and whether the subtraction is exact.
+    #[test]
+    fn the_arithmetic_the_widest_unsigned_conversions_do_is_the_conversion() {
+        for &x in CASES {
+            // What `from_unsigned_word` writes, at `f64`.
+            let mask = if (x as i64) < 0 { u64::MAX } else { 0 };
+            let odd = (x >> 1) | (x & 1);
+            let source = x ^ ((x ^ odd) & mask);
+            let converted = source as i64 as f64;
+            let addend = f64::from_bits(converted.to_bits() & mask);
+            assert_eq!(converted + addend, x as f64, "converting {x:#x} into a double");
+        }
+
+        for &x in CASES {
+            // And what `to_unsigned_word` writes, at `f64`, over the same values read back.
+            let d = x as f64;
+            if d >= 18_446_744_073_709_551_616.0 {
+                continue;
+            }
+            let half = f64::from_bits(0x43E0_0000_0000_0000);
+            let mask = if d >= half { u64::MAX } else { 0 };
+            let taken = f64::from_bits(half.to_bits() & mask);
+            let low = (d - taken) as i64;
+            let top = u64::from(d >= half) << 63;
+            assert_eq!(low as u64 ^ top, d as u64, "converting {d} into an unsigned word");
+        }
+    }
+
+    /// At eighty bits both of them are a different sequence, and the thing to check is that it is
+    /// the shorter one rather than the one above with an impossible instruction in it.
+    ///
+    /// What made the pair above long is the mask, and what makes a mask impossible here is that it
+    /// is laid over the bits of the float. So no `bitcast` is the assertion that matters, and the
+    /// rest of the list says the correction is still there and is a multiply now.
+    #[test]
+    fn the_unsigned_conversions_at_eighty_bits_correct_with_a_multiply_instead_of_a_mask() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[f80()], |build, args| {
+            let d = build.unary(Opcode::UIToFP, args[0], f80());
+            build.ret(&[d]);
+        });
+        floats(&mut func, 8);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("sitofp.f80"), "the signed one is what is left: {text}");
+        assert!(!text.contains("bitcast"), "and nothing reads the float as an integer: {text}");
+        assert!(!text.contains("lshr"), "nor is the value halved, since nothing rounds: {text}");
+        assert!(text.contains("fmul "), "the constant is taken or not by a multiply: {text}");
+        assert!(text.contains("fadd "), "and added to what the conversion gave: {text}");
+        assert_eq!(func.blocks().count(), 1, "the conversion did not split the block");
+        valid(&func, &mut names);
+
+        let (mut names, mut func) = one(&[f80()], &[Type::int(64)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 8);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i64"), "the signed one is what is left: {text}");
+        assert!(!text.contains("bitcast"), "and nothing reads the float as an integer: {text}");
+        assert!(text.contains("fmul "), "the constant is taken or not by a multiply: {text}");
+        assert!(text.contains("fsub "), "and subtracted before the conversion: {text}");
+        assert!(text.contains("shl"), "with the top bit going back on after it: {text}");
+        assert_eq!(func.blocks().count(), 1, "nor did the other one");
+        valid(&func, &mut names);
+    }
+
+    /// The arithmetic of those two, where the question is a different one from the question above.
+    ///
+    /// At the narrower widths the sequence rounds and the thing worth checking is that it rounds
+    /// the way the conversion would have. Here nothing rounds, and that is the whole reason the
+    /// sequence is shorter, so what is worth checking is that nothing does: a float of this format
+    /// is exactly an integer whose odd part fits in sixty four bits, and every value either
+    /// sequence makes is one. What would break it is a step whose operands are each a value of the
+    /// format and whose answer is not, which is the ordinary way an exact looking sequence stops
+    /// being one.
+    #[test]
+    fn nothing_in_either_conversion_at_eighty_bits_rounds() {
+        /// Whether an integer is a value of a float with a sixty four bit significand.
+        fn exact(v: i128) -> bool {
+            let mag = v.unsigned_abs();
+            mag == 0 || (mag >> mag.trailing_zeros()) < 1 << 64
+        }
+
+        for &x in CASES {
+            // What `from_unsigned_word_wide` writes, in the order it writes it.
+            let signed = i128::from(x as i64);
+            let addend = if (x as i64) < 0 { 1i128 << 64 } else { 0 };
+            assert!(exact(signed), "the conversion of {x:#x} read as signed is exact");
+            assert!(exact(addend), "and so is the constant it gets");
+            assert!(exact(signed + addend), "and so is the sum");
+            assert_eq!(signed + addend, i128::from(x), "converting {x:#x} into a long double");
+        }
+
+        for &x in CASES {
+            // And what `to_unsigned_word_wide` writes, over the values that conversion gives back.
+            let value = i128::from(x);
+            let taken = if value >= 1 << 63 { 1i128 << 63 } else { 0 };
+            let under = value - taken;
+            assert!(exact(under), "the subtraction that brings {x:#x} into range is exact");
+            let top = u64::from(value >= 1 << 63) << 63;
+            assert_eq!(under as u64 ^ top, x, "converting {x:#x} back into an unsigned word");
+        }
+    }
+
+    /// The same obligation the `switch` rewrite has, for the same reason: nothing after this
+    /// checks the IR again and everything after it assumes what the verifier would have said.
+    #[test]
+    fn what_the_float_rewrites_leave_is_valid_ir() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[f64()], |build, args| {
+            let k = build.fconst(f64(), 0x3ff8_0000_0000_0000);
+            let d = build.unary(Opcode::UIToFP, args[0], f64());
+            let n = build.unary(Opcode::FNeg, d, f64());
+            let s = build.binary(Opcode::FAdd, n, k, Flags::NONE);
+            build.ret(&[s]);
+        });
+        floats(&mut func, 8);
+        let module = Module::new(names.intern("f.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// Nothing else is touched, for the same reason the `switch` pass has that test: this runs
+    /// over every function whether or not one has a float in it.
+    #[test]
+    fn a_function_with_no_floats_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        floats(&mut func, 8);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+    fn access(size: u64, align: u32) -> MemInfo {
+        MemInfo {
+            size,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        }
+    }
+
+    /// `void c(void *to, const void *from) { *(T *)to = *(const T *)from; }` for a `T` of that
+    /// size and alignment, which is what the front end writes for a structure assignment.
+    fn moving(opcode: Opcode, size: u64, align: u32, byte: Option<i128>) -> (Interner, Func) {
+        one(&[Type::PTR, Type::PTR], &[], |build, args| {
+            let second = match byte {
+                Some(value) => build.iconst(Type::int(8), value),
+                None => args[1],
+            };
+            let mem = build.func().add_mem(access(size, align));
+            let operands = build.func().push_values(&[args[0], second]);
+            let data = InstData { args: operands, extra: Extra::Mem(mem), ..InstData::new(opcode) };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        })
+    }
+
+    fn copying(size: u64, align: u32) -> (Interner, Func) {
+        moving(Opcode::Memcpy, size, align, None)
+    }
+
+    fn filling(size: u64, align: u32, byte: i128) -> (Interner, Func) {
+        moving(Opcode::Memset, size, align, Some(byte))
+    }
+
+    /// The plan a copy of that size and alignment becomes, as widths, which is what the offsets
+    /// follow from.
+    fn widths(size: u64, align: u32) -> Option<Vec<u32>> {
+        Some(
+            chunks(access(size, align), 8, false, usize::MAX)?
+                .into_iter()
+                .map(|(_, width)| width)
+                .collect(),
+        )
+    }
+
+    /// `struct point { int x, y; } a, b; a = b;`, which is sixteen bytes aligned to eight.
+    #[test]
+    fn a_copy_becomes_a_load_and_a_store_for_each_word_of_it() {
+        let (mut names, mut func) = copying(16, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memcpy"), "the copy is gone: {text}");
+        assert_eq!(text.matches("load.i64").count(), 2, "a load per word: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a store per word: {text}");
+        assert_eq!(
+            text.matches("ptr_add").count(),
+            2,
+            "no offset for the word at the front: {text}"
+        );
+    }
+
+    /// A word is as wide as the block is known to be aligned to and no wider, because a load
+    /// wider than that faults on a machine that checks and this does not know whether the one it
+    /// is compiling for does.
+    #[test]
+    fn a_word_is_as_wide_as_the_block_is_aligned_to() {
+        assert_eq!(widths(16, 8), Some(vec![8, 8]));
+        assert_eq!(widths(16, 4), Some(vec![4, 4, 4, 4]));
+        assert_eq!(widths(4, 1), Some(vec![1, 1, 1, 1]));
+    }
+
+    /// What is left over is narrower words rather than a run of bytes, so thirteen bytes aligned
+    /// to eight is three moves and not six.
+    #[test]
+    fn what_is_left_over_is_narrower_words_and_not_a_run_of_bytes() {
+        assert_eq!(widths(13, 8), Some(vec![8, 4, 1]));
+        assert_eq!(widths(3, 8), Some(vec![2, 1]));
+        assert_eq!(widths(1, 8), Some(vec![1]));
+    }
+
+    /// Every offset is a multiple of the width at it, which is what lets the alignment of each
+    /// access be written down as its width.
+    #[test]
+    fn every_word_starts_somewhere_it_is_aligned_for() {
+        for (at, width) in
+            chunks(access(13, 8), 8, false, usize::MAX).expect("a plan for thirteen bytes")
+        {
+            assert_eq!(at % u64::from(width), 0, "{at} is a multiple of {width}");
+        }
+    }
+
+    /// `struct big b = { 0 };`, where the part the initialiser did not name is zeroed.
+    #[test]
+    fn a_fill_is_the_byte_spread_across_each_word() {
+        let (mut names, mut func) = filling(16, 8, 0);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memset"), "the fill is gone: {text}");
+        assert_eq!(text.matches("store").count(), 2, "a store per word: {text}");
+        assert!(!text.contains("load"), "a fill reads nothing: {text}");
+    }
+
+    /// A fill too large for stores is a call to `memset`, and a constant byte is passed as a
+    /// constant `int` and not as the byte extended after it is in a register.
+    #[test]
+    fn a_large_fill_passes_its_constant_byte_as_a_constant_int() {
+        let (mut names, mut func) = filling(1024, 8, 0);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memset"), "{text}");
+        assert!(text.contains("iconst.i32 0"), "{text}");
+        assert!(!text.contains("zext"), "{text}");
+    }
+
+    /// The spreading is arithmetic on the byte, which is the thing a rule cannot do and the
+    /// reason this pass exists at all.
+    #[test]
+    fn the_byte_is_repeated_across_the_word_it_is_stored_as() {
+        assert_eq!(spread(0, 8), 0);
+        assert_eq!(spread(0xff, 1), 0xff);
+        assert_eq!(spread(0xff, 4), 0xffff_ffff);
+        assert_eq!(spread(0xab, 2), 0xabab);
+        assert_eq!(spread(0xab, 8), 0xabab_abab_abab_abab);
+    }
+
+    /// A copy larger than the threshold is a call to the runtime rather than a run of moves.
+    #[test]
+    fn a_copy_too_large_to_unroll_becomes_a_call_to_the_runtime() {
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memcpy"), "a call and not a bulk move: {text}");
+
+        // And the one word under it is moves, because the threshold counts moves rather than
+        // bytes and the whole point of the threshold is that a small copy does not pay for a call.
+        let (mut names, mut func) = copying(size - 1, 1);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        assert!(!printed(&func, &mut names).contains("memcpy"), "one word under it is unrolled");
+    }
+
+    /// A function built for size has fewer moves to spend before a copy is a call, since the call
+    /// is the smaller of the two from a few words on.
+    #[test]
+    fn a_copy_built_for_size_becomes_a_call_sooner() {
+        assert!(copies(Goal::Size) < copies(Goal::Speed));
+        assert!(fills(Goal::Size) < fills(Goal::Speed));
+        let size = u64::try_from(copies(Goal::Size) + 1).expect("a small threshold") * 8;
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Size, false);
+        assert!(printed(&func, &mut names).contains("call @memcpy"), "a call for size");
+
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        assert!(!printed(&func, &mut names).contains("memcpy"), "moves for speed");
+    }
+
+    /// On a target whose copies are by moving, a copy too large to write out calls `memmove`.
+    /// That is Plan 9, where a kernel or a library may give only `memmove`.
+    #[test]
+    fn a_large_copy_calls_memmove_where_the_target_copies_by_moving() {
+        let size = u64::try_from(copies(Goal::Speed) + 1).expect("a small threshold") * 8;
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, true);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memmove"), "{text}");
+        assert!(!text.contains("memcpy"), "{text}");
+    }
+
+    /// The call passes what C passes, which is not what the IR holds. The size lives beside the
+    /// instruction in the IR and travels in a register in the call.
+    #[test]
+    fn the_call_passes_the_size_that_the_instruction_carried_beside_it() {
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(text.contains(&format!("{size}")), "the size is an argument now: {text}");
+    }
+
+    /// A small `memmove` reads every word before it writes any, so it is right whichever way the
+    /// two sides overlap, and one of more than [`MOVE`] words is a call.
+    #[test]
+    fn a_small_move_reads_everything_before_it_writes_anything() {
+        let (mut names, mut func) = moving(Opcode::Memmove, 24, 8, None);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memmove"), "a run of moves and not a call: {text}");
+        let loads: Vec<usize> = text.match_indices("load.").map(|(at, _)| at).collect();
+        let stores: Vec<usize> = text.match_indices("store ").map(|(at, _)| at).collect();
+        assert_eq!((loads.len(), stores.len()), (3, 3), "{text}");
+        assert!(loads.iter().max() < stores.iter().min(), "every read comes first: {text}");
+
+        let (mut names, mut func) = moving(Opcode::Memmove, 72, 8, None);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memmove"), "nine words is a call: {text}");
+    }
+
+    /// A fill whose byte the program works out rather than names is the byte times a word of
+    /// ones, stored as a word, which is gcc's `imul`.
+    #[test]
+    fn a_fill_whose_byte_is_not_a_constant_spreads_it_with_a_multiply() {
+        let (mut names, mut func) = one(&[Type::PTR, Type::int(8)], &[], |build, args| {
+            let mem = build.func().add_mem(access(8, 8));
+            let operands = build.func().push_values(&[args[0], args[1]]);
+            let data = InstData {
+                args: operands,
+                extra: Extra::Mem(mem),
+                ..InstData::new(Opcode::Memset)
+            };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        });
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memset"), "a store and not a call: {text}");
+        assert!(text.contains("zext.i64"), "the byte is widened to the word: {text}");
+        assert!(text.contains("iconst.i64 72340172838076673"), "a word of ones: {text}");
+        assert!(text.contains("= mul %"), "{text}");
+        assert_eq!(text.matches("store ").count(), 1, "one word: {text}");
+    }
+
+    /// Where the machine moves a word at any address, the alignment does not narrow it, and a tail
+    /// is one more word that overlaps the one in front of it, unless the tail is a move of its own.
+    #[test]
+    fn an_unaligned_machine_copies_words_and_overlaps_the_tail() {
+        let plan = |size| chunks(access(size, 1), 8, true, usize::MAX);
+        assert_eq!(plan(13), Some(vec![(0, 8), (5, 8)]));
+        assert_eq!(plan(16), Some(vec![(0, 8), (8, 8)]));
+        assert_eq!(plan(7), Some(vec![(0, 4), (3, 4)]));
+        assert_eq!(plan(3), Some(vec![(0, 2), (2, 1)]));
+        assert_eq!(plan(1), Some(vec![(0, 1)]));
+        assert_eq!(plan(0), Some(vec![]));
+        assert_eq!(plan(12), Some(vec![(0, 8), (8, 4)]));
+        assert_eq!(plan(10), Some(vec![(0, 8), (8, 2)]));
+        assert_eq!(plan(6), Some(vec![(0, 4), (4, 2)]));
+        assert_eq!(plan(5), Some(vec![(0, 4), (4, 1)]));
+        assert_eq!(plan(64).map(|plan| plan.len()), Some(8));
+        assert_eq!(plan(65).map(|plan| plan.len()), Some(9));
+    }
+
+    /// `slot->tts_tid = tuple->t_self`, six bytes four past one pointer into six bytes forty eight
+    /// past another, on a machine that moves a word at any address. Each word is stepped from the
+    /// two pointers the program had rather than from the two fields, so nothing reads the fields'
+    /// addresses but the first word's move, and every move can carry its own displacement.
+    #[test]
+    fn a_copy_between_two_fields_steps_from_the_pointers_the_fields_are_in() {
+        let (mut names, mut func) = one(&[Type::PTR, Type::PTR], &[], |build, args| {
+            let four = build.iconst(Type::int(64), 4);
+            let from = build.binary(Opcode::PtrAdd, args[1], four, Flags::NONE);
+            let forty_eight = build.iconst(Type::int(64), 48);
+            let into = build.binary(Opcode::PtrAdd, args[0], forty_eight, Flags::NONE);
+            let mem = build.func().add_mem(access(6, 2));
+            let operands = build.func().push_values(&[into, from]);
+            let data = InstData {
+                args: operands,
+                extra: Extra::Mem(mem),
+                ..InstData::new(Opcode::Memcpy)
+            };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        });
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memcpy"), "{text}");
+        let made = |number: &str| text.lines().any(|line| line.trim_end().ends_with(number));
+        assert!(made("iconst.i64 8"), "the source's second word is eight past it: {text}");
+        assert!(made("iconst.i64 52"), "and the destination's is fifty two: {text}");
+        assert_eq!(text.matches("ptr_add").count(), 4, "{text}");
+        valid(&func, &mut names);
+    }
+
+    /// A copy or a fill whose length the program works out, which carries the count as a third
+    /// operand and nothing beside the instruction.
+    fn computing(opcode: Opcode, byte: Option<i128>) -> (Interner, Func) {
+        one(&[Type::PTR, Type::PTR, Type::int(64)], &[], |build, args| {
+            let second = match byte {
+                Some(value) => build.iconst(Type::int(8), value),
+                None => args[1],
+            };
+            let mem = build.func().add_mem(access(0, 4));
+            let operands = build.func().push_values(&[args[0], second, args[2]]);
+            let data = InstData { args: operands, extra: Extra::Mem(mem), ..InstData::new(opcode) };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        })
+    }
+
+    /// However few bytes it turns out to be, because how many there are is not known here and a
+    /// plan is a list of offsets somebody has to be able to write down.
+    #[test]
+    fn a_bulk_move_of_a_length_the_program_works_out_is_a_call_whatever_the_payload_says() {
+        for (opcode, name) in
+            [(Opcode::Memcpy, "memcpy"), (Opcode::Memmove, "memmove"), (Opcode::Memset, "memset")]
+        {
+            let byte = (opcode == Opcode::Memset).then_some(0);
+            let (mut names, mut func) = computing(opcode, byte);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("call @{name}")), "a call and not a plan: {text}");
+            // The count is the operand it came in with rather than a constant made here, which is
+            // the whole difference between this and a copy whose size the payload holds.
+            assert!(!text.contains("iconst.i64"), "no size was invented: {text}");
+        }
+    }
+
+    #[test]
+    fn what_a_bulk_move_of_a_length_the_program_works_out_becomes_is_ir_that_verifies() {
+        for opcode in [Opcode::Memcpy, Opcode::Memmove, Opcode::Memset] {
+            let byte = (opcode == Opcode::Memset).then_some(0);
+            let (mut names, mut func) = computing(opcode, byte);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+            valid(&func, &mut names);
+        }
+    }
+
+    /// A machine whose widest move is four bytes gets four byte words out of an eight byte block,
+    /// however well aligned the block is.
+    #[test]
+    fn no_word_is_wider_than_the_machine_moves_at_once() {
+        assert_eq!(chunks(access(8, 8), 4, false, usize::MAX).map(|plan| plan.len()), Some(2));
+        assert_eq!(chunks(access(8, 8), 8, false, usize::MAX).map(|plan| plan.len()), Some(1));
+    }
+
+    #[test]
+    fn what_a_copy_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = copying(13, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let module = Module::new(names.intern("c.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    #[test]
+    fn what_a_fill_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = filling(13, 8, 0xff);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let module = Module::new(names.intern("f.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    #[test]
+    fn what_a_copy_too_large_to_unroll_becomes_is_ir_that_verifies() {
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
+        let (mut names, mut func) = copying(size, 1);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        let module = Module::new(names.intern("c.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
+    }
+
+    /// Nothing else is touched, for the same reason the other two passes have that test.
+    #[test]
+    fn a_function_with_no_bulk_move_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A function whose body is one byte swap of the given width, which is what a call to
+    /// `__builtin_bswap16` and its neighbours has become by the time this pass runs.
+    fn swapping(width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let s = build.unary(Opcode::Bswap, args[0], ty);
+            build.ret(&[s]);
+        })
+    }
+
+    /// The masks are the alternating runs the halving needs, and they are the constants a reader
+    /// checking this against a byte swap written by hand would expect to see.
+    ///
+    /// At thirty two bits the first step swaps sixteen bit halves and so keeps the low half of each
+    /// pair, which is `0x0000ffff`, and the second swaps bytes within those halves and keeps
+    /// `0x00ff00ff`. Written as signed because that is what the IR holds an immediate as.
+    #[test]
+    fn the_masks_are_the_alternating_runs_of_the_group_being_swapped() {
+        assert_eq!(alternating(32, 16), 0x0000_ffff);
+        assert_eq!(alternating(32, 8), 0x00ff_00ff);
+        assert_eq!(alternating(16, 8), 0x00ff);
+        assert_eq!(alternating(64, 32), 0x0000_0000_ffff_ffff);
+        assert_eq!(alternating(64, 16), 0x0000_ffff_0000_ffff);
+        assert_eq!(alternating(64, 8), 0x00ff_00ff_00ff_00ff);
+    }
+
+    /// The two byte swap is the one step there is, so it is one mask and one pair of shifts.
+    #[test]
+    fn a_two_byte_swap_is_one_exchange_of_neighbouring_bytes() {
+        let (mut names, mut func) = swapping(16);
+        bytes(&mut func, &[]);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bswap"), "the instruction is gone: {text}");
+        assert!(text.contains("iconst.i16 255"), "the low byte of the pair: {text}");
+        assert_eq!(text.matches("shl").count(), 1, "one shift up: {text}");
+        assert_eq!(text.matches("lshr").count(), 1, "one shift down: {text}");
+        assert_eq!(text.matches(" or ").count(), 1, "and the two put together: {text}");
+    }
+
+    /// The wider two are the same step done again at half the group, which is what makes the count
+    /// grow by a fixed amount per doubling rather than per byte.
+    #[test]
+    fn a_wider_swap_is_the_same_exchange_once_per_halving() {
+        for (width, steps) in [(16u32, 1usize), (32, 2), (64, 3)] {
+            let (mut names, mut func) = swapping(width);
+            bytes(&mut func, &[]);
+            let text = printed(&func, &mut names);
+            assert_eq!(text.matches("shl").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches("lshr").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches(" and ").count(), steps * 2, "at {width}: {text}");
+            assert_eq!(text.matches(" or ").count(), steps, "at {width}: {text}");
+        }
+    }
+
+    /// The shift counts are the group being exchanged and nothing else, so a reader can read the
+    /// halving straight off the constants.
+    #[test]
+    fn the_shift_counts_are_the_group_width_halving_as_it_goes() {
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func, &[]);
+        let text = printed(&func, &mut names);
+        for count in ["iconst.i64 32", "iconst.i64 16", "iconst.i64 8"] {
+            assert!(text.contains(count), "{count} is a step: {text}");
+        }
+    }
+
+    /// The rewrite has to leave a function the verifier still accepts, for the reason the switch
+    /// rewrite has the same test: nothing rechecks it.
+    #[test]
+    fn what_a_byte_swap_becomes_is_ir_that_verifies() {
+        let (mut names, mut func) = swapping(32);
+        bytes(&mut func, &[]);
+        let module = Module::new(names.intern("b.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// A function whose body is one bit reversal of the given width.
+    fn reversing(width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let r = build.unary(Opcode::Bitreverse, args[0], ty);
+            build.ret(&[r]);
+        })
+    }
+
+    /// The rounds [`swap`] writes, done here on a plain number, so the masks and shift counts can
+    /// be checked against the standard library's answer without anything that runs IR.
+    ///
+    /// Each round is the five instructions the pass writes: keep the even groups and move them up,
+    /// move everything down and keep the even groups of that, and put the two together.
+    fn halved(value: u128, width: u32, lowest: u32) -> u128 {
+        let all = u128::MAX >> (u128::BITS - width);
+        let mut value = value & all;
+        let mut group = width / 2;
+        while group >= lowest {
+            let keep = alternating(width, group) as u128;
+            value = (((value & keep) << group) | ((value >> group) & keep)) & all;
+            group /= 2;
+        }
+        value
+    }
+
+    /// The halving is a reversal at every width C has, down to bytes for a byte swap and down to
+    /// single bits for a bit reversal. The samples are a few patterns with every byte different, so
+    /// a round that moved a group to the wrong place could not land on the right answer by luck.
+    #[test]
+    fn the_rounds_are_the_reversal_the_standard_library_computes() {
+        let samples =
+            [0u64, 1, 0x8000_0000_0000_0000, 0x0123_4567_89ab_cdef, 0xdead_beef_f00d_cafe];
+        for sample in samples {
+            let byte = u8::BITS;
+            assert_eq!(halved(sample.into(), 8, 1), (sample as u8).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 16, 1), (sample as u16).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 32, 1), (sample as u32).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 64, 1), sample.reverse_bits().into());
+            assert_eq!(halved(sample.into(), 16, byte), (sample as u16).swap_bytes().into());
+            assert_eq!(halved(sample.into(), 32, byte), (sample as u32).swap_bytes().into());
+            assert_eq!(halved(sample.into(), 64, byte), sample.swap_bytes().into());
+            let wide = (u128::from(sample) << 64) | u128::from(!sample);
+            assert_eq!(halved(wide, 128, 1), wide.reverse_bits());
+            assert_eq!(halved(wide, 128, byte), wide.swap_bytes());
+        }
+    }
+
+    /// A bit reversal is the byte swap's rounds and then three more, at four bits, two and one, so
+    /// it is one round per halving all the way down and the count is the logarithm of the width.
+    #[test]
+    fn a_bit_reversal_is_one_exchange_per_halving_down_to_a_bit() {
+        for (width, steps) in [(8u32, 3usize), (16, 4), (32, 5), (64, 6)] {
+            let (mut names, mut func) = reversing(width);
+            bytes(&mut func, &[]);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("bitreverse"), "the instruction is gone at {width}: {text}");
+            assert_eq!(text.matches("shl").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches("lshr").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches(" or ").count(), steps, "at {width}: {text}");
+        }
+    }
+
+    /// The last three masks are the ones a reader would write by hand for a bit reversal, which is
+    /// the quickest check that the rounds below a byte use the same pattern as the ones above it.
+    #[test]
+    fn a_bit_reversal_ends_on_the_nibble_pair_and_bit_masks() {
+        let (mut names, mut func) = reversing(32);
+        bytes(&mut func, &[]);
+        let text = printed(&func, &mut names);
+        for mask in [0x0f0f_0f0f_i128, 0x3333_3333, 0x5555_5555] {
+            assert!(text.contains(&format!("iconst.i32 {mask}")), "{mask:#x} is a mask: {text}");
+        }
+    }
+
+    /// A target that keeps a byte swap at some width does not keep a bit reversal with it, since
+    /// no target has a rule for one, so the list the byte swap reads is not consulted.
+    #[test]
+    fn a_bit_reversal_is_rewritten_whatever_widths_keep_a_byte_swap() {
+        let (mut names, mut func) = reversing(32);
+        bytes(&mut func, &[16, 32, 64]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bitreverse"), "{text}");
+    }
+
+    /// The same verifier check as the byte swap's, at the narrowest width where every round is
+    /// below a byte.
+    #[test]
+    fn what_a_bit_reversal_becomes_is_ir_that_verifies() {
+        for width in [8, 64] {
+            let (mut names, mut func) = reversing(width);
+            bytes(&mut func, &[]);
+            let module = Module::new(names.intern("b.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+        }
+    }
+
+    /// Nothing else is touched, which matters because this runs over every function in the program
+    /// and nearly none of them reverses any bytes.
+    #[test]
+    fn a_function_with_no_byte_swap_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        bytes(&mut func, &[]);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A width the target swaps in one instruction is left for the rule that picks it, one twice
+    /// that is two of them, and anything else is still written out.
+    #[test]
+    fn a_swap_of_a_width_the_target_keeps_is_left_as_it_was() {
+        let (mut names, mut func) = swapping(32);
+        let before = printed(&func, &mut names);
+        bytes(&mut func, &[16, 32]);
+        assert_eq!(printed(&func, &mut names), before);
+
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func, &[16, 32]);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches(" = bswap ").count(), 2, "{text}");
+        assert_eq!(text.matches(" = shl ").count(), 1, "{text}");
+
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func, &[16]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bswap"), "{text}");
+        assert_eq!(text.matches("shl").count(), 3, "{text}");
+    }
+
+    /// A function whose body is one bit count of the given opcode and width.
+    fn counting(op: Opcode, width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let c = build.unary(op, args[0], ty);
+            build.ret(&[c]);
+        })
+    }
+
+    /// The masks the halving sum needs, which are the ones any bit counting routine is written with
+    /// and are worth being able to read off against one.
+    #[test]
+    fn the_counting_masks_are_the_ones_the_halving_sum_is_written_with() {
+        assert_eq!(alternating(32, 1), 0x5555_5555);
+        assert_eq!(alternating(32, 2), 0x3333_3333);
+        assert_eq!(alternating(32, 4), 0x0f0f_0f0f);
+        assert_eq!(every(32, 8, 1), 0x0101_0101);
+        assert_eq!(every(64, 8, 1), 0x0101_0101_0101_0101);
+    }
+
+    /// The set bit count is arithmetic and the multiply is what adds the bytes together, which is
+    /// the step a reader is most likely to want to check.
+    #[test]
+    fn a_set_bit_count_is_the_halving_sum_and_a_multiply_that_adds_the_bytes() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 32);
+        counts(&mut func, &[]);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctpop"), "the instruction is gone: {text}");
+        assert!(text.contains("iconst.i32 1431655765"), "the pairs mask: {text}");
+        assert!(text.contains("iconst.i32 858993459"), "the nibbles mask: {text}");
+        assert!(text.contains("iconst.i32 252645135"), "the bytes mask: {text}");
+        assert_eq!(text.matches(" mul ").count(), 1, "one multiply: {text}");
+        assert!(text.contains("iconst.i32 24"), "and the top byte is the answer: {text}");
+    }
+
+    /// At eight bits there are no bytes left to add, so the multiply is not written at all.
+    #[test]
+    fn a_count_of_one_byte_stops_before_the_multiply() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 8);
+        counts(&mut func, &[]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctpop"), "{text}");
+        assert!(!text.contains(" mul "), "nothing to add together: {text}");
+    }
+
+    /// A leading zero count smears every set bit downwards and counts what is left unset above it,
+    /// which is one shift and one or per doubling and then the count.
+    #[test]
+    fn a_leading_zero_count_smears_the_value_down_and_counts_the_complement() {
+        let (mut names, mut func) = counting(Opcode::Ctlz, 32);
+        counts(&mut func, &[]);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctlz"), "the instruction is gone: {text}");
+        assert!(!text.contains("ctpop"), "and so is the count it became: {text}");
+        for by in ["iconst.i32 1", "iconst.i32 2", "iconst.i32 4", "iconst.i32 8", "iconst.i32 16"]
+        {
+            assert!(text.contains(by), "{by} is a smearing step: {text}");
+        }
+        assert_eq!(text.matches(" xor ").count(), 1, "one complement: {text}");
+    }
+
+    /// A trailing zero count is the bits below the lowest set one, which is a mask and no smearing.
+    #[test]
+    fn a_trailing_zero_count_masks_the_bits_below_the_lowest_set_one() {
+        let (mut names, mut func) = counting(Opcode::Cttz, 32);
+        counts(&mut func, &[]);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("cttz"), "the instruction is gone: {text}");
+        assert!(!text.contains("ctpop"), "and so is the count it became: {text}");
+        assert!(text.contains("iconst.i32 -1"), "the complement and the decrement: {text}");
+        assert_eq!(text.matches(" xor ").count(), 1, "one complement: {text}");
+        // Far fewer instructions than the leading count, because there is no smearing to do.
+        assert!(text.matches(" or ").count() <= 1, "no smearing run: {text}");
+    }
+
+    /// The rewrites have to leave a function the verifier still accepts, at every width and for all
+    /// three, because nothing rechecks what comes out of here.
+    #[test]
+    fn what_a_bit_count_becomes_is_ir_that_verifies() {
+        for op in [Opcode::Ctpop, Opcode::Ctlz, Opcode::Cttz] {
+            for width in [8u32, 16, 32, 64] {
+                let (mut names, mut func) = counting(op, width);
+                counts(&mut func, &[]);
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+            }
+        }
+    }
+
+    /// A width the arithmetic is not written for is left as the instruction it was, so a selector
+    /// with no rule for it says so rather than the program getting a number counted in the wrong
+    /// shape.
+    #[test]
+    fn a_width_the_halving_sum_is_not_written_for_is_left_alone() {
+        let (mut names, mut func) = counting(Opcode::Ctpop, 24);
+        counts(&mut func, &[]);
+        assert!(printed(&func, &mut names).contains("ctpop"), "left as it was");
+    }
+
+    /// A count the selector is left to answer stays as it was, at the widths it is left at and no
+    /// others, and a search written out on a processor that has `popcnt` and not `lzcnt` is left
+    /// as the set bit count it became.
+    #[test]
+    fn a_count_the_machine_has_an_instruction_for_is_left_for_the_selector() {
+        let popcnt = CountInst {
+            of: BitCount::Ones,
+            feature: "popcnt",
+            widths: &[32, 64],
+            guarded: false,
+            vector: false,
+        };
+        for width in [32, 64] {
+            let (mut names, mut func) = counting(Opcode::Ctpop, width);
+            let before = printed(&func, &mut names);
+            counts(&mut func, &[popcnt]);
+            assert_eq!(printed(&func, &mut names), before, "at {width}");
+        }
+        let (mut names, mut func) = counting(Opcode::Ctpop, 16);
+        counts(&mut func, &[popcnt]);
+        assert!(!printed(&func, &mut names).contains("ctpop"), "no rule at sixteen bits");
+
+        let (mut names, mut func) = counting(Opcode::Ctlz, 32);
+        counts(&mut func, &[popcnt]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctlz"), "the search is written out: {text}");
+        assert_eq!(text.matches("ctpop").count(), 1, "as the count it became: {text}");
+        assert!(!text.contains(" mul "), "which is not written out in turn: {text}");
+    }
+
+    /// A guarded count is written as the choice its rule takes: the width for a zero and the count
+    /// for anything else, with the count still there to be selected and nothing written out.
+    #[test]
+    fn a_guarded_count_becomes_the_choice_that_answers_the_width_for_a_zero() {
+        let guarded =
+            |of| CountInst { of, feature: "", widths: &[32, 64], guarded: true, vector: false };
+        let kept = [guarded(BitCount::LeadingZeros), guarded(BitCount::TrailingZeros)];
+        for (op, name) in [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz")] {
+            for width in [32, 64] {
+                let (mut names, mut func) = counting(op, width);
+                counts(&mut func, &kept);
+                let text = printed(&func, &mut names);
+                assert_eq!(text.matches(name).count(), 1, "the count is still there: {text}");
+                assert!(text.contains(&format!("iconst.i{width} {width}")), "the width: {text}");
+                assert!(text.contains("icmp eq"), "against zero: {text}");
+                assert!(text.contains("select"), "and the choice: {text}");
+                assert!(!text.contains("ctpop"), "nothing written out: {text}");
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+            }
+        }
+        // A width with no guarded rule is written out as before.
+        let (mut names, mut func) = counting(Opcode::Ctlz, 16);
+        counts(&mut func, &kept);
+        assert!(!printed(&func, &mut names).contains("select"), "no rule at sixteen bits");
+    }
+
+    /// A zero count at sixty four bits on a machine that counts thirty two, which is i386, is the
+    /// count of each word and a choice between them, and nothing is written out.
+    #[test]
+    fn a_wide_zero_count_on_a_machine_that_counts_a_word_is_a_count_of_each_word() {
+        let guarded =
+            |of| CountInst { of, feature: "", widths: &[32], guarded: true, vector: false };
+        let kept = [guarded(BitCount::LeadingZeros), guarded(BitCount::TrailingZeros)];
+        for (op, name) in [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz")] {
+            let (mut names, mut func) = counting(op, 64);
+            counts(&mut func, &kept);
+            let text = printed(&func, &mut names);
+            assert_eq!(
+                text.matches(&format!(" = {name} ")).count(),
+                2,
+                "one for each word: {text}"
+            );
+            assert_eq!(text.matches("trunc.i32").count(), 2, "of a word each: {text}");
+            assert!(text.contains("zext.i64"), "widened back: {text}");
+            assert!(!text.contains("ctpop"), "nothing written out: {text}");
+            let module = Module::new(names.intern("c.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names)
+                .unwrap_or_else(|e| panic!("{op:?}: {e:?}"));
+        }
+        // With no count at a word there is nothing to split it into.
+        let (mut names, mut func) = counting(Opcode::Ctlz, 64);
+        counts(&mut func, &[]);
+        assert!(!printed(&func, &mut names).contains("ctlz"), "written out as before");
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_bit_count_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        counts(&mut func, &[]);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// One overflow checked instruction whose value and whose flag are both returned, so that the
+    /// substitution has two readers to find rather than none.
+    fn checking(op: Opcode, width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        let bit = ty.with_lane(Type::I1);
+        one(&[ty, ty], &[ty, bit], |build, args| {
+            let (value, flag) = build.checked(op, args[0], args[1]);
+            build.ret(&[value, flag]);
+        })
+    }
+
+    /// An unsigned add wraps exactly when the sum came out below an operand, which is one
+    /// comparison and no arithmetic on the sign bits.
+    #[test]
+    fn a_checked_unsigned_add_becomes_an_add_and_one_comparison() {
+        let (mut names, mut func) = checking(Opcode::UAddOverflow, 32);
+        overflows(&mut func, 32);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uadd_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" add ").count(), 1, "one add: {text}");
+        assert_eq!(text.matches("icmp ult").count(), 1, "and one comparison: {text}");
+        assert!(!text.contains(" xor "), "nothing about sign bits: {text}");
+    }
+
+    /// A signed add wraps exactly when the operands agreed in sign and the answer did not, which is
+    /// the sign bit of `(a ^ v) & (b ^ v)`.
+    #[test]
+    fn a_checked_signed_add_becomes_an_add_and_the_sign_bit_of_two_exclusive_ors() {
+        let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
+        overflows(&mut func, 32);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("sadd_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" add ").count(), 1, "one add: {text}");
+        assert_eq!(text.matches(" xor ").count(), 2, "the answer against each operand: {text}");
+        assert_eq!(text.matches(" and ").count(), 1, "both at once: {text}");
+        assert!(text.contains("icmp slt"), "and its sign bit: {text}");
+    }
+
+    /// An unsigned subtract wraps exactly when the left operand was below the right, which does not
+    /// need the answer at all.
+    #[test]
+    fn a_checked_unsigned_subtract_compares_the_operands_and_not_the_answer() {
+        let (mut names, mut func) = checking(Opcode::USubOverflow, 64);
+        overflows(&mut func, 32);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("usub_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" sub ").count(), 1, "one subtract: {text}");
+        assert!(text.contains("icmp ult %0, %1"), "the operands, in order: {text}");
+    }
+
+    /// A checked multiply is the ordinary multiply and the high half of the product, which is four
+    /// multiplies of the halves and the carry between them.
+    ///
+    /// This is the expensive one and it is what tamnd/rucc#309 is mostly worth: a machine whose
+    /// multiply writes the high half into a second register does the whole of it in one
+    /// instruction.
+    #[test]
+    fn a_checked_multiply_becomes_a_multiply_and_the_high_half_of_the_product() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 64);
+        overflows(&mut func, 32);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("umul_overflow"), "the instruction is gone: {text}");
+        assert_eq!(text.matches(" mul ").count(), 5, "the answer and the four halves: {text}");
+        assert!(text.contains("iconst.i64 32"), "split at half the width: {text}");
+        assert!(text.contains("iconst.i64 4294967295"), "and masked to it: {text}");
+        assert!(text.contains("icmp ne"), "the high half against zero: {text}");
+        assert!(!text.contains("ashr"), "and nothing corrected for sign: {text}");
+    }
+
+    /// The signed multiply is the unsigned one with the sign correction on top, and the test is
+    /// against the sign extension of the low half rather than against zero.
+    #[test]
+    fn a_checked_signed_multiply_corrects_the_high_half_for_each_negative_operand() {
+        let (mut names, mut func) = checking(Opcode::SMulOverflow, 64);
+        overflows(&mut func, 32);
+
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("smul_overflow"), "the instruction is gone: {text}");
+        assert_eq!(
+            text.matches(" ashr ").count(),
+            3,
+            "each operand's sign, and the answer: {text}"
+        );
+        assert!(text.contains("iconst.i64 63"), "spread from the top bit: {text}");
+        assert_eq!(text.matches(" sub ").count(), 2, "one correction per operand: {text}");
+    }
+
+    /// Both results have to reach their readers, which is the one thing this pass has to do that
+    /// the others do not: the instruction goes away rather than becoming another one, so nothing is
+    /// left holding the values the rest of the function was reading.
+    #[test]
+    fn both_results_are_substituted_into_whoever_was_reading_them() {
+        let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
+        overflows(&mut func, 32);
+
+        // The whole of it, because what this is checking is that nothing is left pointing at the
+        // two values the removed instruction used to define. The return names the add and the
+        // comparison, which are what replaced them.
+        let text = printed(&func, &mut names);
+        assert_eq!(
+            text,
+            concat!(
+                "func @f(i32, i32) -> (i32, i1), linkage(external) {\n",
+                "block0(%0: i32, %1: i32):\n",
+                "    %2 = add %0, %1\n",
+                "    %3 = xor %0, %2\n",
+                "    %4 = xor %1, %2\n",
+                "    %5 = and %3, %4\n",
+                "    %6 = iconst.i32 0\n",
+                "    %7 = icmp slt %5, %6\n",
+                "    return %2, %7\n",
+                "}\n",
+            ),
+        );
+    }
+
+    /// The rewrites have to leave a function the verifier still accepts, for all six and at every
+    /// width, because nothing rechecks what comes out of here.
+    #[test]
+    fn what_an_overflow_check_becomes_is_ir_that_verifies() {
+        let all = [
+            Opcode::UAddOverflow,
+            Opcode::SAddOverflow,
+            Opcode::USubOverflow,
+            Opcode::SSubOverflow,
+            Opcode::UMulOverflow,
+            Opcode::SMulOverflow,
+        ];
+        for op in all {
+            for (width, register) in
+                [8u32, 16, 32, 64, 128].into_iter().flat_map(|w| [(w, 32), (w, 64)])
+            {
+                let (mut names, mut func) = checking(op, width);
+                overflows(&mut func, register);
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width} on {register}: {e:?}"));
+            }
+        }
+    }
+
+    /// At the width of a register the high half is the one instruction every machine here has a
+    /// rule for, and the four multiplies of the halves are not written at all.
+    #[test]
+    fn a_checked_multiply_at_the_width_of_a_register_takes_the_high_half_in_one() {
+        for (op, high) in [(Opcode::UMulOverflow, "umulh"), (Opcode::SMulOverflow, "smulh")] {
+            for width in [32, 64] {
+                let (mut names, mut func) = checking(op, width);
+                overflows(&mut func, width);
+                let text = printed(&func, &mut names);
+                assert_eq!(text.matches(&format!(" = {high} ")).count(), 1, "{text}");
+                assert_eq!(text.matches(" mul ").count(), 1, "the answer alone: {text}");
+            }
+        }
+    }
+
+    /// Below the width of a register the operands are widened and multiplied once, and the high
+    /// half is the top of that product.
+    #[test]
+    fn a_checked_multiply_below_a_register_multiplies_once_at_twice_the_width() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 32);
+        overflows(&mut func, 64);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches("zext.i64").count(), 2, "both operands widened: {text}");
+        assert_eq!(text.matches(" mul ").count(), 2, "the answer and the wide product: {text}");
+        assert!(text.contains("iconst.i64 32"), "its top shifted down: {text}");
+        assert!(text.contains("trunc.i32"), "and narrowed: {text}");
+        assert!(!text.contains("umulh"), "{text}");
+    }
+
+    /// A width the arithmetic is not written for is left as the instruction it was, for the same
+    /// reason the bit counts leave one: a selector with no rule for it says so, which is better
+    /// than an answer checked in the wrong shape.
+    #[test]
+    fn a_width_the_split_is_not_written_for_is_left_alone() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 24);
+        overflows(&mut func, 32);
+        assert!(printed(&func, &mut names).contains("umul_overflow"), "left as it was");
+    }
+
+    /// A check at the width no register holds is rewritten here and split into halves after.
+    ///
+    /// This pass runs above `crate::wide` for exactly this, because an overflow check is the one
+    /// instruction whose result is two things and that pass has no answer for one. What it leaves
+    /// behind is arithmetic and a comparison, which are both things the splitting understands, so
+    /// the check reaches the machine as instructions the machine has.
+    #[test]
+    fn a_check_at_the_width_no_register_holds_is_rewritten_here() {
+        let (mut names, mut func) = checking(Opcode::UAddOverflow, 128);
+        overflows(&mut func, 32);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("uadd_overflow"), "the check is gone: {text}");
+        assert!(text.contains(" = add "), "into the arithmetic it is: {text}");
+        assert!(text.contains("icmp ult"), "and the test that says it wrapped: {text}");
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_overflow_check_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        overflows(&mut func, 32);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// `T x = *p;` with an ordering on it, which is what `__atomic_load_n` becomes.
+    fn reading(ty: Type, align: u32, order: MemOrder) -> (Interner, Func) {
+        one(&[Type::PTR], &[ty], |build, args| {
+            let info = MemInfo { order, ..access(0, align) };
+            let value = build.atomic_load(ty, args[0], info, Flags::NONE);
+            build.ret(&[value]);
+        })
+    }
+
+    /// `*p = x;` with an ordering on it, which is what `__atomic_store_n` becomes.
+    fn writing(ty: Type, align: u32, order: MemOrder) -> (Interner, Func) {
+        one(&[Type::PTR, ty], &[], |build, args| {
+            let info = MemInfo { order, ..access(0, align) };
+            build.atomic_store(args[1], args[0], info, Flags::NONE);
+            build.ret(&[]);
+        })
+    }
+
+    /// Every ordered access below the strongest store is the plain instruction on this machine,
+    /// and the ordering comes off it when it is.
+    ///
+    /// The ordering coming off is not cosmetic: the verifier refuses an ordering on a plain access,
+    /// because a plain load may be moved, duplicated and dropped and an ordering left on one would
+    /// be a claim nothing downstream honours.
+    #[test]
+    fn an_ordered_access_becomes_the_plain_one_this_machine_already_orders() {
+        for order in [MemOrder::Relaxed, MemOrder::Acquire, MemOrder::SeqCst] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            orderings(&mut func, 8, true, false);
+            let text = printed(&func, &mut names);
+            assert!(text.contains("load.i32"), "{order:?}: {text}");
+            assert!(!text.contains("atomic_load"), "{order:?}: {text}");
+            assert!(!text.contains(order.name()), "the ordering came off: {text}");
+        }
+
+        for order in [MemOrder::Relaxed, MemOrder::Release] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            orderings(&mut func, 8, true, false);
+            let text = printed(&func, &mut names);
+            assert!(text.contains("store %1 -> %0"), "{order:?}: {text}");
+            assert!(!text.contains("atomic_store"), "{order:?}: {text}");
+            assert!(!text.contains("fence"), "{order:?} costs nothing here: {text}");
+        }
+    }
+
+    /// The strongest store is the plain store and a barrier behind it, in that order.
+    ///
+    /// It is the one thing total store order does not give away: a store followed by a load of
+    /// another address may be seen the other way round, and sequential consistency is exactly the
+    /// ordering that forbids it.
+    #[test]
+    fn the_strongest_store_keeps_a_barrier_behind_it() {
+        let (mut names, mut func) = writing(Type::int(32), 4, MemOrder::SeqCst);
+        orderings(&mut func, 8, true, false);
+        let text = printed(&func, &mut names);
+        let (before, after) = text.split_once("fence seq_cst").expect("a barrier");
+        assert!(before.contains("store %1 -> %0"), "the store comes first: {text}");
+        assert!(!after.contains("store"), "and nothing is between them: {text}");
+        assert!(!text.contains("atomic_store"), "{text}");
+    }
+
+    /// On a machine that is not total store order only the relaxed access is the plain one. The
+    /// rest stay ordered for `crate::lower` to write as the acquiring load and the releasing store,
+    /// and the strongest store gets no fence, since `stlr` is already enough.
+    #[test]
+    fn a_weakly_ordered_machine_keeps_every_ordering_above_relaxed() {
+        let (mut names, mut func) = reading(Type::int(32), 4, MemOrder::Relaxed);
+        orderings(&mut func, 8, false, false);
+        assert!(!printed(&func, &mut names).contains("atomic_load"), "relaxed is a plain load");
+
+        for order in [MemOrder::Acquire, MemOrder::SeqCst] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8, false, false);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+        for order in [MemOrder::Release, MemOrder::SeqCst] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8, false, false);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+    }
+
+    /// On a machine that orders with fences an ordered access is the plain one with the fences
+    /// the RISC-V psABI puts around it, and a relaxed one is the plain one with none.
+    #[test]
+    fn a_machine_that_orders_with_fences_puts_them_around_the_plain_access() {
+        let fences = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|line| line.trim().strip_prefix("fence ").map(str::to_owned))
+                .collect()
+        };
+        for (order, before, after) in [
+            (MemOrder::Relaxed, &[][..], &[][..]),
+            (MemOrder::Acquire, &[][..], &["acquire"][..]),
+            (MemOrder::SeqCst, &["seq_cst"][..], &["acquire"][..]),
+        ] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            orderings(&mut func, 8, false, true);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("atomic_load"), "{order:?}: {text}");
+            let (head, tail) = text.split_once("load.i32").expect("a plain load");
+            assert_eq!(fences(head), before, "{order:?}: {text}");
+            assert_eq!(fences(tail), after, "{order:?}: {text}");
+            let module = Module::new(names.intern("a.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        for (order, before, after) in [
+            (MemOrder::Relaxed, &[][..], &[][..]),
+            (MemOrder::Release, &["release"][..], &[][..]),
+            (MemOrder::SeqCst, &["release"][..], &["seq_cst"][..]),
+        ] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            orderings(&mut func, 8, false, true);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("atomic_store"), "{order:?}: {text}");
+            let (head, tail) = text.split_once("store %1 -> %0").expect("a plain store");
+            assert_eq!(fences(head), before, "{order:?}: {text}");
+            assert_eq!(fences(tail), after, "{order:?}: {text}");
+            let module = Module::new(names.intern("a.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+    }
+
+    /// A barrier the program wrote is left for `crate::lower`, which is where a target says what
+    /// an ordering costs.
+    #[test]
+    fn a_barrier_is_left_for_the_place_that_knows_what_one_costs() {
+        for order in MemOrder::all().filter(|&order| order != MemOrder::NotAtomic) {
+            let (mut names, mut func) = one(&[], &[], |build, _| {
+                build.fence(order);
+                build.ret(&[]);
+            });
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8, true, false);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+    }
+
+    /// An access the machine cannot do in one go is left as the opcode it was, which is a refusal
+    /// naming the instruction rather than an answer that is not atomic at all.
+    ///
+    /// Two ways it happens: wider than a word, and narrower than a word but at an address the
+    /// program said less about than the width. Both are `__atomic_is_lock_free` answering no.
+    #[test]
+    fn an_access_this_machine_cannot_do_in_one_go_is_left_alone() {
+        for (ty, align) in [(Type::int(128), 16), (Type::int(64), 4)] {
+            let (mut names, mut func) = reading(ty, align, MemOrder::SeqCst);
+            orderings(&mut func, 8, true, false);
+            assert!(printed(&func, &mut names).contains("atomic_load"), "left as it was");
+        }
+    }
+
+    /// What comes out is IR the verifier takes, which is the check that matters most here: the
+    /// ordering has to be gone from a plain access or this pass has built something illegal.
+    #[test]
+    fn what_the_ordered_accesses_become_verifies() {
+        for order in MemOrder::all().filter(|&order| order != MemOrder::NotAtomic) {
+            for (mut names, mut func) in
+                [reading(Type::int(32), 4, order), writing(Type::int(32), 4, order)]
+            {
+                if !order.is_valid_for_load() && !order.is_valid_for_store() {
+                    continue;
+                }
+                orderings(&mut func, 8, true, false);
+                let module = Module::new(names.intern("a.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{order:?}: {e:?}"));
+            }
+        }
+    }
+
+    /// Nothing else is touched, for the same reason the other passes have that test.
+    #[test]
+    fn a_function_with_no_ordered_access_in_it_is_left_exactly_as_it_was() {
+        let (mut names, mut func) = one(&[Type::int(32)], &[Type::int(32)], |build, args| {
+            build.ret(&[args[0]]);
+        });
+        let before = printed(&func, &mut names);
+        orderings(&mut func, 8, true, false);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A variable length array, built the way the front end builds one.
+    fn growing(build: &mut Builder<'_>, size: rucc_ir::Value, align: u32) -> rucc_ir::Value {
+        let info = MemInfo {
+            size: 0,
+            align,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::default(),
+        };
+        let mem = build.func().add_mem(info);
+        let args = build.func().push_values(&[size]);
+        build.value(
+            InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+            Type::PTR,
+        )
+    }
+
+    /// The bytes an array asks for are rounded up to what a call leaves the stack pointer on.
+    #[test]
+    fn the_bytes_a_variable_length_array_takes_are_a_multiple_of_the_stack_alignment() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let slot = growing(build, args[0], 8);
+            build.ret(&[slot]);
+        });
+        rounds(&mut func, 16, 8);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("%3 = add %0, %1"), "{text}");
+        assert!(text.contains("%4 = and %3, %2"), "{text}");
+        assert!(text.contains("%5 = alloca %4, align 8"), "{text}");
+        // One array and one allocation of it, since nothing here wanted an address the stack
+        // pointer does not already land on.
+        assert_eq!(text.matches("alloca").count(), 1, "{text}");
+        assert!(!text.contains("ptr_add"), "{text}");
+    }
+
+    /// One that wants more alignment than that takes the room for it and lands inside it.
+    ///
+    /// The instruction the rest of the function reads is the `ptr_add`, which is the instruction
+    /// the array was, so the value it writes is the value everything already held. What the
+    /// `alloca` above it asks for is the convention's alignment, which is the truth about the
+    /// block: the object wanted thirty two and the object is the offset into the block.
+    #[test]
+    fn a_variable_length_array_wanting_more_alignment_is_placed_inside_the_bytes_it_took() {
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let slot = growing(build, args[0], 32);
+            build.ret(&[slot]);
+        });
+        rounds(&mut func, 16, 8);
+        let text = printed(&func, &mut names);
+        // The size, rounded up and then given the whole of the alignment as room to move in.
+        assert!(text.contains("%5 = iconst.i64 32"), "{text}");
+        assert!(text.contains("%6 = add %4, %5"), "{text}");
+        // The offset, which is how far above the block the next multiple of thirty two is.
+        assert!(text.contains("ptrtoint"), "{text}");
+        assert!(text.contains("%11 = iconst.i64 31"), "{text}");
+        assert!(text.contains("%10 = sub %9, %8"), "{text}");
+        assert!(text.contains("%12 = and %10, %11"), "{text}");
+        // The block itself asks for what a call leaves the stack pointer on and no more.
+        assert!(text.contains("%7 = alloca %6, align 16"), "{text}");
+        // The last instruction of the rewrite is the array itself, so the value the function
+        // returns is the value it already returned.
+        assert!(text.contains("%13 = ptr_add %7, %12"), "{text}");
+        assert!(text.contains("return %13"), "{text}");
+    }
+
+    /// A fixed local wanting more than the stack pointer has is given it the same way when an array
+    /// moves the stack pointer in the same function, and left for the prologue when nothing does.
+    #[test]
+    fn a_fixed_local_wanting_more_alignment_in_a_frame_that_grows_is_placed_inside_its_bytes() {
+        let fixed = |build: &mut Builder<'_>| {
+            let info = MemInfo {
+                size: 256,
+                align: 128,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::default(),
+            };
+            let mem = build.func().add_mem(info);
+            build.value(
+                InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+                Type::PTR,
+            )
+        };
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let local = fixed(build);
+            let _ = growing(build, args[0], 8);
+            build.ret(&[local]);
+        });
+        rounds(&mut func, 16, 8);
+        let text = printed(&func, &mut names);
+        // The record and the most it can be moved up by, at what the stack pointer has.
+        assert!(text.contains("%1 = alloca, size 368, align 16"), "{text}");
+        assert!(text.contains("%5 = iconst.i64 127"), "{text}");
+        assert!(text.contains("%7 = ptr_add %1, %6"), "{text}");
+        assert!(text.contains("return %7"), "{text}");
+
+        let (mut names, mut func) = one(&[], &[Type::PTR], |build, _| {
+            let local = fixed(build);
+            build.ret(&[local]);
+        });
+        let before = printed(&func, &mut names);
+        rounds(&mut func, 16, 8);
+        assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// `void *f(void *to, void *from) { return memcpy(to, from, size); }`, or the same with
+    /// `memset` and a byte, where the answer is given back only if `answered` says so.
+    fn calling(name: &str, second: Option<i128>, size: i128, answered: bool) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let callee = names.intern(name);
+        let returns: &[Type] = if answered { &[Type::PTR] } else { &[] };
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new()
+                .with_params(&[Type::PTR, Type::PTR, Type::int(32)])
+                .with_returns(returns),
+        );
+        let entry = func.create_block();
+        let args: Vec<_> = [Type::PTR, Type::PTR, Type::int(32)]
+            .iter()
+            .map(|&ty| func.append_param(entry, ty))
+            .collect();
+        let middle = if second.is_some() { Type::int(32) } else { Type::PTR };
+        let sig = func.add_signature(
+            Signature::new()
+                .with_params(&[Type::PTR, middle, Type::int(64)])
+                .with_returns(&[Type::PTR]),
+        );
+        let mut build = Builder::new(&mut func, entry);
+        let with = match second {
+            Some(byte) => build.iconst(Type::int(32), byte),
+            None => args[1],
+        };
+        let length = build.iconst(Type::int(64), size);
+        let call = build.call(callee, sig, &[args[0], with, length]);
+        let answer = build.func()[call].first_result.expect("memcpy gives back a pointer");
+        if answered {
+            build.ret(&[answer]);
+        } else {
+            build.ret(&[]);
+        }
+        (names, func)
+    }
+
+    #[test]
+    fn a_small_memcpy_call_is_moves_where_a_word_may_be_moved_anywhere() {
+        let (mut names, mut func) = calling("memcpy", None, 24, false);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("call"), "the call is gone: {text}");
+        assert_eq!(text.matches("load.i64").count(), 3, "{text}");
+        assert_eq!(text.matches("store").count(), 3, "{text}");
+
+        // Where a word may not be moved to any address the call stays, since nothing is known
+        // about how the two pointers are aligned and a move per byte is worse than the call.
+        let (mut names, mut func) = calling("memcpy", None, 24, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
+        assert!(printed(&func, &mut names).contains("call @memcpy"));
+    }
+
+    /// A function built where `memcpy` is not the library's function keeps its call.
+    #[test]
+    fn a_function_that_said_no_builtin_keeps_its_call() {
+        let (mut names, mut func) = calling("memcpy", None, 24, false);
+        func.attrs.set |= rucc_ir::AttrSet::NO_BUILTIN;
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        assert!(printed(&func, &mut names).contains("call @memcpy"));
+    }
+
+    #[test]
+    fn a_small_memset_call_is_stores_of_the_byte_and_a_large_one_stays_a_call() {
+        let (mut names, mut func) = calling("memset", Some(0xff), 13, false);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("call"), "{text}");
+        assert!(text.contains("iconst.i64 -1"), "{text}");
+        assert_eq!(text.matches("store").count(), 2, "a word at 0 and one at 5: {text}");
+
+        // One byte past what a fill may be stays a call, and so does one past what a copy may be,
+        // where the size the call names is exactly as many words as each may be is moves.
+        let words = |moves: usize| i128::try_from(moves * 8).expect("a small threshold");
+        for (name, byte, most) in
+            [("memset", Some(0), fills(Goal::Speed)), ("memcpy", None, copies(Goal::Speed))]
+        {
+            let (mut names, mut func) = calling(name, byte, words(most) + 1, false);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+            assert!(printed(&func, &mut names).contains(&format!("call @{name}")), "over");
+
+            let (mut names, mut func) = calling(name, byte, words(most), false);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("call"), "{name} of {} words: {text}", most);
+            assert_eq!(text.matches("store").count(), most, "{text}");
+        }
+
+        // And a call to some other function of the same shape is left alone.
+        let (mut names, mut func) = calling("memcpy_toio", None, 8, false);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        assert!(printed(&func, &mut names).contains("call @memcpy_toio"));
+    }
+
+    #[test]
+    fn what_a_small_memcpy_gives_back_is_its_destination() {
+        let (mut names, mut func) = calling("memcpy", None, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("call"), "{text}");
+        assert!(text.contains("return %0"), "{text}");
+    }
+}

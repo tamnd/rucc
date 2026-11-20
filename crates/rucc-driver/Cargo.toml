@@ -1,0 +1,59 @@
+[package]
+name = "rucc-driver"
+description = "Command line, phase graph and job scheduling for the rucc C compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 13. Every entry below must be of strictly lower rank, which is what
+# `cargo xtask layers` checks on every commit.
+[dependencies]
+memmap2.workspace = true
+rucc-9p.workspace = true
+rucc-archive.workspace = true
+rucc-asm.workspace = true
+rucc-base.workspace = true
+rucc-codegen.workspace = true
+# What the level asked for, which the back end is handed on its flags. Named here because the
+# driver is what reads the level and works the answer out.
+rucc-cost.workspace = true
+# The debug sections. Here rather than under the assembler because turning a span into a file and a
+# line needs the source map, and the driver is the layer that has one.
+rucc-debug.workspace = true
+rucc-diag.workspace = true
+rucc-ir.workspace = true
+rucc-lex.workspace = true
+rucc-lower.workspace = true
+rucc-lto.workspace = true
+rucc-mir.workspace = true
+rucc-object.workspace = true
+rucc-opt.workspace = true
+rucc-parse.workspace = true
+rucc-pp.workspace = true
+rucc-safety.workspace = true
+rucc-sema.workspace = true
+rucc-session.workspace = true
+# glibc's description, which a cross link to a glibc target is written from. The driver rather than
+# the sysroot crate, because writing files into the cache is the driver's business.
+rucc-stub.workspace = true
+rucc-sysroot.workspace = true
+rucc-target.workspace = true
+rucc-tuple.workspace = true
+rucc-types.workspace = true
+# The zip, cabinet, compound file and MSI readers, which is what a Windows SDK download is four
+# formats of. Here rather than under the sysroot crate because the sysroot crate says which files
+# are wanted and this one is the layer that has them on disk.
+rucc-unpack.workspace = true
+rucc-wasm.workspace = true
+# The wasm linker that runs in the process, for rucc running as wasm and a machine with no wasm-ld.
+rucc-wasm-link.workspace = true
