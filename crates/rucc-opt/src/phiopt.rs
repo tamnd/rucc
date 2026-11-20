@@ -113,6 +113,27 @@
 //! thirty two bytes of win for twenty two bytes of loss, which is ten bytes across 1453 programs
 //! and is not worth a rule.
 //!
+//! # The load both arms made
+//!
+//! A load is an effect, so an arm that loads keeps its branch, except in the shape below. NetBSD's
+//! LFS reads each field of its superblock through an accessor such as `lfs_sb_getbsize`, which is
+//! `fs->lfs_is64 ? fs->u_64.bsize : fs->u_32.bsize`. Both arms load from the same pointer at two
+//! offsets. `bootxx_lfsv2` calls these accessors again and again in one function on the same
+//! condition, and each call was a branch and two loads.
+//!
+//! When both arms load the value the join takes, the two loads become one load below the branch,
+//! as the operation both arms did. When the two addresses are the same base at two constant
+//! offsets, the select goes on the two offsets and the one address is worked out from it. Each
+//! accessor is then a select, an address and a load in one block, and `number` and
+//! `redundant-load` make the copies of one accessor one value.
+//!
+//! It is safe because one load runs on each path before the change and one load runs on each path
+//! after it, of the address the arm read. Nothing is read that was not read before. Nothing with an
+//! effect comes in front of the load in its arm, so the load reads the same memory in the head. The
+//! two loads have to say the same about the access, and neither can be `volatile` or atomic. A
+//! diamond that moves a store too factors no load, because the one store is written below what the
+//! arms did.
+//!
 //! # The store both arms made
 //!
 //! Section 22.2's fourth transformation, conditional store replacement, in the half of it that
@@ -360,6 +381,10 @@ const CONVERTED: &str =
 /// Recorded once for each operation both arms did that ended up being done once.
 const FACTORED: &str = "operation both arms did to different operands done once below the branch";
 
+/// Recorded once for each pair of loads, one in each arm, that became one load below the branch.
+const LOAD_FACTORED: &str =
+    "load both arms made from one base at two offsets made once below the branch";
+
 /// Recorded once for each value the branch condition settled, so that no select was written for it.
 const VALUE_IMPLIED: &str =
     "value the two arms disagreed about settled by the condition rather than by a select";
@@ -464,12 +489,22 @@ impl Pass for PhiOpt {
             // The waste that costs is a range query on a diamond that then turns out to have an
             // effect in it, and the equality gate below is what keeps that from being every diamond.
             let implied = implied(func, an, &shape);
-            if let Some(reason) = refused(func, machine, &shape, store.as_ref(), &implied) {
+            // Before the refusals too, because a load both arms make at two offsets from one base is
+            // an effect the plan moves, and the refusals have to know which loads those are.
+            let plan = factoring(func, machine, &shape, &implied, store.is_none());
+            let reading: Vec<Inst> = plan
+                .iter()
+                .flatten()
+                .flat_map(Factored::levels)
+                .filter(|one| one.data.opcode == Opcode::Load)
+                .flat_map(|one| one.insts)
+                .collect();
+            if let Some(reason) = refused(func, machine, &shape, store.as_ref(), &reading, &implied)
+            {
                 stats.missed(reason);
                 unjoin(func, an, joined);
                 continue;
             }
-            let plan = factoring(func, machine, &shape, &implied);
             // What is factored is not speculated. Both arms did the operation, one of them was
             // always going to do it, and after this one copy of it runs whichever way the branch
             // would have gone. So it comes off the count the cost rule is about, and a diamond
@@ -518,7 +553,7 @@ impl Pass for PhiOpt {
                 .iter()
                 .flatten()
                 .flat_map(|&arm| func.insts(arm))
-                .filter(|&inst| func[inst].opcode == Opcode::Load)
+                .filter(|&inst| func[inst].opcode == Opcode::Load && !reading.contains(&inst))
                 .count();
             convert(func, &shape, &plan, store.as_ref(), &implied);
             frame = None;
@@ -529,8 +564,11 @@ impl Pass for PhiOpt {
             let merges: Vec<(Block, Block)> =
                 shape.arms.iter().flatten().map(|&arm| (arm, head)).collect();
             an.clear_merging(func, &merges);
-            for _ in plan.iter().flatten().flat_map(Factored::levels) {
+            for one in plan.iter().flatten().flat_map(Factored::levels) {
                 stats.optimized(FACTORED);
+                if one.data.opcode == Opcode::Load {
+                    stats.optimized(LOAD_FACTORED);
+                }
             }
             for _ in implied.iter().flatten() {
                 stats.optimized(VALUE_IMPLIED);
@@ -729,6 +767,7 @@ fn refused(
     machine: Machine,
     shape: &Diamond,
     store: Option<&Stored>,
+    reading: &[Inst],
     implied: &[Option<usize>],
 ) -> Option<&'static str> {
     // A branch nobody has to take is not a branch worth removing. `simplify-cfg` runs after this
@@ -748,7 +787,7 @@ fn refused(
     let moving: &[Inst] = store.map_or(&[], |one| &one.insts);
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm) {
-            if func.is_terminator(inst) || moving.contains(&inst) {
+            if func.is_terminator(inst) || moving.contains(&inst) || reading.contains(&inst) {
                 continue;
             }
             if readable(func, shape.head, inst) {
@@ -1324,6 +1363,7 @@ fn factoring(
     machine: Machine,
     shape: &Diamond,
     implied: &[Option<usize>],
+    loads: bool,
 ) -> Vec<Option<Factored>> {
     let count = shape.args[0].len();
     let [Some(then), Some(other)] = shape.arms else {
@@ -1336,7 +1376,7 @@ fn factoring(
             if implied.get(index).copied().flatten().is_some() {
                 return None;
             }
-            factored(func, machine, shape, [then, other], index)
+            factored(func, machine, shape, [then, other], index, loads)
         })
         .collect()
 }
@@ -1348,8 +1388,31 @@ fn factored(
     shape: &Diamond,
     arms: [Block; 2],
     index: usize,
+    loads: bool,
 ) -> Option<Factored> {
-    factored_at(func, machine, arms, [shape.args[0][index], shape.args[1][index]], 0)
+    let sides = [shape.args[0][index], shape.args[1][index]];
+    factored_at(func, machine, arms, sides, if loads { Depth::Loads } else { Depth::Top })
+}
+
+/// Where in a chain [`factored_at`] is asked about, and at the top whether a load may be factored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// The value the join takes, where a load may not be factored because a store is moving too.
+    Top,
+    /// The value the join takes, where a load may be factored.
+    Loads,
+    /// This many levels under the value the join takes.
+    Below(u32),
+}
+
+impl Depth {
+    /// How many levels above this one were already factored.
+    fn levels(self) -> u32 {
+        match self {
+            Self::Top | Self::Loads => 0,
+            Self::Below(levels) => levels,
+        }
+    }
 }
 
 /// Whether these two values are the same operation, one in each arm, and what to write instead.
@@ -1363,8 +1426,9 @@ fn factored_at(
     machine: Machine,
     arms: [Block; 2],
     sides: [Value; 2],
-    depth: u32,
+    at: Depth,
 ) -> Option<Factored> {
+    let depth = at.levels();
     // Two sides that agree need no operation written at all, and the caller passes the value on.
     if agree(func, sides[0], sides[1]) {
         return None;
@@ -1379,18 +1443,28 @@ fn factored_at(
     if data[0].opcode != data[1].opcode || data[0].flags != data[1].flags {
         return None;
     }
-    if data[0].extra != data[1].extra || func[sides[0]].ty != func[sides[1]].ty {
+    if func[sides[0]].ty != func[sides[1]].ty {
+        return None;
+    }
+    if data[0].opcode == Opcode::Load {
+        if !loaded(func, data, at) {
+            return None;
+        }
+    } else if data[0].extra != data[1].extra {
         return None;
     }
     let operands = [func[data[0].args].to_vec(), func[data[1].args].to_vec()];
     if operands[0].len() != operands[1].len() {
         return None;
     }
+    // Under a load, the address of a field at one of two offsets from one base. The select goes on
+    // the offsets, which are two constants, and the one address is worked out from it.
+    let offset = depth > 0 && data[0].opcode == Opcode::PtrAdd && operands[0][0] == operands[1][0];
     // Below the first level only an operation of one operand, which is a conversion or something
     // like it, and what gcc's loop takes too. One of two operands trades a select of the two
     // answers for a select of two operands and the operation, and when those operands are what
     // unrolling makes into constants the select of the answers was a select of two constants.
-    if depth > 0 && operands[0].len() != 1 {
+    if depth > 0 && operands[0].len() != 1 && !offset {
         return None;
     }
     // A conversion of a constant in each arm is two constants once it folds, and a select of two
@@ -1414,7 +1488,8 @@ fn factored_at(
             // choose at is asked about only where the chain stops.
             let deeper = depth + 1 < rucc_cost::param!(heuristics::PHIOPT_FACTOR_DEPTH);
             let next = [one, two];
-            below = deeper.then(|| factored_at(func, machine, arms, next, depth + 1)).flatten();
+            let under = Depth::Below(depth + 1);
+            below = deeper.then(|| factored_at(func, machine, arms, next, under)).flatten();
             if below.is_none() && !machine.selects(func[one].ty) {
                 return None;
             }
@@ -1425,6 +1500,25 @@ fn factored_at(
     let ty = func[sides[0]].ty;
     let below = below.map(Box::new);
     Some(Factored { insts, operands: operands[0].clone(), differ, below, data: data[0], ty })
+}
+
+/// Whether two loads, one in each arm, can be one load below the branch.
+///
+/// Both arms load, so one load runs on each path before this and one load runs on each path after
+/// it, of the same address the arm would have read. Nothing is read that was not read already, and
+/// nothing is read twice. An arm with a load and nothing with an effect in front of it reads the
+/// memory the head left, so the load reads the same bytes in the head.
+///
+/// A load is factored only at the top, where the join takes it, and only when no store moves too,
+/// since the one store is written below what the arms did and a load is read before it there. The
+/// access has to be neither `volatile` nor atomic, and the two loads have to say the same about it,
+/// since the one load carries one alignment, one aliasing node and one `restrict` scope.
+fn loaded(func: &Func, data: [InstData; 2], at: Depth) -> bool {
+    if at != Depth::Loads || !plain(func, data[0]) || !plain(func, data[1]) {
+        return false;
+    }
+    let (Extra::Mem(one), Extra::Mem(two)) = (data[0].extra, data[1].extra) else { return false };
+    func[one] == func[two]
 }
 
 /// The instruction in this arm that works out this value, if the arm is where it comes from and the
@@ -1631,6 +1725,9 @@ fn lower_condition(func: &mut Func, head: Block, cond: Value) {
 fn write_factored(build: &mut Builder<'_>, cond: Value, one: &Factored) -> Value {
     let mut operands = one.operands.clone();
     if let Some((at, sides)) = one.differ {
+        if let Some(address) = write_offsets(build, cond, one, at, sides) {
+            return address;
+        }
         operands[at] = match &one.below {
             Some(below) => write_factored(build, cond, below),
             None => build.select(cond, sides[0], sides[1]),
@@ -1638,6 +1735,46 @@ fn write_factored(build: &mut Builder<'_>, cond: Value, one: &Factored) -> Value
     }
     let list = build.func().push_values(&operands);
     build.value(InstData { args: list, ..one.data }, one.ty)
+}
+
+/// Writes the address of a field at one of two constant offsets from one base, when it is that.
+///
+/// The address is the base moved by the smaller offset, then moved again by a select between the
+/// distance to the larger offset and zero. The LFS superblock has its 32 bit fields and its 64 bit
+/// fields the same distance apart, so the accessors of different fields all select between the
+/// same two numbers, `number` makes those selects one value, and the machine keeps one register
+/// for it and puts the smaller offset in the displacement of each load. A select between the two
+/// offsets themselves is a different select for each field.
+fn write_offsets(
+    build: &mut Builder<'_>,
+    cond: Value,
+    one: &Factored,
+    at: usize,
+    sides: [Value; 2],
+) -> Option<Value> {
+    if one.data.opcode != Opcode::PtrAdd || at != 1 || one.below.is_some() {
+        return None;
+    }
+    let (Some((first, ty)), Some((second, other))) =
+        (constant(build.func(), sides[0]), constant(build.func(), sides[1]))
+    else {
+        return None;
+    };
+    if ty != other {
+        return None;
+    }
+    let offsets = [first.signed(ty), second.signed(ty)];
+    if offsets.iter().any(|&offset| offset < 0) {
+        return None;
+    }
+    let low = offsets[0].min(offsets[1]);
+    let start = build.iconst(ty, low);
+    let list = build.func().push_values(&[one.operands[0], start]);
+    let near = build.value(InstData { args: list, ..one.data }, one.ty);
+    let apart = offsets.map(|offset| build.iconst(ty, offset - low));
+    let pick = build.select(cond, apart[0], apart[1]);
+    let list = build.func().push_values(&[near, pick]);
+    Some(build.value(InstData { args: list, ..one.data }, one.ty))
 }
 
 #[cfg(test)]
@@ -2639,6 +2776,56 @@ mod tests {
     #[test]
     fn a_volatile_load_in_an_arm_keeps_its_branch() {
         let mut func = arm_reads(Flags::VOLATILE);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::ARM_HAS_EFFECTS), 1);
+        assert_eq!(goes_to(&func, 0), vec![1, 2]);
+    }
+
+    /// `c ? p->b64 : p->b32`, the field of one of two layouts, read at one of two offsets from `p`.
+    fn two_offsets(info: [MemInfo; 2]) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR, Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let base = func.append_param(head, Type::PTR);
+        let flag = func.append_param(head, Type::int(32));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Ne, flag, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (index, (arm, offset)) in arms.iter().zip([192, 152]).enumerate() {
+            let mut build = Builder::new(&mut func, *arm);
+            let offset = build.iconst(Type::int(32), offset);
+            let address = build.binary(Opcode::PtrAdd, base, offset, Flags::NONE);
+            let it = build.load(Type::int(32), address, info[index], Flags::NONE);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    #[test]
+    fn a_field_at_one_of_two_offsets_is_one_load_at_a_selected_offset() {
+        let mut func = two_offsets([plain(), plain()]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::LOAD_FACTORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let ops = opcodes(&func, 0);
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Load).count(), 1, "{ops:?}");
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::PtrAdd).count(), 2, "{ops:?}");
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Select).count(), 1, "{ops:?}");
+    }
+
+    /// The one load carries one alignment, so two loads that do not agree about it stay two.
+    #[test]
+    fn two_loads_that_say_different_things_about_the_access_keep_their_branch() {
+        let mut func = two_offsets([plain(), MemInfo { align: 2, ..plain() }]);
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
         assert_eq!(stats.count(Kind::Missed, super::ARM_HAS_EFFECTS), 1);
