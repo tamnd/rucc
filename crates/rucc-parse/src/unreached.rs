@@ -27,9 +27,8 @@ const KEPT: [&str; 4] = ["used", "constructor", "destructor", "retain"];
 
 /// The attributes whose argument is a string naming a symbol, in both of gcc's spellings, since
 /// the tokens are read before an attribute's name has its underscores taken off.
-const NAMING: [&str; 8] = [
-    "alias", "__alias__", "ifunc", "__ifunc__", "weakref", "__weakref__", "symver", "__symver__",
-];
+const NAMING: [&str; 8] =
+    ["alias", "__alias__", "ifunc", "__ifunc__", "weakref", "__weakref__", "symver", "__symver__"];
 
 /// For each external declaration, whether it is the definition of a `static inline` function in
 /// a header that nothing in the unit reaches.
@@ -96,7 +95,9 @@ pub fn unreached(
             let tok = toks[at];
             match tok.kind {
                 TokenKind::Ident => reach(Symbol::from_raw(tok.value), unreached, work),
-                TokenKind::Str if at >= 2 && toks[at - 1].kind == TokenKind::Punct(Punct::LParen) => {
+                TokenKind::Str
+                    if at >= 2 && toks[at - 1].kind == TokenKind::Punct(Punct::LParen) =>
+                {
                     let before = toks[at - 2];
                     let names = before.kind == TokenKind::Ident
                         && naming.contains(&Symbol::from_raw(before.value));

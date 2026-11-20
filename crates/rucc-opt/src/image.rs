@@ -117,6 +117,7 @@ use std::collections::hash_map::Entry;
 
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
+use rucc_cost::heuristics;
 use rucc_ir::{
     AttrSet, Block, Datum, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Module,
     Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
@@ -145,6 +146,14 @@ const LONGEST: u64 = 512;
 
 /// The most stores a copy is spelled out as, not counting the fill that clears it first.
 const MOST: usize = 24;
+
+/// About how many bytes of code one store of a constant takes, for the rule of
+/// [`Images::for_size`]. It is the same estimate that `rucc_lower` uses when it puts the constant
+/// initializer of a local in an image.
+const STORE_BYTES: u64 = 8;
+
+/// About how many bytes of code a copy out of a read only object takes, for the same rule.
+const COPY_BYTES: u64 = 16;
 
 /// How many zero bytes an object has to hold before they are cleared with one fill of the whole
 /// destination rather than written by stores of their own. Sixteen is two eight byte stores,
@@ -373,7 +382,9 @@ fn spelled(func: &Func, inst: Inst, images: &Images) -> Option<Vec<Write>> {
     let offset = u64::try_from(offset).ok()?;
     let writes = images.spell(name, offset, size)?;
     let stores = writes.iter().filter(|write| !matches!(write, Write::Zero(_))).count();
-    if images.small && size.div_ceil(images.pointer) > 3 && size + 16 <= 8 * stores as u64 {
+    let words = size.div_ceil(images.pointer);
+    let moves = u64::from(rucc_cost::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE));
+    if images.small && words > moves && size + COPY_BYTES <= STORE_BYTES * stores as u64 {
         return None;
     }
     (stores <= MOST).then_some(writes)
