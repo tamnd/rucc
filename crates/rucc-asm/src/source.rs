@@ -7498,6 +7498,13 @@ fn riscv_named(name: &str) -> Option<Reference> {
         _ => None,
     }
 }
+/// The bytes of a line that [`Reader::strip`] kept, as text. A cut that `strip` makes is always
+/// at an ASCII byte, so the bytes are UTF-8 when the line was. A `'` in front of the first byte of
+/// a character that is more than one byte long takes only part of it, so the check stays.
+fn utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11712,9 +11719,3 @@ nop
     }
 }
 
-/// The bytes of a line that [`Reader::strip`] kept, as text. A cut that `strip` makes is always
-/// at an ASCII byte, so the bytes are UTF-8 when the line was. A `'` in front of the first byte of
-/// a character that is more than one byte long takes only part of it, so the check stays.
-fn utf8(bytes: Vec<u8>) -> String {
-    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
