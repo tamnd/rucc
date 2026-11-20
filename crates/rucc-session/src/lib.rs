@@ -3095,6 +3095,10 @@ pub struct Options {
     pub ms_dll_runtime: bool,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
+    /// Whether the standard include directories are searched, which is `-nostdinc` turned
+    /// around. gcc reads the C library's `<stdc-predef.h>` only when they are and the unit is
+    /// hosted, so it decides the macros that header defines.
+    pub std_inc: bool,
     /// Whether a call to a C library function written under its own plain name may be taken to
     /// mean that function, which is `-fno-builtin` turned around.
     ///
@@ -3428,6 +3432,7 @@ impl Options {
             msc: MscVersion::default(),
             ms_dll_runtime: false,
             hosted: true,
+            std_inc: true,
             builtins: true,
             no_builtin: Vec::new(),
             glibc_minor: None,
