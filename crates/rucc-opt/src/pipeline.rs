@@ -686,6 +686,13 @@ const O3: &[&str] = &[
 /// one flag that tells a 32 bit from a 64 bit super block stays in a register across the function,
 /// and the pointer to the super block goes to the stack.
 ///
+/// `pinned` runs after the first `sccp`. `sccp` makes a block parameter a constant when each way
+/// in passes the same constant, but it does not read the tests above an edge. In the read loop of
+/// each libsa file system, `rc` goes back to the top of the loop only when it is zero, so it is
+/// always zero there. `pinned` asks the value ranges, which read those tests, and the loop carries
+/// no value. Each of the six NetBSD `bootxx` images got smaller, from 12 bytes for `ext2fs` and
+/// `ustarfs` to 32 bytes for `ffsv2`.
+///
 /// `step-sink` runs last, when nothing after it will move an instruction in a block again. It puts
 /// `p + 1` after the last read of `p`, so the two share a register, and the copy loop of `boot2`
 /// lost three copies on its back edge.
@@ -698,6 +705,7 @@ const OS: &[&str] = &[
     "fold",
     "simplify",
     "sccp",
+    "pinned",
     "narrow",
     "simplify",
     "tail-recursion",
@@ -749,8 +757,8 @@ const OS: &[&str] = &[
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
 ///
-/// `thread` and `rangetest` run again after `phiopt`, `number` and `redundant-load` after
-/// `load-forward`, and `step-sink` runs last, as at `-Os`.
+/// `pinned` runs after the first `sccp`, `thread` and `rangetest` run again after `phiopt`,
+/// `number` and `redundant-load` after `load-forward`, and `step-sink` runs last, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -760,6 +768,7 @@ const OZ: &[&str] = &[
     "fold",
     "simplify",
     "sccp",
+    "pinned",
     "narrow",
     "simplify",
     "tail-recursion",
