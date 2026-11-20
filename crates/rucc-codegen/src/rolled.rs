@@ -47,6 +47,16 @@
 //! fs/fs-writeback.o where gcc has none. `sethostname` checks `len <= 64` before it copies and
 //! clears, and an SMBus block is no more than 32 bytes.
 //!
+//! A function built for size is written the same way, since gcc at `-Os` writes the string
+//! instruction for every such copy and fill as well, which is shorter than the call. A size that is
+//! not a whole number of words is one `rep movsb` or `rep stosb` of all of it there, as gcc's is,
+//! so that no tail of moves follows. tinyconfig builds the kernel at `-Os`, and with
+//! `-ftrivial-auto-var-init=zero` every local structure is cleared on entry. In mm/, kernel/,
+//! lib/ and fs/ of that kernel rucc made 788 calls to `memset` and 178 to `memcpy`, where gcc 13
+//! makes none, and with this 59 and 64 are left, nearly all of a size the program works out. On a
+//! machine without fast short strings the kernel's `memset` is a loop behind a return thunk, and
+//! the rucc kernel ran 6% slower than gcc's on an AMD EPYC 7763, most of it in those directories.
+//!
 //! The range only decides whether to write the instruction. The instruction moves exactly as many
 //! bytes as it is given, so a range that said too little would cost speed and not the answer.
 //!
@@ -58,8 +68,8 @@
 //!
 //! A fill whose byte the program works out, a call that unwinds to a landing pad, a call in a
 //! function that said the names are not the library's, a size the target writes no string for,
-//! and every function built for size or allowed the vector registers. Those last ones are left to
-//! the threshold `cargo xtask stringop` measured against the C library (tamnd/rucc#2971).
+//! and every function allowed the vector registers. Those last ones are left to the threshold
+//! `cargo xtask stringop` measured against the C library (tamnd/rucc#2971).
 //!
 //! # Where it runs
 //!
@@ -119,14 +129,15 @@ pub fn loops(
     (word, unaligned, most): (u32, bool, u32),
     goal: Goal,
 ) {
-    if most == 0 || goal != Goal::Speed || !unaligned || word != 8 {
+    if most == 0 || !unaligned || word != 8 {
         return;
     }
     let moves = (expand::copies(goal), expand::fills(goal));
+    let small = goal == Goal::Size;
     let mut found = Vec::new();
     let mut unsure = Vec::new();
     for inst in func.blocks().flat_map(|block| func.insts(block)) {
-        match wanted(func, names, inst, moves, most) {
+        match wanted(func, names, inst, (moves, small), most) {
             Some((roll, true)) => found.push((inst, roll)),
             Some((roll, false)) => unsure.push((inst, roll)),
             None => {}
@@ -153,11 +164,14 @@ pub fn loops(
 
 /// The copy or fill an instruction is, where it is one this pass writes as a string instruction,
 /// and whether its size is known to be small enough. Where it is not, the branches are asked.
+///
+/// `small` is whether the function is built for size, where a size that is not a whole number of
+/// words is moved a byte at a time rather than with a tail.
 fn wanted(
     func: &Func,
     names: &Interner,
     inst: Inst,
-    moves: (usize, usize),
+    (moves, small): ((usize, usize), bool),
     most: u32,
 ) -> Option<(Roll, bool)> {
     let data = &func[inst];
@@ -222,7 +236,8 @@ fn wanted(
         return None;
     }
     let flags = flags.intersection(Flags::legal_on(Opcode::Store));
-    let roll = Roll { opcode, to, with, byte, info, flags, answer, length: None, bytes: false };
+    let bytes = small && info.size % WORD != 0;
+    let roll = Roll { opcode, to, with, byte, info, flags, answer, length: None, bytes };
     Some((roll, true))
 }
 
@@ -333,8 +348,9 @@ fn words(func: &Func, length: Value) -> Option<Value> {
 fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
     let span = func.span(inst);
     let index = Type::int(64);
-    let whole = roll.info.size / WORD * WORD;
+    let whole = if roll.bytes { roll.info.size } else { roll.info.size / WORD * WORD };
     let rest = roll.info.size - whole;
+    let unit = if roll.bytes { 1 } else { WORD };
     let copy = roll.opcode == Opcode::Memcpy;
     let template = match (copy, roll.bytes) {
         (true, false) => "rep movsq",
@@ -370,7 +386,7 @@ fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
                 wide
             }
         }
-        None => expand::ahead_const(func, inst, Imm::int(i128::from(whole / WORD), index), index),
+        None => expand::ahead_const(func, inst, Imm::int(i128::from(whole / unit), index), index),
     };
     let (args, results) = if copy {
         (vec![roll.to, roll.with, count], vec![Type::PTR, Type::PTR, index])
