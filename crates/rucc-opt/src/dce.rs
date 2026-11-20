@@ -235,6 +235,17 @@ fn does_nothing(func: &Func, inst: Inst, facts: &Facts) -> bool {
         .is_some_and(|callee| facts.purity_of(callee).can_be_deleted_when_unused())
 }
 
+/// Whether `func` has a call that `now` lets go and `before` did not.
+///
+/// The late purity sweep in [`crate::pipeline`] asks this of every body before it runs the pass
+/// again, so that only a body with a call the second answer settles is walked twice.
+pub(crate) fn newly_dead(func: &Func, before: &Facts, now: &Facts) -> bool {
+    func.blocks().any(|block| {
+        func.insts(block)
+            .any(|inst| does_nothing(func, inst, now) && !does_nothing(func, inst, before))
+    })
+}
+
 /// Whether not doing this instruction is something nothing can tell.
 ///
 /// The [`Verdict::Effects`] half of the verdict below, asked on its own because

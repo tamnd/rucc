@@ -1848,6 +1848,50 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             None => report.spent.push((ipvrp::NAME, fuel.spent())),
         }
     }
+    // What each function does, asked again now that every body has been through the passes. The
+    // first answer read each body as the front end wrote it, where gcc's local pure-const pass
+    // reads it after its early passes. `fsnotify_access` in a kernel built without fsnotify is a
+    // chain of stubs that reads the inode and then a counter behind a pointer that is always
+    // null, so it was opaque then and is a lone `ret` now. At `-Os`, where every call is weighed
+    // as cold, the inliner had left `vfs_read` and `vfs_write` calling it on every read and
+    // write. A call whose callee only now comes out as doing nothing goes, and the blocks it
+    // leaves empty with it.
+    if wants_purity {
+        let graph = CallGraph::of(module, opts.interposition);
+        let mut facts = purity::Facts::of_module(module, names);
+        purity::infer(module, &graph, &mut facts);
+        let ids: Vec<FuncId> = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                !func.is_declaration()
+                    && !func.attrs.set.contains(AttrSet::OPTNONE)
+                    && dce::newly_dead(func, &purity, &facts)
+            })
+            .collect();
+        let facts = Arc::new(facts);
+        for id in ids {
+            let mut an = Analyses::new(machine).calling(Arc::clone(&facts));
+            for pass in [dce::NAME, "simplify-cfg"].into_iter().filter_map(pass::find) {
+                let tidied = pass.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+                report.remarks.push(Remark {
+                    pass: pass.name(),
+                    func: module[id].name,
+                    stats: tidied,
+                });
+            }
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the late purity sweep left invalid IR in {func}, {error}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
     // Last, once every pass that takes a call away has run. See [`inline::drop_unreferenced`].
     // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
     if opts.level != OptLevel::O0 {
