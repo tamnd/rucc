@@ -1745,6 +1745,12 @@ fn write_factored(build: &mut Builder<'_>, cond: Value, one: &Factored) -> Value
 /// same two numbers, `number` makes those selects one value, and the machine keeps one register
 /// for it and puts the smaller offset in the displacement of each load. A select between the two
 /// offsets themselves is a different select for each field.
+///
+/// When the condition is a test of one bit, as `fs->lfs_is64` is, the distance is that bit times
+/// the distance, and no select is written. A select between a constant and zero is three
+/// instructions and two registers on i386, the move of the constant, the clear and the conditional
+/// move, and the test of the bit is one more. The multiply is one instruction after the bit is
+/// isolated, and in NetBSD's `bootxx` the bit is isolated already for each test of the flag.
 fn write_offsets(
     build: &mut Builder<'_>,
     cond: Value,
@@ -1771,10 +1777,55 @@ fn write_offsets(
     let start = build.iconst(ty, low);
     let list = build.func().push_values(&[one.operands[0], start]);
     let near = build.value(InstData { args: list, ..one.data }, one.ty);
-    let apart = offsets.map(|offset| build.iconst(ty, offset - low));
-    let pick = build.select(cond, apart[0], apart[1]);
+    let pick = match bit(build.func(), cond, ty) {
+        Some((value, side)) if offsets[1 - side] == low => {
+            let wide = if build.func()[value].ty == ty {
+                value
+            } else {
+                build.unary(Opcode::ZExt, value, ty)
+            };
+            let apart = build.iconst(ty, offsets[side] - low);
+            build.binary(Opcode::Mul, wide, apart, Flags::NONE)
+        }
+        _ => {
+            let apart = offsets.map(|offset| build.iconst(ty, offset - low));
+            build.select(cond, apart[0], apart[1])
+        }
+    };
     let list = build.func().push_values(&[near, pick]);
     Some(build.value(InstData { args: list, ..one.data }, one.ty))
+}
+
+/// The value of one bit that the condition tests, and the arm the branch takes when the bit is one.
+///
+/// The condition is `x != 0` or `x == 0` and `x` is `y & 1`, so `x` is 0 or 1. `x` is an integer no
+/// wider than the offsets, and the caller widens it when it is narrower. When the test is `!=`, a
+/// one takes the first arm, and when it is `==`, a one takes the second arm.
+fn bit(func: &Func, cond: Value, ty: Type) -> Option<(Value, usize)> {
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    if func[inst].opcode != Opcode::ICmp {
+        return None;
+    }
+    let side = match func[inst].extra {
+        Extra::IntPred(IntPred::Ne) => 0,
+        Extra::IntPred(IntPred::Eq) => 1,
+        _ => return None,
+    };
+    let &[tested, zero] = &func[func[inst].args] else { return None };
+    let width = func[tested].ty;
+    if !width.is_int() || width.bits() > ty.bits() {
+        return None;
+    }
+    if constant(func, zero).is_none_or(|(imm, _)| imm.signed(width) != 0) {
+        return None;
+    }
+    let Def::Result { inst: and, .. } = func[tested].def else { return None };
+    if func[and].opcode != Opcode::And {
+        return None;
+    }
+    let &[left, right] = &func[func[and].args] else { return None };
+    let one = |value| constant(func, value).is_some_and(|(imm, _)| imm.signed(width) == 1);
+    (one(left) || one(right)).then_some((tested, side))
 }
 
 #[cfg(test)]
@@ -2783,7 +2834,8 @@ mod tests {
     }
 
     /// `c ? p->b64 : p->b32`, the field of one of two layouts, read at one of two offsets from `p`.
-    fn two_offsets(info: [MemInfo; 2]) -> Func {
+    /// When `bit` is set, the test is of `(char)c & 1`, as a test of a bit field of one bit is.
+    fn two_offsets(info: [MemInfo; 2], bit: bool) -> Func {
         let mut names = Interner::new();
         let signature = Signature::new().with_params(&[Type::PTR, Type::int(32)]);
         let mut func = Func::new(names.intern("f"), signature);
@@ -2795,7 +2847,14 @@ mod tests {
         let param = func.append_param(join, Type::int(32));
 
         let mut build = Builder::new(&mut func, head);
-        let zero = build.iconst(Type::int(32), 0);
+        let (flag, zero) = if bit {
+            let byte = build.unary(Opcode::Trunc, flag, Type::int(8));
+            let one = build.iconst(Type::int(8), 1);
+            let zero = build.iconst(Type::int(8), 0);
+            (build.binary(Opcode::And, byte, one, Flags::NONE), zero)
+        } else {
+            (flag, build.iconst(Type::int(32), 0))
+        };
         let test = build.icmp(IntPred::Ne, flag, zero);
         build.br_if(test, arms[0], &[], arms[1], &[]);
         for (index, (arm, offset)) in arms.iter().zip([192, 152]).enumerate() {
@@ -2812,7 +2871,7 @@ mod tests {
 
     #[test]
     fn a_field_at_one_of_two_offsets_is_one_load_at_a_selected_offset() {
-        let mut func = two_offsets([plain(), plain()]);
+        let mut func = two_offsets([plain(), plain()], false);
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::LOAD_FACTORED), 1);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
@@ -2822,10 +2881,23 @@ mod tests {
         assert_eq!(ops.iter().filter(|&&op| op == Opcode::Select).count(), 1, "{ops:?}");
     }
 
+    /// A test of one bit makes the distance between the two offsets the bit times the distance.
+    #[test]
+    fn a_field_at_an_offset_chosen_by_one_bit_is_moved_by_the_bit_times_the_distance() {
+        let mut func = two_offsets([plain(), plain()], true);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::LOAD_FACTORED), 1);
+        let ops = opcodes(&func, 0);
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Load).count(), 1, "{ops:?}");
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::ZExt).count(), 1, "{ops:?}");
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Mul).count(), 1, "{ops:?}");
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Select).count(), 0, "{ops:?}");
+    }
+
     /// The one load carries one alignment, so two loads that do not agree about it stay two.
     #[test]
     fn two_loads_that_say_different_things_about_the_access_keep_their_branch() {
-        let mut func = two_offsets([plain(), MemInfo { align: 2, ..plain() }]);
+        let mut func = two_offsets([plain(), MemInfo { align: 2, ..plain() }], false);
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
         assert_eq!(stats.count(Kind::Missed, super::ARM_HAS_EFFECTS), 1);
