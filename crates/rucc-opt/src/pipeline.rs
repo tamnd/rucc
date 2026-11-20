@@ -686,6 +686,12 @@ const O3: &[&str] = &[
 /// one flag that tells a 32 bit from a 64 bit super block stays in a register across the function,
 /// and the pointer to the super block goes to the stack.
 ///
+/// `redundant-load` runs once more after the second `number`. `phiopt` makes the two arms of
+/// `fs->lfs_is64 ? fs->u_64.x : fs->u_32.x` into one load at a selected offset, and `number` then
+/// sees that each test of the flag is the same value. Only after that do the loads of the flag
+/// become one, so the first `redundant-load` is too early for them. In NetBSD's `bootxx` the two
+/// changes together made `lfsv1` 180 bytes smaller and `lfsv2` 144 bytes smaller.
+///
 /// `pinned` runs after the first `sccp`. `sccp` makes a block parameter a constant when each way
 /// in passes the same constant, but it does not read the tests above an edge. In the read loop of
 /// each libsa file system, `rc` goes back to the top of the loop only when it is zero, so it is
@@ -735,6 +741,7 @@ const OS: &[&str] = &[
     "fold",
     "arm-hoist",
     "number",
+    "redundant-load",
     "simplify",
     "reassoc",
     "simplify-cfg",
@@ -758,7 +765,8 @@ const OS: &[&str] = &[
 /// speed reason.
 ///
 /// `pinned` runs after the first `sccp`, `thread` and `rangetest` run again after `phiopt`,
-/// `number` and `redundant-load` after `load-forward`, and `step-sink` runs last, as at `-Os`.
+/// `number` and `redundant-load` after `load-forward` and again after `arm-hoist`, and `step-sink`
+/// runs last, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -795,6 +803,7 @@ const OZ: &[&str] = &[
     "fold",
     "arm-hoist",
     "number",
+    "redundant-load",
     "simplify",
     "simplify-cfg",
     "discharge",
