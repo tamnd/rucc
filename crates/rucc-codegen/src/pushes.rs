@@ -52,24 +52,20 @@ pub fn arguments(
     conv: &CallRegs,
     names: &mut Interner,
 ) -> Pushed {
-    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
-    let ops = Ops {
-        store: opcode("mov_mr_32"),
-        store_imm: opcode("mov_mi_32"),
-        push: opcode(insts.push),
-        push_imm: opcode(PUSH_IMM),
-        add: opcode(insts.add),
-        sub: opcode(insts.sub),
-    };
-    let stack = conv.stack_pointer;
-    let sp = mir::Reg::physical(stack);
+    let ops = Ops::of(insts, names);
+    let sp = mir::Reg::physical(conv.stack_pointer);
     let mut pushed = Pushed { calls: 0, back: Vec::new() };
     for &(call, area) in calls {
         if area == 0 || area % 4 != 0 {
             continue;
         }
         let pad = (conv.stack_align - area % conv.stack_align) % conv.stack_align;
-        let Some(plan) = plan(func, call, area, pad, sp, &ops, machine, names) else { continue };
+        let Some((plan, change)) = plan(func, call, area, pad, sp, &ops, machine, names) else {
+            continue;
+        };
+        if change >= 0 {
+            continue;
+        }
         let at = cfa(func, call, conv);
         pushed.back.extend(rewrite(func, call, area, pad, &plan, &ops, conv, at));
         pushed.calls += 1;
@@ -107,10 +103,25 @@ pub fn unframed(
     conv: &CallRegs,
     names: &mut Interner,
 ) -> bool {
-    if size == 0 || size != outgoing.next_multiple_of(conv.stack_align) {
-        return false;
+    size == outgoing.next_multiple_of(conv.stack_align)
+        && unframe(func, size, pushed, insts, machine, conv, names).is_some()
+}
+
+/// Takes out the frame of `size` bytes as [`unframed`] does, when nothing reads it, and gives back
+/// how many instructions that took out: the `subl` of the prologue and the `addl` of each epilogue.
+fn unframe(
+    func: &mut mir::Func,
+    size: u32,
+    pushed: &Pushed,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    conv: &CallRegs,
+    names: &mut Interner,
+) -> Option<usize> {
+    if size == 0 {
+        return None;
     }
-    let Ok(bytes) = i32::try_from(size) else { return false };
+    let Ok(bytes) = i32::try_from(size) else { return None };
     let sub = mir::Opcode::new(names.join(insts.prefix, insts.sub));
     let add = mir::Opcode::new(names.join(insts.prefix, insts.add));
     // What moves the stack pointer by a word or takes the return address off it, which leaves
@@ -125,7 +136,7 @@ pub fn unframed(
         moving.push(mir::Opcode::new(names.join(insts.prefix, ret_pop)));
     }
     let sp = mir::Reg::physical(conv.stack_pointer);
-    let Some(entry) = func.entry() else { return false };
+    let entry = func.entry()?;
     let mut prologue = None;
     let mut epilogues = Vec::new();
     let mut based = Vec::new();
@@ -141,12 +152,12 @@ pub fn unframed(
                             .is_some_and(|op| op.reg == sp)
                     };
                     if names_sp(amode.index) {
-                        return false;
+                        return None;
                     }
                     if names_sp(amode.base) {
                         // A word of the area still read or written.
                         if amode.disp < bytes {
-                            return false;
+                            return None;
                         }
                         if !based.contains(&mem) {
                             based.push(mem);
@@ -177,14 +188,14 @@ pub fn unframed(
                 } else if data.opcode == add && imm == Some(i64::from(size)) {
                     epilogues.push(inst);
                 } else {
-                    return false;
+                    return None;
                 }
             } else if reads {
-                return false;
+                return None;
             }
         }
     }
-    let Some(prologue) = prologue else { return false };
+    let prologue = prologue?;
     // Each row of the unwind table counts the frame from the stack pointer here, so a row inside
     // the frame is that many bytes nearer to it and the rows of the two instructions go with them.
     if !func.cfi.is_empty() {
@@ -195,7 +206,7 @@ pub fn unframed(
         let counted = func.cfi.iter().all(|(_, op)| {
             !matches!(op, mir::CfiOp::DefCfa { .. } | mir::CfiOp::DefCfaRegister(_))
         });
-        let Some(frame) = frame.filter(|_| counted) else { return false };
+        let frame = frame.filter(|_| counted)?;
         let remembers = func.cfi_after(prologue).any(|op| op == mir::CfiOp::RememberState);
         func.cfi.retain(|(inst, _)| *inst != prologue && !epilogues.contains(inst));
         // The body's rules, which each epilogue that is not the last one puts back after its
@@ -218,6 +229,7 @@ pub fn unframed(
             }
         }
     }
+    let gone = 1 + epilogues.len();
     func.remove_inst(prologue);
     for epilogue in epilogues {
         func.remove_inst(epilogue);
@@ -225,6 +237,86 @@ pub fn unframed(
     for mem in based {
         func[mem].disp -= bytes;
     }
+    Some(gone)
+}
+
+/// Pushes the arguments of each call and takes the frame out, when the frame is the outgoing area
+/// and a pad smaller than the call alignment, and says whether it did.
+///
+/// [`unframed`] takes out a frame that is the area rounded up to the call alignment. A frame can
+/// also be smaller than that, because the return address and the saved registers are on the stack
+/// too. `ob` in NetBSD's `bootxx` saves no register, and its frame is 12 bytes for an 8-byte area,
+/// so the 4 bytes of the return address and the 12 of the frame align the stack pointer at the
+/// call. gcc writes no frame there and pushes the two arguments under a pad of 4 bytes.
+///
+/// Without the frame, the pad of each call is what puts the stack pointer where the frame put it:
+/// the frame less the area of the call, less whole steps of the alignment. A call that passes
+/// nothing on the stack would find the stack pointer off the alignment, so each call has to be one
+/// of `calls`, and each has to be pushed. That costs bytes where [`arguments`] keeps the stores, so
+/// the bytes of the pushes, less the `subl` of the prologue and the `addl` of each epilogue, are
+/// set against what [`arguments`] saves with the frame kept. The function is left alone unless
+/// this is fewer bytes, and when [`unframed`] would find the frame still read.
+#[allow(clippy::too_many_arguments)]
+pub fn frameless(
+    func: &mut mir::Func,
+    size: u32,
+    outgoing: u32,
+    calls: &[(mir::Inst, u32)],
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    conv: &CallRegs,
+    names: &mut Interner,
+) -> bool {
+    let align = conv.stack_align;
+    if outgoing == 0 || size < outgoing || size - outgoing >= align {
+        return false;
+    }
+    let listed = |inst: mir::Inst| calls.iter().any(|&(call, area)| call == inst && area > 0);
+    let unlisted = func.blocks().any(|block| {
+        func.insts(block)
+            .any(|inst| machine.calls(names.resolve(func[inst].opcode.name())) && !listed(inst))
+    });
+    if unlisted {
+        return false;
+    }
+    let ops = Ops::of(insts, names);
+    let sp = mir::Reg::physical(conv.stack_pointer);
+    let mut trial = func.clone();
+    let mut pushed = Pushed { calls: 0, back: Vec::new() };
+    // The bytes the pushes add here, and the bytes the pushes that `arguments` chooses take away.
+    let mut change = 0;
+    let mut kept = 0;
+    for &(call, area) in calls {
+        if area == 0 {
+            continue;
+        }
+        if area % 4 != 0 {
+            return false;
+        }
+        let pad = (size - area) % align;
+        let Some((planned, added)) = plan(&trial, call, area, pad, sp, &ops, machine, names) else {
+            return false;
+        };
+        let aligned = (align - area % align) % align;
+        if let Some((_, framed)) = plan(func, call, area, aligned, sp, &ops, machine, names) {
+            kept += framed.min(0);
+        }
+        change += added;
+        let at = cfa(&trial, call, conv);
+        pushed.back.extend(rewrite(&mut trial, call, area, pad, &planned, &ops, conv, at));
+        pushed.calls += 1;
+    }
+    if pushed.calls == 0 {
+        return false;
+    }
+    let Some(gone) = unframe(&mut trial, size, &pushed, insts, machine, conv, names) else {
+        return false;
+    };
+    let Ok(saved) = isize::try_from(gone * arith_bytes(size)) else { return false };
+    if change - saved >= kept {
+        return false;
+    }
+    *func = trial;
     true
 }
 
@@ -249,6 +341,21 @@ struct Ops {
     sub: mir::Opcode,
 }
 
+impl Ops {
+    /// The opcodes of that frame.
+    fn of(insts: &FrameInsts, names: &mut Interner) -> Self {
+        let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
+        Self {
+            store: opcode("mov_mr_32"),
+            store_imm: opcode("mov_mi_32"),
+            push: opcode(insts.push),
+            push_imm: opcode(PUSH_IMM),
+            add: opcode(insts.add),
+            sub: opcode(insts.sub),
+        }
+    }
+}
+
 /// What one call's arguments become.
 struct Plan {
     /// The store of each word of the area, from the bottom of it up.
@@ -263,7 +370,8 @@ struct Plan {
     fill: Pad,
 }
 
-/// The stores of that call's arguments, when they can be pushes and the pushes are fewer bytes.
+/// The stores of that call's arguments, when they can be pushes, and how many bytes the pushes
+/// add, which is less than zero when they are fewer bytes than the stores.
 ///
 /// `pad` is how many bytes go below the area so the stack pointer is aligned at the call.
 #[allow(clippy::too_many_arguments)]
@@ -276,7 +384,7 @@ fn plan(
     ops: &Ops,
     machine: &MachineInsts,
     names: &Interner,
-) -> Option<Plan> {
+) -> Option<(Plan, isize)> {
     let block = func.block_of(call)?;
     if !machine.calls(names.resolve(func[call].opcode.name())) {
         return None;
@@ -370,7 +478,8 @@ fn plan(
         + grown
         + if popped.is_some() { 0 } else { arith_bytes(area + pad) };
     let gone = if popped.is_some() { arith_bytes(area) } else { 0 };
-    (after < before + gone).then_some(Plan { stores, popped, anchors, moved, fill })
+    let change = isize::try_from(after).ok()? - isize::try_from(before + gone).ok()?;
+    Some((Plan { stores, popped, anchors, moved, fill }, change))
 }
 
 /// Where the push of each store goes, the new displacement of each address counted from the stack
@@ -706,7 +815,7 @@ mod tests {
     use rucc_target::CallRegs;
     use rucc_target::x86::{EAX, ECX, ESP, FRAME, GPR, MACHINE, REGS, SYSV};
 
-    use super::{arguments, unframed};
+    use super::{arguments, frameless, unframed};
 
     /// The opcode of that name on this target.
     fn op(names: &mut Interner, name: &str) -> Opcode {
@@ -1103,6 +1212,82 @@ mod tests {
         let (gone, lines, _) = framed(32, 12, 32, 16);
         assert!(!gone, "{lines:#?}");
         assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
+    }
+
+    /// `printf("%d", x)` in a frame of `size` bytes whose bottom 8 are the area, with the prologue's
+    /// `subl` in front, the epilogue's `addl` behind, a read of the word at `read` in front of the
+    /// stores, and a call of `abort` with nothing on the stack behind the first call when `abort` is
+    /// set. Made frameless with calls aligned to 16 bytes, one instruction to a line from the
+    /// opcode on.
+    fn unpadded(size: i64, read: i32, abort: bool) -> (bool, Vec<String>) {
+        let mut names = Interner::new();
+        let (mut func, call) = printf(&mut names, |_, _, _| {});
+        let block = func.blocks().next().expect("a block");
+        let first = func.insts(block).next().expect("a store");
+        let ret = func.insts(block).last().expect("the return");
+        let esp = Reg::physical(ESP);
+        let sub = op(&mut names, "sub_ri_32");
+        let frame = func.build_loose(sub).def(esp, GPR).uses(esp, GPR).imm(size).finish();
+        func.insert_before(first, frame);
+        let bytes = i32::try_from(size).expect("a size");
+        func.cfi.push((frame, CfiOp::DefCfaOffset(4 + bytes)));
+        let load = op(&mut names, "mov_rm_32");
+        let read =
+            func.build_loose(load).def(Reg::physical(EAX), GPR).mem(Mem::at(sp()).plus(read));
+        let read = read.finish();
+        func.insert_before(first, read);
+        if abort {
+            let callee = names.intern("abort");
+            let other = func.build_loose(op(&mut names, "call")).uses(esp, GPR).symbol(callee);
+            let other = other.finish();
+            func.insert_before(ret, other);
+        }
+        let add = op(&mut names, "add_ri_32");
+        let back = func.build_loose(add).def(esp, GPR).uses(esp, GPR).imm(size).finish();
+        func.insert_before(ret, back);
+        func.cfi.push((back, CfiOp::DefCfaOffset(4)));
+        let size = u32::try_from(size).expect("a size");
+        let conv = SYSV.aligned_to(16);
+        let calls = [(call, 8)];
+        let gone = frameless(&mut func, size, 8, &calls, &FRAME, &MACHINE, conv, &mut names);
+        let lines = rucc_mir::print_func(&func, &names, &REGS)
+            .lines()
+            .filter_map(|line| line.find("x64.").map(|at| line[at..].to_owned()))
+            .collect();
+        (gone, lines)
+    }
+
+    #[test]
+    fn a_frame_that_aligns_the_outgoing_area_with_the_return_address_goes() {
+        let (gone, lines) = unpadded(12, 12, false);
+        assert!(gone, "{lines:#?}");
+        let expected = [
+            "x64.mov_rm_32 [$esp]",
+            "x64.push_32",
+            "x64.push_32",
+            "x64.push_i_32",
+            "x64.call",
+            "x64.add_ri_32 $esp, 12",
+            "x64.ret",
+        ];
+        assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+        for (line, start) in lines.iter().zip(expected) {
+            assert!(line.starts_with(start), "{line} is not {start}: {lines:#?}");
+        }
+    }
+
+    #[test]
+    fn a_frame_with_a_call_that_passes_nothing_on_the_stack_stays() {
+        let (gone, lines) = unpadded(12, 12, true);
+        assert!(!gone, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.sub_ri_32"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_frame_with_a_word_read_above_the_area_stays() {
+        let (gone, lines) = unpadded(12, 8, false);
+        assert!(!gone, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.sub_ri_32"), "{lines:#?}");
     }
 
     #[test]

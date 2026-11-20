@@ -1977,19 +1977,37 @@ pub fn compile_recording(
     // a row for each push and one for the way back. A unit with no table of those rows gives such a
     // local no location at all. See [`crate::pushes`].
     if std::ptr::eq(machine.shapes, &x86::MACHINE) && flags.goal == Goal::Size {
-        let pushed = pushes::arguments(
-            &mut func,
-            &stack.passing,
-            machine.insts,
-            machine.shapes,
-            machine.conv,
-            names,
-        );
         // A frame that was the outgoing area and nothing else is not wanted once the arguments
         // are pushes. Not with a tail call, whose jump gives the frame back the way the epilogue
         // does, not with the rows `wrapped` writes later, and not with a frame pointer, whose
-        // epilogue gives the frame back from it. See [`pushes::unframed`].
-        if pushed.calls > 0 && tails.is_empty() && wrapped.is_none() && !frame.frame_pointer() {
+        // epilogue gives the frame back from it. See [`pushes::unframed`]. A frame smaller than
+        // the area rounded up to the alignment goes only when each call is pushed, which
+        // [`pushes::frameless`] weighs first.
+        let unframes = tails.is_empty() && wrapped.is_none() && !frame.frame_pointer();
+        let gone = unframes
+            && pushes::frameless(
+                &mut func,
+                frame.size(),
+                frame.outgoing(),
+                &stack.passing,
+                machine.insts,
+                machine.shapes,
+                machine.conv,
+                names,
+            );
+        let pushed = if gone {
+            None
+        } else {
+            Some(pushes::arguments(
+                &mut func,
+                &stack.passing,
+                machine.insts,
+                machine.shapes,
+                machine.conv,
+                names,
+            ))
+        };
+        if let Some(pushed) = pushed.filter(|pushed| pushed.calls > 0 && unframes) {
             pushes::unframed(
                 &mut func,
                 frame.size(),
