@@ -58,7 +58,10 @@ fn tested_again(asm: &str) -> Vec<&str> {
 fn the_deforming_loops_end_in_a_comparison_and_a_jump() {
     for flags in [&[][..], &["-fwrapv"][..]] {
         let asm = assembly(flags);
-        assert!(asm.contains("$16"), "the fixture no longer walks the attributes:\n{asm}");
+        // A walked pointer steps by 16. Under `-fwrapv` the index can wrap, and the address of an
+        // attribute is the index times 16 worked out again in each turn.
+        let walks = asm.contains("$16") || asm.contains("shlq\t$4");
+        assert!(walks, "the fixture no longer walks the attributes:\n{asm}");
         let bytes = tested_again(&asm);
         assert!(bytes.is_empty(), "{bytes:?} with {flags:?} in:\n{asm}");
     }
