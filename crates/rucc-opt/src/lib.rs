@@ -163,6 +163,7 @@ pub mod outside;
 pub mod params;
 pub mod pass;
 pub mod phiopt;
+pub mod pinned;
 pub mod pipeline;
 pub mod predict;
 pub mod pressure;

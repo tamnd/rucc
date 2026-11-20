@@ -109,6 +109,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::image::Image,
     &crate::sroa::Sroa,
     &crate::sccp::Sccp,
+    &crate::pinned::Pinned,
     &crate::simplify::Simplify,
     &crate::simplify::Fixpoint,
     &crate::narrow::Narrow,
