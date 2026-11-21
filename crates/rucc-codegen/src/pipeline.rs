@@ -1541,6 +1541,16 @@ pub fn compile_recording(
     // every block and edge as running once and its cost is a count of the loads, stores and moves
     // in the text. See [`flatten`].
     let weights = if flags.goal == Goal::Size { flatten(&mut func) } else { Vec::new() };
+    // And the backtracking allocator weighs a value by the square root of its length there. See
+    // [`rucc_regalloc::assign::Env::compact`].
+    let compact: Vec<Env>;
+    let (tried, env) = if flags.goal == Goal::Size {
+        compact = tried.iter().copied().chain([env]).map(|env| env.clone().for_size()).collect();
+        let (last, first) = compact.split_last().expect("the environment tried last");
+        (first.iter().collect(), last)
+    } else {
+        (tried, env)
+    };
     let (mut allocation, used) = rucc_regalloc::run_first(
         &mut func,
         &tried,
