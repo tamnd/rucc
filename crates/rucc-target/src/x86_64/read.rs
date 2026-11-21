@@ -303,11 +303,12 @@ pub enum Step {
     /// A `call` to a name nothing in the template carries, which is a call to a function
     /// somewhere else in the program.
     ///
-    /// The name reaches the object file the way the one on [`Self::Away`] does. What makes it more
-    /// than an instruction is everything the program did not write: the function it calls may
-    /// leave anything in the registers the convention does not ask it to put back, so every one of
-    /// those is gone across it whatever the clobber list says. tcc's tests call `getenv` this way
-    /// to check that a name only a template uses still reaches the linker.
+    /// The name reaches the object file the way the one on [`Self::Away`] does, and the call is
+    /// made as the call a C call becomes, so the function holding it is not a leaf. What it writes
+    /// is what the clobber list and the outputs say, which is how gcc reads it: the kernel's
+    /// callee-save thunks are called this way with no list, because they put back everything they
+    /// touch. tcc's tests call `getenv` this way to check that a name only a template uses still
+    /// reaches the linker.
     Call {
         /// The name it calls, which is a symbol somewhere else in the program.
         symbol: String,

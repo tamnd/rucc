@@ -8662,9 +8662,12 @@ impl<'a> Lowering<'a> {
     /// at the statement and nothing is kept in the red zone. What is not the same is the operands.
     /// Nothing is passed by the convention, since the template put the arguments where it wanted
     /// them, and what comes back is whatever an output is pinned to, since that is the only thing
-    /// the template says about it. Every other register the callee may leave anything in is
-    /// written here, which is what a program that calls from a template never says and always
-    /// means.
+    /// the template says about it. Past that, what is written is what the clobber list names and
+    /// nothing more, which is how gcc reads it and how a template kept as text is read here too.
+    /// The kernel calls its callee-save thunks this way, `call preempt_schedule_notrace_thunk`
+    /// with no list at all, because the thunk saves every register it writes. Taking all of them
+    /// away there made each `preempt_enable` in `sched_clock` and its callers save a value in a
+    /// register the call keeps and copy it back after.
     ///
     /// What the callee reads is what the template put in the argument registers: every operand
     /// pinned to a register on the way in, and every argument register a line above wrote by name.
@@ -8700,7 +8703,9 @@ impl<'a> Lowering<'a> {
         let lost = self.lost(list);
         for &(reg, class, index) in &lost {
             let Some(index) = index else {
-                operands.push(mir::Operand::write(mir::Reg::physical(reg), class));
+                if class == self.gpr && clobbered.contains(&reg) {
+                    operands.push(mir::Operand::write(mir::Reg::physical(reg), class));
+                }
                 continue;
             };
             // Written once in this form of the machine IR, so a second write is a new register,
@@ -13596,6 +13601,22 @@ mod tests {
             let text = lower(&mut names, &source);
             assert!(text.contains("$rdx"), "{template}: {text}");
             assert!(!text.contains("$rsi") && !text.contains("$r11"), "{template}: {text}");
+        }
+    }
+
+    /// The same for a template this reads line by line, where the call is the call a C call
+    /// becomes. The kernel's `call preempt_schedule_notrace_thunk` has no list, and the thunk
+    /// saves what it writes.
+    #[test]
+    fn a_lifted_template_that_calls_out_writes_what_its_list_names() {
+        for (clobbers, named) in [("rdx, memory", true), ("", false)] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            clobbering(&mut source, block, &mut names, "call foo", "", clobbers, &[], &[]);
+            Builder::new(&mut source, block).ret(&[]);
+            let text = lower(&mut names, &source);
+            assert!(text.contains("call @foo"), "{clobbers}: {text}");
+            assert_eq!(text.contains("$rdx"), named, "{clobbers}: {text}");
+            assert!(!text.contains("$rsi") && !text.contains("$r11"), "{clobbers}: {text}");
         }
     }
 
