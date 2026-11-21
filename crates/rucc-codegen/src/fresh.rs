@@ -59,10 +59,17 @@ pub fn constants(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) 
                 if !tied.reg.is_virtual() || !constant(func, shapes, names, number) {
                     continue;
                 }
+                // How many times this instruction reads it, which is once unless another of its
+                // operands is the same constant, and none when an earlier answer of the same
+                // instruction already took the reads away.
+                let here = func[func[inst].operands]
+                    .iter()
+                    .filter(|operand| operand.role == Role::Use && operand.reg == tied.reg)
+                    .count();
                 // Already the instruction in front with nothing else reading it, which is the
                 // shape this would make.
                 let left = reads.get(&tied.reg).copied().unwrap_or(0);
-                if left == 1 && func.next_inst(number) == Some(inst) {
+                if here == 0 || (left == here && func.next_inst(number) == Some(inst)) {
                     continue;
                 }
                 let Some(class) = func.class_of(tied.reg) else { continue };
@@ -77,10 +84,19 @@ pub fn constants(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) 
                 }
                 let again = build.finish();
                 func.insert_before(inst, again);
+                // Every read of the constant this instruction makes goes to the one written again,
+                // not only the read it writes over. `sbb %0, %0` reads its operand twice, which is
+                // how the kernel's `array_index_nospec` gets its mask, and with one read left on
+                // the first write the two were in two registers and both of them written as a
+                // zero.
                 let list = func[inst].operands;
-                func[list][usize::from(at)].reg = fresh;
+                for operand in func[list].iter_mut() {
+                    if operand.role == Role::Use && operand.reg == tied.reg {
+                        operand.reg = fresh;
+                    }
+                }
                 if let Some(count) = reads.get_mut(&tied.reg) {
-                    *count -= 1;
+                    *count -= here;
                     if *count == 0 {
                         gone.push(number);
                     }

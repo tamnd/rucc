@@ -819,6 +819,28 @@ fn an_output_a_template_also_reads_is_read_as_a_zero() {
 }
 
 #[test]
+fn a_borrow_taken_from_an_output_and_itself_is_one_register_and_one_zero() {
+    // The kernel's `array_index_mask_nospec` on x86-64, which every `array_index_nospec` goes
+    // through, `fdget` and the system call table among them. The `sbb` reads its operand twice and
+    // writes it over the first, so both reads are one register and only one zero goes in front of
+    // it. Two used to: the zero written again for the read the answer goes over, and the first
+    // one still read by the other, with the two in two registers.
+    let source = "long f(unsigned long nr) { unsigned long m; \
+                  asm volatile (\"cmp %1,%2; sbb %0,%0\" : \"=r\" (m) : \"g\" (473UL), \"r\" (nr) \
+                  : \"cc\"); return nr & m; }\n";
+    for flags in [&["-O2"][..], &["-Os"][..]] {
+        let (ok, text, said) = run_with("borrow-mask", source, flags);
+        assert!(ok, "the compiler refused the fixture:\n{said}");
+        let body = body(&text, "f");
+        let sbb = body.lines().find(|line| line.contains("sbbq")).expect("a subtract with borrow");
+        let regs: Vec<&str> = sbb.split(['\t', ',', ' ']).filter(|r| r.starts_with('%')).collect();
+        assert!(regs.len() == 2 && regs[0] == regs[1], "two registers at {flags:?}:\n{body}");
+        let zeros = body.lines().filter(|line| zeroed(line)).count();
+        assert_eq!(zeros, 1, "at {flags:?}:\n{body}");
+    }
+}
+
+#[test]
 fn the_two_halves_of_a_word_are_exchanged_in_the_register_that_has_both() {
     // `ByteSwap16` in femtolisp's `llt/utils.h`, which is how a C library written before
     // `__builtin_bswap16` turned a sixteen bit number round. It is the only template in the corpus
