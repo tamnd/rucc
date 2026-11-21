@@ -365,7 +365,7 @@ fn placed(
             area = area.with(reuse.at);
         }
         let size = size(area);
-        let weight = costs[number] * 1024 / u128::from(size + 8);
+        let weight = weigh(costs[number], size, env.compact());
         values[number] = Some(Value { reg, class, area, range: area.hull(), weight, size });
         queue.push((size, Reverse(number)));
     }
@@ -1223,6 +1223,24 @@ fn saveable(func: &Func, order: &Order) -> Map<Point, (Inst, u128)> {
 }
 
 /// How much of the line a value is live over.
+/// How heavy a value is when the queue asks which of two values keeps a register: how often it is
+/// read or written over how long it is live.
+///
+/// In a function built for size the length counts by its square root. A value read in every part
+/// of a function is live across all of it, and divided by the whole length it was lighter than a
+/// loop counter read four times in a dozen instructions. It went to the stack and came back with a
+/// load of four bytes at each of its reads. The NetBSD boot code passes its file system pointer
+/// that way, and in `namede` of `bootxx_msdos` it was read back from the stack nine times where gcc
+/// keeps it in `ebp`. A load costs the same bytes in a loop as out of it, so at `-Os` the many reads
+/// count for more than the long life. Over the eight `bootxx` programs this took 572 bytes off, and
+/// each of the eight came out smaller. The square root was the best of the powers from a quarter
+/// to three quarters, and the pass that picks the values to spill ahead keeps the length as it is,
+/// since there the value that frees a register over the most points is the one that should go.
+fn weigh(cost: u128, size: u32, compact: bool) -> u128 {
+    let length = if compact { size.isqrt() } else { size };
+    cost * 1024 / u128::from(length + 8)
+}
+
 pub(crate) fn size(area: Area<'_>) -> u32 {
     area.pieces().map(|piece| piece.end - piece.start + 1).sum()
 }
@@ -1444,6 +1462,14 @@ mod tests {
     use rucc_target::x86_64::{GPR, R8, R9, R10, R11, RAX, RCX, RDI, RDX, REGS, RSI};
 
     use super::*;
+
+    #[test]
+    fn at_size_a_value_read_often_across_the_function_outweighs_a_short_one_read_less() {
+        // Twelve reads over six hundred points, against four over thirty.
+        let (long, short) = ((12, 600), (4, 30));
+        assert!(weigh(long.0, long.1, false) < weigh(short.0, short.1, false));
+        assert!(weigh(long.0, long.1, true) > weigh(short.0, short.1, true));
+    }
     use crate::check;
 
     fn env() -> Env {

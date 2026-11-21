@@ -132,6 +132,7 @@ pub enum Place {
 #[derive(Debug, Clone, Default)]
 pub struct Env {
     classes: Vec<Class>,
+    compact: bool,
 }
 
 /// What one class of registers offers.
@@ -157,6 +158,21 @@ impl Env {
         }
         self.classes[index] = Class { order: order.to_vec(), scratch: scratch.to_vec() };
         self
+    }
+
+    /// The same environment, for a function built for size. See [`Env::compact`].
+    #[must_use]
+    pub fn for_size(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// Whether the function is built for size, where the backtracking allocator weighs a value by
+    /// the square root of how long it is live rather than by the length. See
+    /// [`crate::backtrack`].
+    #[must_use]
+    pub fn compact(&self) -> bool {
+        self.compact
     }
 
     /// The registers it may hand out in a class, in the order it prefers them.
