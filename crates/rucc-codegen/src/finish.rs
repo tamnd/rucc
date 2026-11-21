@@ -748,20 +748,38 @@ fn region(
                     || (saved.contains(&at) && !loose.contains(&at))
             })
     };
-    // A template and the address of a block are both somewhere this cannot see past.
+    // The address of a block is somewhere this cannot see past, and so is an instruction of a
+    // template that reaches the stack without naming it or that is only bytes.
+    //
+    // Any other instruction read back out of a template says what it reaches, the same as one a
+    // rule wrote. `__fget_light` in fs/file.c has the `cmp` and `sbb` of `array_index_nospec` on
+    // its fast path, and taking those as wanting the frame put `pushq %rbx` in front of every
+    // `read` when only the slow path wants `%rbx`. gcc saves it there.
     //
     // A register the text of a template names, or one an operand is pinned to, is that register
-    // and no other, so it is never loose. A template kept as text has no flag, and `put_user` in
-    // the kernel is one: it calls `__put_user_4` with `%ebx` in its clobbers, the rename handed
-    // the first two of the three in `getresgid` a spare register for it, and the prologue went in
-    // front of the third. Every LTP test after that one died on the pointer to the registers the
-    // syscall entry keeps in `%rbx`. Every target spells the opcode `template`.
+    // and no other, so it is never loose, and neither is any register an instruction of a template
+    // reaches. A template kept as text has no flag, and `put_user` in the kernel is one: it calls
+    // `__put_user_4` with `%ebx` in its clobbers, the rename handed the first two of the three in
+    // `getresgid` a spare register for it, and the prologue went in front of the third. Every LTP
+    // test after that one died on the pointer to the registers the syscall entry keeps in `%rbx`.
+    // Every target spells the opcode `template`.
+    let x86 = std::ptr::eq(machine, &x86_64::MACHINE);
+    let reaches = |name: &str| {
+        use x86_64::Form::{Call, CallMem, EhReturn, Pop, Push, PushImm, Ret, RetPop};
+        let bare = machine.bare(name);
+        !x86
+            || bare == x86_64::LITERAL
+            || x86_64::form(bare).is_none_or(|form| {
+                matches!(form, Call | CallMem | Push | PushImm | Pop | Ret | RetPop | EhReturn)
+            })
+    };
     let needs = |inst: Inst, loose: &[PhysReg]| {
         let data = &func[inst];
         let name = names.resolve(data.opcode.name());
-        let text = machine.bare(name) == x86_64::TEMPLATE;
+        let lifted = data.flags.contains(Flags::TEMPLATE);
+        let text = lifted || machine.bare(name) == x86_64::TEMPLATE;
         let pinned = |operand: &Operand| matches!(operand.constraint, Constraint::Fixed(_));
-        data.flags.contains(Flags::TEMPLATE)
+        (lifted && reaches(name))
             || machine.calls(name)
             || data.mem.is_some_and(|mem| func[mem].block.is_some())
             || func[data.operands]
