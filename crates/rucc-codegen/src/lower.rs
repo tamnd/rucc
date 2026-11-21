@@ -3079,6 +3079,26 @@ impl<'a> Lowering<'a> {
             .ok_or(Unsupported::Unported { inst: Some(inst), what: Unported::Convention })?;
         let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
+        // A function this file compiled already writes only some of the registers the convention
+        // lets it, and a value can stay in one of the others across the call. See
+        // [`crate::written`].
+        if let (abi::Callee::Named(symbol), Convention::Target) = (callee, called) {
+            if let Some(written) = self.elsewhere.written(symbol) {
+                let call = self.out.terminator(block).expect("the call just built");
+                let kept: Vec<mir::Operand> = self.out[self.out[call].operands]
+                    .iter()
+                    .copied()
+                    .filter(|operand| {
+                        !operand.role.is_def()
+                            || operand
+                                .reg
+                                .phys()
+                                .is_none_or(|reg| written.contains(&(reg, operand.class)))
+                    })
+                    .collect();
+                self.out[call].operands = self.out.push_operands(&kept);
+            }
+        }
         self.crossed += 1;
         if made.area > 0 && made.forwarded.is_none() {
             let call = self.out.terminator(block).expect("the call just built");

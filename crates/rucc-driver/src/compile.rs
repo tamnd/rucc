@@ -1858,11 +1858,19 @@ fn generate(
     };
     // gcc leaves the landing pad out of a function only a direct call reaches, and only when it
     // optimizes, since that is when it works out who calls what.
-    let elsewhere = if opts.opt_level.runs_optimizer() {
+    let mut elsewhere = if opts.opt_level.runs_optimizer() {
         elsewhere.called_directly(module, pic)
     } else {
         elsewhere
     };
+    // What each function writes of the registers a call may destroy is read off its code once it
+    // is compiled, for the calls to it compiled after it, which is gcc's `-fipa-ra`: on from `-O2`
+    // and at the two size levels, and off under `-pg`, where gcc turns it off as well. x86-64 on
+    // ELF only for now. See `rucc_codegen::written`.
+    let learns = target.tuple.arch() == Arch::X86_64
+        && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
+        && opts.opt_level.schedules()
+        && !opts.profile;
     // Asked of the module the code is made from, since a use the optimizer took away is one gcc
     // never asks about either.
     let indirect = Elsewhere::needs_indirect(module);
@@ -1909,7 +1917,29 @@ fn generate(
             flags,
             recording,
         ) {
-            Ok(func) => funcs.push(func),
+            Ok(func) => {
+                // Only for a name a call here is sure to reach this code through, and not for a
+                // function whose body is its own text.
+                let source = &module[id];
+                let sure = !source.linkage.may_be_replaced()
+                    && !pic.replaceable(source.linkage, source.visibility)
+                    && source.signature().convention == rucc_target::Convention::Target
+                    && !source.attrs.set.contains(AttrSet::NAKED);
+                if learns && sure {
+                    let speculation = flags.speculation;
+                    let written = rucc_codegen::written::registers(
+                        &func,
+                        &machine,
+                        &elsewhere,
+                        speculation,
+                        names,
+                    );
+                    if let Some(written) = written {
+                        elsewhere.learn(source.name, written);
+                    }
+                }
+                funcs.push(func);
+            }
             Err(why) => {
                 let name = names.resolve(module[id].name).to_owned();
                 // The function knows where the instruction came from, so the message lands on

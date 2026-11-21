@@ -44,7 +44,7 @@ use rucc_ir::{
     AliasKind, AttrSet, Datum, Dll, Extra, Global, Linkage, Module, Opcode, Pic, TlsModel,
     Visibility,
 };
-use rucc_target::ObjectFormat;
+use rucc_target::{ObjectFormat, PhysReg, RegClass};
 
 /// The names whose address only the linker knows.
 ///
@@ -92,6 +92,7 @@ pub struct Elsewhere {
     unstubbed: Set<Symbol>,
     direct: Set<Symbol>,
     numbered: Set<Symbol>,
+    written: Map<Symbol, Vec<(PhysReg, RegClass)>>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -693,6 +694,23 @@ impl Elsewhere {
     #[must_use]
     pub fn jumps_back(&self, name: Symbol) -> bool {
         self.jumps_back.contains(&name)
+    }
+
+    /// The registers a call may destroy that the function of that name writes, when it is one this
+    /// file has compiled already and a call to the name is sure to reach that code. A call to it
+    /// is then taken to destroy those and no others. See [`crate::written`].
+    #[must_use]
+    pub fn written(&self, name: Symbol) -> Option<&[(PhysReg, RegClass)]> {
+        self.written.get(&name).map(Vec::as_slice)
+    }
+
+    /// Says what the function of that name writes, for the calls to it compiled after it.
+    ///
+    /// The driver says it of a function once it has compiled it, and only of one whose name no
+    /// other object can take the calls of: not weak, not one a shared library exports, and not
+    /// one `-pg` puts a hook in front of, whose code may be patched while the program runs.
+    pub fn learn(&mut self, name: Symbol, written: Vec<(PhysReg, RegClass)>) {
+        self.written.insert(name, written);
     }
 
     /// Whether a declaration of that name said `cold`, which is a promise that a call to it is
