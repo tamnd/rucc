@@ -219,6 +219,7 @@ pub mod varargs;
 pub mod weights;
 pub mod wide;
 pub mod widths;
+pub mod written;
 pub mod zero;
 
 /// The IR as something a rule can match against, which is [`rucc_ir::term`].
