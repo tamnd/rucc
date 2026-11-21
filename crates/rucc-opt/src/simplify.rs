@@ -317,6 +317,17 @@
 //! set, `p->freed_tables = 1` in `__zap_vma_range` was a load, an `and`, an `or` and a store,
 //! and gcc writes one `orb` to memory.
 //!
+//! ### Two steps in a row along one address
+//!
+//! `(p + c) + d` on a pointer is `p + (c + d)`. The rule tables never see this, since a rule that
+//! rewrites a `ptr_add` would build an integer add, and reassociation only takes integer trees.
+//! The kernel's `task_top_of_stack` is `(unsigned long)(task_pt_regs(task) + 1)`, where
+//! `task_pt_regs` is the top of the stack less one `struct pt_regs`, so `__switch_to` added
+//! 16384, took away 168 and added 168 back, three instructions where gcc has one. Two steps that
+//! cancel are the address they started from. When something else reads the inner address it
+//! stays, so the rewrite then only fires when the sum fits in 32 bits, which an instruction can
+//! carry.
+//!
 //! ### A product tested through a division
 //!
 //! An unsigned `x > ~0 / y` is true when `x * y` does not fit and false when it fits, so it is the
@@ -479,6 +490,13 @@ const MERGED: &str = "two constants in a row of one bitwise operation made one";
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_MERGED: &str =
     "two constants in a row of one bitwise operation left alone, the pass ran out of fuel";
+
+/// Recorded once for each pair of constant steps along an address made one.
+const STEPPED: &str = "two constant steps in a row along an address made one";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_STEPPED: &str =
+    "two constant steps in a row along an address left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -995,6 +1013,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = merged_constants(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), MERGED, NO_FUEL_MERGED));
+        }
+        if let Some(rewrite) = merged_steps(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), STEPPED, NO_FUEL_STEPPED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -2117,6 +2138,40 @@ fn merged_constants(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         pred: None,
         lhs: Operand::Value(x),
         rhs: Operand::Constant { number, bits: ty.bits() },
+    })
+}
+
+/// `(p + c) + d` on a pointer as `p + (c + d)`, and as `p` when the two cancel. A sum too wide
+/// to carry is left alone while something else reads `p + c`, because then that stays as well.
+fn merged_steps(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    if data.opcode != Opcode::PtrAdd {
+        return None;
+    }
+    let [inner, d] = func[data.args] else { return None };
+    let d = constant(func, d)?;
+    let Def::Result { inst: under, .. } = func[inner].def else { return None };
+    if func[under].opcode != Opcode::PtrAdd {
+        return None;
+    }
+    let [p, step] = func[func[under].args] else { return None };
+    let c = constant(func, step)?;
+    let bits = func[step].ty.bits();
+    if bits != 64 {
+        return None;
+    }
+    let sum = i128::from(i64::try_from(c).ok()?.wrapping_add(i64::try_from(d).ok()?));
+    if sum == 0 {
+        return Some(Rewrite::Value(p));
+    }
+    if uses.get(inner.index()) != Some(&1) && i32::try_from(sum).is_err() {
+        return None;
+    }
+    Some(Rewrite::Built {
+        opcode: Opcode::PtrAdd,
+        pred: None,
+        lhs: Operand::Value(p),
+        rhs: Operand::Constant { number: sum, bits },
     })
 }
 
@@ -4655,6 +4710,41 @@ mod tests {
         simplify(&mut func);
         let outer = operands(&func, returned(&func, block))[0];
         assert_ne!(operands(&func, outer)[0], x);
+    }
+
+    /// `(p + c) + d` on a pointer, returned as an integer so the test can look under it.
+    fn stepped_twice(c: i128, d: i128) -> (Func, Block, Value) {
+        let i64 = Type::int(64);
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let signature = Signature::new().with_params(&[Type::PTR]).with_returns(&[i64]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let p = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let c = build.iconst(i64, c);
+        let inner = build.binary(Opcode::PtrAdd, p, c, Flags::NUW);
+        let d = build.iconst(i64, d);
+        let outer = build.binary(Opcode::PtrAdd, inner, d, Flags::NONE);
+        let int = build.unary(Opcode::PtrToInt, outer, i64);
+        build.ret(&[int]);
+        (func, block, p)
+    }
+
+    /// The top of a task's stack less one `struct pt_regs` and then plus one is one step from the
+    /// stack, and two steps that cancel are the address they started from.
+    #[test]
+    fn two_constant_steps_along_an_address_are_one() {
+        let (mut func, block, p) = stepped_twice(16384 - 168, 168);
+        assert!(simplify(&mut func));
+        let outer = operands(&func, returned(&func, block))[0];
+        assert_eq!(came_from(&func, outer).0, Opcode::PtrAdd);
+        let args = operands(&func, outer);
+        assert_eq!(args[0], p);
+        assert_eq!(number(&func, args[1]), 16384);
+        let (mut func, block, p) = stepped_twice(-168, 168);
+        assert!(simplify(&mut func));
+        assert_eq!(operands(&func, returned(&func, block))[0], p);
     }
 
     /// Truncating an extension back to the width it came from is the value that was there.
