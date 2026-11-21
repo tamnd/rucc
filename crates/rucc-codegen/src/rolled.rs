@@ -48,14 +48,20 @@
 //! clears, and an SMBus block is no more than 32 bytes.
 //!
 //! A function built for size is written the same way, since gcc at `-Os` writes the string
-//! instruction for every such copy and fill as well, which is shorter than the call. A size that is
-//! not a whole number of words is one `rep movsb` or `rep stosb` of all of it there, as gcc's is,
-//! so that no tail of moves follows. tinyconfig builds the kernel at `-Os`, and with
-//! `-ftrivial-auto-var-init=zero` every local structure is cleared on entry. In mm/, kernel/,
-//! lib/ and fs/ of that kernel rucc made 788 calls to `memset` and 178 to `memcpy`, where gcc 13
-//! makes none, and with this 59 and 64 are left, nearly all of a size the program works out. On a
-//! machine without fast short strings the kernel's `memset` is a loop behind a return thunk, and
-//! the rucc kernel ran 6% slower than gcc's on an AMD EPYC 7763, most of it in those directories.
+//! instruction for every such copy and fill as well, which is shorter than the call. There every
+//! size is one `rep movsb` or `rep stosb` of all of it, so that no tail of moves follows and no
+//! count is shifted down. That is the same size as `rep movsq` and faster, since a CPU with fast
+//! short strings makes only the byte forms fast, and on one the kernel's own `memcpy` and `memset`
+//! are those two instructions. On the tinyconfig bench on a Xeon 6975P the word forms made `brk`
+//! 1.030 and `signal` 1.036 of gcc's time, and the byte forms made them 0.904 and 0.995, with the
+//! geometric mean from 1.010 to 0.972.
+//!
+//! tinyconfig builds the kernel at `-Os`, and with `-ftrivial-auto-var-init=zero` every local
+//! structure is cleared on entry. In mm/, kernel/, lib/ and fs/ of that kernel rucc made 788 calls
+//! to `memset` and 178 to `memcpy`, where gcc 13 makes none, and with this 59 and 64 are left,
+//! nearly all of a size the program works out. On a machine without fast short strings the
+//! kernel's `memset` is a loop behind a return thunk, and the rucc kernel ran 6% slower than gcc's
+//! on an AMD EPYC 7763, most of it in those directories.
 //!
 //! The range only decides whether to write the instruction. The instruction moves exactly as many
 //! bytes as it is given, so a range that said too little would cost speed and not the answer.
@@ -165,8 +171,7 @@ pub fn loops(
 /// The copy or fill an instruction is, where it is one this pass writes as a string instruction,
 /// and whether its size is known to be small enough. Where it is not, the branches are asked.
 ///
-/// `small` is whether the function is built for size, where a size that is not a whole number of
-/// words is moved a byte at a time rather than with a tail.
+/// `small` is whether the function is built for size, where every size is moved a byte at a time.
 fn wanted(
     func: &Func,
     names: &Interner,
@@ -184,7 +189,7 @@ fn wanted(
             }
             if let Some(length) = bulk.length {
                 let (roll, known) =
-                    worked_out(func, data.opcode, (bulk.to, bulk.with, length), most)?;
+                    worked_out(func, data.opcode, (bulk.to, bulk.with, length), most, small)?;
                 return Some((Roll { info: func[mem], flags: data.flags, ..roll }, known));
             }
             (data.opcode, bulk.to, bulk.with, func[mem], data.flags, None)
@@ -200,7 +205,7 @@ fn wanted(
             };
             let &[to, with, length] = &func[data.args] else { return None };
             let Some(size) = expand::number(func, length) else {
-                return worked_out(func, opcode, (to, with, length), most)
+                return worked_out(func, opcode, (to, with, length), most, small)
                     .map(|(roll, known)| (Roll { answer: data.first_result, ..roll }, known));
             };
             let size = u64::try_from(size).ok()?;
@@ -236,7 +241,7 @@ fn wanted(
         return None;
     }
     let flags = flags.intersection(Flags::legal_on(Opcode::Store));
-    let bytes = small && info.size % WORD != 0;
+    let bytes = small;
     let roll = Roll { opcode, to, with, byte, info, flags, answer, length: None, bytes };
     Some((roll, true))
 }
@@ -244,20 +249,21 @@ fn wanted(
 /// A copy or fill whose size the program works out, and whether the instructions that work it out
 /// say it is no more than `most` bytes.
 ///
-/// It is a word at a time where they say the size is a whole number of words, and a byte at a
-/// time otherwise.
+/// It is a word at a time where they say the size is a whole number of words and the function is
+/// not built for size, which `small` says, and a byte at a time otherwise.
 fn worked_out(
     func: &Func,
     opcode: Opcode,
     (to, with, length): (Value, Value, Value),
     most: u32,
+    small: bool,
 ) -> Option<(Roll, bool)> {
     if func[length].ty.bits() > 64 {
         return None;
     }
     let (largest, zeros) = bounded(func, length, DEPTH).unwrap_or((u128::MAX, 0));
     let known = largest <= u128::from(most);
-    let bytes = zeros < WORD.trailing_zeros();
+    let bytes = small || zeros < WORD.trailing_zeros();
     let byte = match opcode {
         Opcode::Memset => expand::literal(func, with)?,
         _ => 0,
