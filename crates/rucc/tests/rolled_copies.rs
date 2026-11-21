@@ -58,12 +58,14 @@ extern int printf(const char *, ...);
 SIZE(97) SIZE(127) SIZE(128) SIZE(129) SIZE(160) SIZE(168) SIZE(192) SIZE(200) SIZE(255) SIZE(256)
 SIZE(257) SIZE(1001) SIZE(8192)
 SIZE(17) SIZE(33) SIZE(45)
-ZERO(17) ZERO(33) ZERO(41) ZERO(47) ZERO(48) ZERO(95) ZERO(301) ZERO(8191)
+ZERO(17) ZERO(19) ZERO(24) ZERO(32) ZERO(33) ZERO(40) ZERO(41) ZERO(47) ZERO(48) ZERO(95)
+ZERO(301) ZERO(8191)
 int main(void) {
     int bad = copy97() | copy127() | copy128() | copy129() | copy160() | copy168() | copy192()
         | copy200() | copy255() | copy256() | copy257() | copy1001() | copy8192() | copy17()
         | copy33() | copy45();
-    bad |= zero17() | zero33() | zero41() | zero47() | zero48() | zero95() | zero301() | zero8191();
+    bad |= zero17() | zero19() | zero24() | zero32() | zero33() | zero40() | zero41() | zero47()
+        | zero48() | zero95() | zero301() | zero8191();
     printf("%d\n", bad);
     return bad;
 }
@@ -112,8 +114,9 @@ fn a_copy_or_fill_up_to_8192_bytes_is_a_string_instruction_without_the_vector_re
     assert!(function(&asm, "huge").contains("memcpy"), "{asm}");
 }
 
-/// At `-Os` gcc writes the string instruction too, and a byte at a time for a size that is not a
-/// whole number of words, which is how tinyconfig builds the kernel.
+/// At `-Os` gcc writes the string instruction too, which is how tinyconfig builds the kernel. rucc
+/// writes it a byte at a time whatever the size, since only `rep movsb` and `rep stosb` are fast
+/// for a short string.
 #[test]
 fn a_function_built_for_size_writes_the_string_instruction_too() {
     let dir = std::env::temp_dir().join(format!("rucc-rolled-os-{}", std::process::id()));
@@ -123,10 +126,10 @@ fn a_function_built_for_size_writes_the_string_instruction_too() {
     let asm = std::fs::read_to_string(dir.join("one.s")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&dir);
     for (name, string) in [
-        ("copy", "rep movsq"),
-        ("clear", "rep stosq"),
-        ("kept", "rep movsq"),
-        ("small", "rep stosq"),
+        ("copy", "rep movsb"),
+        ("clear", "rep stosb"),
+        ("kept", "rep movsb"),
+        ("small", "rep stosb"),
         ("odd", "rep stosb"),
         ("odds", "rep movsb"),
     ] {
