@@ -227,7 +227,7 @@ const JOINS: usize = 8;
 type Timed = (FuncId, u32, Vec<(Value, Imm, Type)>);
 
 /// What a body's measurement depends on. See [`Heap::measured`].
-type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize, usize);
+type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize, usize, bool);
 
 /// What the second pass knows as it goes.
 struct Heap<'a> {
@@ -556,7 +556,11 @@ impl Heap<'_> {
                 let mut passed: Vec<(Value, Imm, Type)> =
                     values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
                 passed.sort_unstable_by_key(|&(param, ..)| param);
-                let key = (callee, version, passed, count.weighs(), plain, reach);
+                // A call that is not hot goes in only when the program does not grow by it, and
+                // what decides that is the body the constants it passes leave, cleaned up as the
+                // first pass cleans one up for such a call. See [`Heap::refused`].
+                let cold = self.cold(func, target);
+                let key = (callee, version, passed, count.weighs(), plain, reach, cold);
                 let (body, copied, cut) = match self.measured.get(&key) {
                     Some(&measured) => measured,
                     None => {
@@ -565,7 +569,8 @@ impl Heap<'_> {
                             summed_size(&profile.summary, target, values.clone(), count);
                         // Not for a body so far past what the call could take that no cleanup
                         // brings it under. See [`super::TRIED`].
-                        if body > plain && body <= reach.saturating_mul(super::TRIED) {
+                        let grows = cold && grows(func, call, target, body, how);
+                        if (body > plain || grows) && body <= reach.saturating_mul(super::TRIED) {
                             let cleaned =
                                 how.specialized_size(module, callee, &values, count, false);
                             body = body.min(cleaned);
@@ -843,6 +848,15 @@ impl Heap<'_> {
         }
     }
 
+    /// Whether a call from `func` to `target` is one gcc never thinks of as hot, which is every call
+    /// at `-Os` and `-Oz` and one from or to a cold function or to one that never comes back.
+    fn cold(&self, func: &Func, target: &Func) -> bool {
+        self.how.size
+            || func.attrs.set.contains(AttrSet::COLD)
+            || target.attrs.set.contains(AttrSet::COLD)
+            || target.attrs.set.contains(AttrSet::NORETURN)
+    }
+
     /// Why a call that was weighed is not inlined, if it is not, and otherwise how many bytes the
     /// copy adds to the caller's frame, the locals of the callee that are still in memory once it
     /// has been cleaned up and that no slot the pool holds can take. With the bytes come the
@@ -868,11 +882,15 @@ impl Heap<'_> {
         if calls_twice(module, target, self.how.names) {
             return Err(InlineFailure::Setjmp);
         }
-        let cold = self.how.size
-            || func.attrs.set.contains(AttrSet::COLD)
-            || target.attrs.set.contains(AttrSet::COLD)
-            || target.attrs.set.contains(AttrSet::NORETURN);
-        if cold && grows(func, call, target, weighed.body, self.how) {
+        // gcc's `growth_positive_p`: a call that is not hot may still go in when copying the body
+        // into every caller and dropping it out of line leaves the program no larger.
+        // `signal_pending` in the kernel calls `test_ti_thread_flag` twice with a constant flag,
+        // which grows it by eleven each time to gcc against thirty out of line, so gcc copies
+        // both and `read` from /dev/zero makes no call for it, where rucc made two.
+        if self.cold(func, target)
+            && weighed.overall > 0
+            && grows(func, call, target, weighed.body, self.how)
+        {
             return Err(InlineFailure::Unlikely);
         }
         // gcc takes a call that is not hot only when the program does not grow by it, which is
