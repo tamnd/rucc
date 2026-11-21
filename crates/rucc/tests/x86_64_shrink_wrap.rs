@@ -40,6 +40,15 @@ long g(long *p, long x) {
         a += slow(p + 1);
     return a + x;
 }
+long fast(long *p, unsigned long i, unsigned long n) {
+    if (__builtin_expect(n != 0, 1)) {
+        unsigned long m;
+        __asm__ volatile(\"cmp %1,%2; sbb %0,%0\" : \"=r\"(m) : \"g\"(n), \"r\"(i) : \"cc\");
+        return p[i & m];
+    }
+    long a = slow(p);
+    return a + slow(0);
+}
 ";
 
 fn listing() -> String {
@@ -118,6 +127,19 @@ fn the_unwind_rows_follow_the_frame() {
         check_rows(&text, name);
     }
     assert_eq!(pushes_before_branch(&text, "walk"), 0, "{text}");
+}
+
+/// The instructions of a template say what they reach like any others, so one on the likely path
+/// that touches no saved register leaves the prologue on the other. `__fget_light` in fs/file.c
+/// has the `cmp` and `sbb` of `array_index_nospec` on its fast path, and pushed `%rbx` for every
+/// `read` until the template stopped counting as wanting the frame.
+#[test]
+fn a_template_on_the_likely_path_saves_nothing() {
+    let text = listing();
+    assert_eq!(pushes_before_branch(&text, "fast"), 0, "{text}");
+    assert!(lines(&text, "fast").iter().any(|line| line.starts_with("push")), "{text}");
+    assert!(lines(&text, "fast").iter().any(|line| line.starts_with("sbb")), "{text}");
+    check_rows(&text, "fast");
 }
 
 /// A function that calls on every path has its prologue where it was.
