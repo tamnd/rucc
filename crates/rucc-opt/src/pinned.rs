@@ -32,6 +32,17 @@
 //! readers read the constant. The parameter itself stays for the passes that remove unread ones, as
 //! it does in [`crate::sccp`].
 //!
+//! # A factor
+//!
+//! An operand of a multiply that is one number where the multiply is, though not everywhere, is
+//! asked about the same way with [`Ranges::at`], and becomes that number there. The kernel's
+//! `accumulate_sum` adds `load * contrib` under `if (load)`, and `load` is `!!se->on_rq` once it is
+//! inlined, so it is zero or one and the test says which. gcc multiplies by nothing there, and
+//! `__update_load_avg_se` here kept two `imul`s and a register for each flag across the calls in
+//! between. Once the operand is a one, [`crate::simplify`] takes the multiply away. Only an operand
+//! that is two numbers or fewer is asked about, which a truth value widened to an integer is, so the
+//! walk asks nothing about most of the multiplies it passes.
+//!
 //! # What is not here
 //!
 //! A pointer parameter. The ranges do not give a range for a pointer, and the null pointer that
@@ -42,7 +53,7 @@
 //! smaller.
 
 use rucc_base::hash::Map;
-use rucc_ir::{Block, Extra, Func, Imm, InstData, Opcode, Value};
+use rucc_ir::{Block, Extra, Func, Imm, Inst, InstData, Opcode, Value};
 
 use crate::range::query::Ranges;
 use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
@@ -55,6 +66,13 @@ const PINNED: &str = "parameter the value ranges pin to one number replaced by t
 
 /// Recorded once for each parameter the ranges pin that the fuel did not reach.
 const NO_FUEL: &str = "parameter the value ranges pin to one number kept, the pass ran out of fuel";
+
+/// Recorded once for each operand of a multiply that became a constant.
+const FACTOR: &str = "factor the value ranges pin to one number where it is read replaced by it";
+
+/// Recorded once for each of those that the fuel did not reach.
+const NO_FUEL_FACTOR: &str =
+    "factor the value ranges pin to one number where it is read kept, the pass ran out of fuel";
 
 /// The pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +101,24 @@ impl Pass for Pinned {
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         let Some(entry) = func.entry() else { return stats };
-        let found = pinned(func, an, entry);
+        let (found, factors) = pinned(func, an, entry);
+        for (inst, index, number) in factors {
+            if !fuel.take() {
+                stats.missed(NO_FUEL_FACTOR);
+                continue;
+            }
+            let ty = func[func[func[inst].args][index]].ty;
+            let at = func.add_imm(Imm::from_bits(number));
+            let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+            let span = func.span(inst);
+            let made = func.create_inst(data, &[ty], span);
+            func.insert_before(made, inst);
+            let result = func[made].results().next().expect("a constant is one value");
+            let mut args = func[func[inst].args].to_vec();
+            args[index] = result;
+            func[inst].args = func.push_values(&args);
+            stats.optimized(FACTOR);
+        }
         if found.is_empty() {
             return stats;
         }
@@ -111,16 +146,40 @@ impl Pass for Pinned {
     }
 }
 
-/// Each integer parameter the ranges pin to one number, with its block and the number.
+/// The parameters [`pinned`] found with their blocks, and the factors with their multiplies and
+/// which operand each one is, both with the number.
+type Pins = (Vec<(Block, Value, u128)>, Vec<(Inst, usize, u128)>);
+
+/// Each integer parameter the ranges pin to one number, and each operand of a multiply they pin
+/// where it is read.
 ///
 /// One [`Ranges`] for the whole walk, because the oracle keeps what it has worked out.
-fn pinned(func: &Func, an: &Analyses, entry: Block) -> Vec<(Block, Value, u128)> {
+fn pinned(func: &Func, an: &Analyses, entry: Block) -> Pins {
     let cfg = an.cfg(func);
     let mut ranges = Ranges::cached(func, an);
     let mut found = Vec::new();
+    let mut factors = Vec::new();
     for block in func.blocks() {
         if block == entry || !cfg.reaches(block) {
             continue;
+        }
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::Mul {
+                continue;
+            }
+            for (index, &operand) in func[func[inst].args].iter().enumerate() {
+                let ty = func[operand].ty;
+                if !ty.is_int() || !ty.is_scalar() {
+                    continue;
+                }
+                let Some(could) = ranges.of(operand).list(2) else { continue };
+                if could.len() < 2 {
+                    continue;
+                }
+                if let Some(number) = ranges.at(operand, block).singleton() {
+                    factors.push((inst, index, number));
+                }
+            }
         }
         for &param in &func[block].params {
             if !func[param].ty.is_int() {
@@ -131,7 +190,7 @@ fn pinned(func: &Func, an: &Analyses, entry: Block) -> Vec<(Block, Value, u128)>
             }
         }
     }
-    found
+    (found, factors)
 }
 
 #[cfg(test)]
@@ -228,6 +287,34 @@ block4(%10: i32):
         let swapped = READ.replace("br_if %7, block4(%5), block3", "br_if %7, block3, block4(%5)");
         let out = run(&swapped, &mut Fuel::unlimited());
         assert_eq!(exit_argument(&out), "%3", "{out}");
+    }
+
+    /// `accumulate_sum` with `load` inlined as `!!on_rq`: under `if (load)` the factor is one.
+    const SUM: &str = r#"
+func @f(i32, i64) -> i64, linkage(external) {
+block0(%0: i32, %1: i64):
+    %2 = iconst.i32 0
+    %3 = icmp ne %0, %2
+    %4 = zext.i64 %3
+    %5 = iconst.i64 0
+    %6 = icmp ne %4, %5
+    br_if %6, block1, block2
+block1:
+    %7 = mul %4, %1
+    return %7
+block2:
+    return %5
+}
+"#;
+
+    #[test]
+    fn a_factor_a_test_settles_is_that_number() {
+        let out = run(SUM, &mut Fuel::unlimited());
+        let product = out.lines().find(|line| line.contains("= mul "));
+        let product = product.unwrap_or_else(|| panic!("the multiply is there, {out}"));
+        let factor = product.split("mul ").nth(1).and_then(|args| args.split(',').next());
+        let factor = factor.unwrap_or_else(|| panic!("the multiply has two operands, {out}"));
+        assert!(def(&out, factor).contains("iconst.i64 1"), "the factor is a one, {out}");
     }
 
     #[test]
