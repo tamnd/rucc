@@ -65,8 +65,11 @@
 //!
 //! # What is left alone
 //!
-//! Everything when the goal is size, where the `div` is shorter, which is what gcc does at `-Os`.
-//! A divisor of zero, one or minus one, which is undefined or which the optimizer has already
+//! Everything when the goal is size, where the `div` is shorter, which is what gcc does at `-Os`,
+//! except an exact division. That is a pointer difference, and gcc writes it as a shift and a
+//! multiply by the inverse at `-Os` as well, since the shift alone is shorter than the `div` when
+//! the size is a power of two. The kernel's `page_to_pfn` is one, and `kmap_local_page` did a
+//! signed `div` by 64 six times for each pipe round trip where gcc does a `sar`. A divisor of zero, one or minus one, which is undefined or which the optimizer has already
 //! answered. A divisor larger than anything the dividend can hold, where the quotient is zero or
 //! one and a compare is the right code, which is rare enough to wait.
 //!
@@ -97,8 +100,10 @@ pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
             (inst, division) = (narrow, at);
         }
         // Smaller code is the division instruction, but a division wider than a register has no
-        // instruction and the call it would become is to a runtime a kernel does not link.
-        if matches!(goal, Goal::Size) && division.width <= register {
+        // instruction and the call it would become is to a runtime a kernel does not link. An
+        // exact quotient is a shift and a multiply at every goal, as gcc writes it.
+        let exact = division.exact && !division.remainder;
+        if matches!(goal, Goal::Size) && division.width <= register && !exact {
             continue;
         }
         let program = program_at(division, register).or_else(|| wider(division, register, goal));
@@ -1625,6 +1630,24 @@ mod tests {
         let mut func = one(i64, i64, divided(Opcode::UDiv, 10, Flags::NONE));
         divisions(&mut func, Goal::Size, 32);
         assert_eq!(opcodes(&func), [Opcode::UDiv, Opcode::Return]);
+    }
+
+    /// A pointer difference at `-Os`, which gcc writes as a shift, and as a shift and a multiply
+    /// when the size is not a power of two. `page_to_pfn` in the kernel is the first.
+    #[test]
+    fn size_an_exact_division_is_a_shift_and_a_multiply() {
+        let i64 = Type::int(64);
+        let mut func = one(i64, i64, divided(Opcode::SDiv, 64, Flags::EXACT));
+        divisions(&mut func, Goal::Size, 64);
+        assert_eq!(opcodes(&func), [Opcode::AShr, Opcode::Return]);
+
+        let mut func = one(i64, i64, divided(Opcode::SDiv, 56, Flags::EXACT));
+        divisions(&mut func, Goal::Size, 64);
+        assert_eq!(opcodes(&func), [Opcode::AShr, Opcode::Mul, Opcode::Return]);
+
+        let mut func = one(i64, i64, divided(Opcode::SDiv, 64, Flags::NONE));
+        divisions(&mut func, Goal::Size, 64);
+        assert_eq!(opcodes(&func), [Opcode::SDiv, Opcode::Return]);
     }
 
     #[test]
