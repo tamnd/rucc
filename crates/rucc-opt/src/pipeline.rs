@@ -705,6 +705,14 @@ const O3: &[&str] = &[
 /// no value. Each of the six NetBSD `bootxx` images got smaller, from 12 bytes for `ext2fs` and
 /// `ustarfs` to 32 bytes for `ffsv2`.
 ///
+/// `prune` runs once more after that second `redundant-load`. A test that an inlined function makes
+/// of a field the caller has already tested is a second load of the field until `redundant-load`
+/// makes it the first one, and only then do the ranges see that the caller's branch settles it, so
+/// the `prune` above is too early. Taking a branch out never makes the code larger. The pipe of
+/// Linux 7.4 trims its pool of pages with `while (count > 2) excess[n++] = pop(pool)`, and `pop`
+/// starts with `if (!count) return NULL`. gcc at `-Os` drops that test, and before this rucc kept
+/// it and the arm that stores the null in every turn of the loop, on every read of a pipe.
+///
 /// `step-sink` runs last, when nothing after it will move an instruction in a block again. It puts
 /// `p + 1` after the last read of `p`, so the two share a register, and the copy loop of `boot2`
 /// lost three copies on its back edge.
@@ -750,6 +758,7 @@ const OS: &[&str] = &[
     "number",
     "redundant-load",
     "simplify",
+    "prune",
     "reassoc",
     "simplify-cfg",
     "discharge",
@@ -772,8 +781,8 @@ const OS: &[&str] = &[
 /// speed reason.
 ///
 /// `pinned` runs after the first `sccp`, `thread` and `rangetest` run again after `phiopt`,
-/// `number` and `redundant-load` after `load-forward` and again after `arm-hoist`, and `step-sink`
-/// runs last, as at `-Os`.
+/// `number` and `redundant-load` after `load-forward` and again after `arm-hoist`, `prune` after
+/// the second `redundant-load`, and `step-sink` runs last, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -812,6 +821,7 @@ const OZ: &[&str] = &[
     "number",
     "redundant-load",
     "simplify",
+    "prune",
     "simplify-cfg",
     "discharge",
     "dead-plane",
