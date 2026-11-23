@@ -1918,6 +1918,49 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             }
         }
     }
+    // The small copies, fills and moves once more, now that the passes have folded every length
+    // they can. The sweep above ran before any of them, so a length only they make a constant was
+    // still a call then, and the code generator moves the bytes itself only for the IR's own copy.
+    // The kernel's fortified `memcpy` and `memmove` put the length in a local and pass it through
+    // an empty `asm` unless `__builtin_constant_p` says it is a constant, which `constant-p` is
+    // what answers. So the move of 24 bytes in `tcp_v4_fill_cb`, on every TCP segment the kernel
+    // takes in, was a call to `memmove` where gcc moves three words.
+    if opts.level != OptLevel::O0 && opts.builtins && opts.wants(libcall::NAME) {
+        let mut fuel = match (allowance.get(libcall::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        let started = Instant::now();
+        let written = libcall::write_out(
+            module,
+            names,
+            &opts.no_builtin,
+            opts.interposition,
+            opts.kasan,
+            &mut fuel,
+        );
+        report.took(libcall::NAME, libcall::PHASE, started.elapsed(), Duration::ZERO);
+        for (id, stats) in written {
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the late {} sweep left invalid IR in {func}, {error}",
+                            libcall::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: libcall::NAME, func: module[id].name, stats });
+        }
+        match report.spent.iter_mut().find(|(it, _)| *it == libcall::NAME) {
+            Some((_, total)) => *total += fuel.spent(),
+            None => report.spent.push((libcall::NAME, fuel.spent())),
+        }
+    }
     // Last, once every pass that takes a call away has run. See [`inline::drop_unreferenced`].
     // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
     if opts.level != OptLevel::O0 {

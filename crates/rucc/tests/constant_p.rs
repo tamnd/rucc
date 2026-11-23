@@ -288,3 +288,36 @@ int param(const char *p) { return __builtin_constant_p(p[5]); }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A length that is a constant only once `__builtin_constant_p` has its answer is still a copy the
+/// compiler writes out. The kernel's fortified `memmove` and `memcpy` put the length in a local and
+/// pass it through an empty `asm` unless `__builtin_constant_p` of it says yes, so until the
+/// answer the length is whatever the `asm` gives back. gcc moves the 24 bytes as three words. This
+/// is `tcp_v4_fill_cb` in net/ipv4/tcp_ipv4.c, on every TCP segment the kernel takes in, which
+/// called `memmove`.
+#[test]
+fn a_copy_whose_length_the_answer_makes_constant_is_written_out() {
+    let dir = std::env::temp_dir().join(format!("rucc-constant-p-move-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = r#"
+struct parm { int iif; unsigned char opt[16]; unsigned short flags, frag; };
+struct skb { char head[40]; struct parm ip; struct parm tcp; };
+#define checked(op, p, q, n) ({ const unsigned long fs = (n); unsigned long cs = fs; \
+    if (!__builtin_constant_p(cs)) __asm__("" : "=r"(cs) : "0"(cs)); op(p, q, cs); })
+void fill(struct skb *s) { checked(__builtin_memmove, &s->tcp, &s->ip, sizeof(struct parm)); }
+void copy(struct skb *s) { checked(__builtin_memcpy, &s->tcp, &s->ip, sizeof(struct parm)); }
+"#;
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    for level in ["-O2", "-Os"] {
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=x86_64-unknown-linux-gnu", level, "-S", "-o", "-"])
+            .arg(dir.join("one.c"))
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(done.status.success(), "{level}: {}", String::from_utf8_lossy(&done.stderr));
+        let listing = String::from_utf8_lossy(&done.stdout);
+        assert!(!listing.contains("memmove"), "{level} calls memmove:\n{listing}");
+        assert!(!listing.contains("memcpy"), "{level} calls memcpy:\n{listing}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
