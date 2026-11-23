@@ -313,6 +313,7 @@ impl Pass for SimplifyCfg {
         // Merging reads which blocks have one predecessor, so it has to run on the graph as it is
         // after the stranded ones have gone. A block kept alive only by an edge from a block
         // nothing reaches looks like it has two ways in until that block is out of the function.
+        let mut carried = Vec::new();
         for chain in chains(func, an) {
             for (at, &block) in chain.iter().enumerate().skip(1) {
                 if !fuel.take() {
@@ -324,10 +325,13 @@ impl Pass for SimplifyCfg {
                     }
                     break;
                 }
-                merge(func, chain[0], block, &mut forward);
+                carried.push(merge(func, chain[0], block, &mut forward));
                 stats.optimized(MERGED);
             }
         }
+        // All at once, because carrying them merge by merge walked every start in the function
+        // for each block merged. No head is a block that was merged away, so it is the same.
+        func.carry_all_starts(&carried);
         if !forward.is_empty() {
             // Once, for every parameter every merge bound, rather than a walk of the function per
             // block merged.
@@ -1728,7 +1732,8 @@ pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into:
         return false;
     }
     let mut forward = Map::default();
-    merge(func, head, into, &mut forward);
+    let (from, to, after) = merge(func, head, into, &mut forward);
+    func.carry_starts(from, to, after);
     uses::substitute(func, &forward);
     an.clear_merging(func, &[(into, head)]);
     true
@@ -1740,7 +1745,16 @@ pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into:
 /// block's parameters were going to be told. Binding each parameter to the argument in its place
 /// and pointing every reader at it is exactly what the jump was doing at run time, so the record
 /// goes in the map and the whole map is spent in one walk when the pass is done.
-fn merge(func: &mut Func, head: Block, block: Block, forward: &mut Map<Value, Value>) {
+///
+/// The starts at the top of the block are the caller's to carry, with what this gives back, so that
+/// a caller merging many blocks carries them all in one walk.
+#[must_use]
+fn merge(
+    func: &mut Func,
+    head: Block,
+    block: Block,
+    forward: &mut Map<Value, Value>,
+) -> (Block, Block, Option<Inst>) {
     let term = func.terminator(head).expect("the head of a chain ends in a jump");
     let call = func.successors(term).next().expect("a jump goes somewhere");
     let args = func[call.args].to_vec();
@@ -1760,8 +1774,8 @@ fn merge(func: &mut Func, head: Block, block: Block, forward: &mut Map<Value, Va
         func.remove_inst(inst);
         func.append_inst(head, inst);
     }
-    func.carry_starts(block, head, top);
     func.remove_block(block);
+    (block, head, top)
 }
 
 /// Whether this condition is always true or always false, given what the edge binds.
