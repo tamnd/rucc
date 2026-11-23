@@ -626,8 +626,8 @@ const O3: &[&str] = &[
     "adce",
 ];
 
-/// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
-/// and no vectorization.
+/// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, unrolling only
+/// where the copies are no more code than the loop, and no vectorization.
 ///
 /// The second peephole is here rather than cut for size, because every rule it can fire replaces
 /// a term with a strictly smaller one. Tier one of `spec/optimizer/13-rewrite-rules.md` is
@@ -647,6 +647,12 @@ const O3: &[&str] = &[
 /// `short-circuit-free` is here for the reason the `-O1` list gives, and the reason reads the same
 /// at a level whose cost model is size. The collapse it is restricted to takes a branch and a block
 /// away and adds nothing, so declining it would be declining something smaller.
+///
+/// `unroll-small` runs straight after the `canon` that follows `header-copy-small`, which is the
+/// shape the unroller needs, and it takes a loop only when the copies come to no more instructions
+/// than the loop, so the level gets no larger for it. The `thread` and `simplify-cfg` after it
+/// join the copies into one block, and the `fold` and `number` further down are what turn each
+/// copy's counter into the displacement of its accesses.
 ///
 /// `header-copy-small` is the same pass `-O1` and above run under section 26.6's smaller budget.
 /// The copy is code growth and this level pays for it once per loop, so five instructions is what
@@ -724,6 +730,7 @@ const OS: &[&str] = &[
     "canon",
     "header-copy-small",
     "canon",
+    "unroll-small",
     "thread",
     "simplify-cfg",
     "thread",
@@ -1089,12 +1096,12 @@ impl Options {
             let name = name.as_str();
             // `-funroll-loops` is gcc's leave for the copies to grow, so the unroller that may grow
             // them goes where the one that may not was, and `-fno-unroll-loops` takes out both.
-            let free = crate::unroll::FREE.name();
-            if name == crate::unroll::ANY.name() && names.contains(&free) {
+            let free = [crate::unroll::FREE.name(), crate::unroll::SMALL.name()];
+            if name == crate::unroll::ANY.name() && names.iter().any(|it| free.contains(it)) {
                 if *on {
-                    names.iter_mut().filter(|it| **it == free).for_each(|it| *it = name);
+                    names.iter_mut().filter(|it| free.contains(*it)).for_each(|it| *it = name);
                 } else {
-                    names.retain(|it| *it != free);
+                    names.retain(|it| !free.contains(it));
                 }
             }
             match *on {
