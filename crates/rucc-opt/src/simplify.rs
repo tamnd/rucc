@@ -2184,9 +2184,6 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     if data.opcode != Opcode::ICmp || constant(func, zero) != Some(0) {
         return None;
     }
-    if uses.get(masked.index()) != Some(&1) && read_elsewhere(func, masked, inst, uses) {
-        return None;
-    }
     let (Opcode::And, [shifted, c]) = producer(func, masked)? else { return None };
     let (Opcode::LShr, [x, s]) = producer(func, shifted)? else { return None };
     let ty = func[x].ty;
@@ -2200,6 +2197,11 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let c = u64::try_from(constant(func, c)? & i128::from(all)).ok()?;
     let mask = (c << s) & all;
     if mask == 0 {
+        return None;
+    }
+    // Last, because it reads the whole function, and asking it of every test of a value
+    // against zero before knowing the value is a mask made compiling a long function quadratic.
+    if uses.get(masked.index()) != Some(&1) && read_elsewhere(func, masked, inst, uses) {
         return None;
     }
     let inner = Nested {

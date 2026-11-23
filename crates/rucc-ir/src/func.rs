@@ -1546,19 +1546,37 @@ impl Func {
     /// have gone in behind it, or the top of `into` for `None`, and nothing else can say that,
     /// because the block the start was in is about to stop being one.
     pub fn carry_starts(&mut self, from: Block, into: Block, after: Option<Inst>) {
+        self.carry_all_starts(&[(from, into, after)]);
+    }
+
+    /// [`Func::carry_starts`] for many blocks at once, each as the block emptied, the block it went
+    /// into and the instruction it went in after.
+    ///
+    /// One walk of the starts for all of them, where a walk for each was quadratic in a function
+    /// that merges many blocks. The answer is the same as carrying them one at a time as long as no
+    /// block one of them goes into is also one that is emptied, since then a start is moved at most
+    /// once either way, and a pass merging chains into their heads is that case.
+    pub fn carry_all_starts(&mut self, moves: &[(Block, Block, Option<Inst>)]) {
+        let to: Map<Block, (Block, Option<Inst>)> =
+            moves.iter().map(|&(from, into, after)| (from, (into, after))).collect();
+        debug_assert!(moves.iter().all(|(_, into, _)| !to.contains_key(into)));
         let body = &mut *self.body;
         let unplaced = body.unplaced.values_mut().flatten().map(|(_, start)| start);
         for start in body.value_starts.iter_mut().map(|(_, start)| start).chain(unplaced) {
-            if start.block == from && start.after.is_none() {
-                *start = Start { block: into, after, ..*start };
+            if start.after.is_none() {
+                if let Some(&(block, after)) = to.get(&start.block) {
+                    *start = Start { block, after, ..*start };
+                }
             }
         }
         for place in self.body.gone.values_mut() {
-            if *place == (from, None) {
-                *place = (into, after);
+            if place.1.is_none() {
+                if let Some(&now) = to.get(&place.0) {
+                    *place = now;
+                }
             }
         }
-        self.body.anchors.extend(after);
+        self.body.anchors.extend(moves.iter().filter_map(|&(_, _, after)| after));
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {
