@@ -84,8 +84,8 @@
 //!
 //! # Which level
 //!
-//! `-O2` and `-O3`. Not `-Os` or `-Oz`, because the copies are code and the whole point of them is
-//! speed. At `-O2` it is [`FREE`], which takes a loop with a call in it only when the copies come
+//! `-O2` and `-O3` for speed, and `-Os` only where the copies are no more code than the loop. At
+//! `-O2` it is [`FREE`], which takes a loop with a call in it only when the copies come
 //! to no more instructions than the loop was. That is gcc's rule for every loop at `-O2`, where
 //! `flag_cunroll_grow_size` is off unless `-O3` or `-funroll-loops` asks for it, and the kernel's
 //! loops of four over a call, like the one `exit_task_stack_account` has, were copied out four
@@ -93,10 +93,18 @@
 //! A loop with no call keeps the larger limit, because that is the loop over the lanes of a local
 //! that `crate::sroa` can only take once the copies are made, and the SSE2 salsa20 core is three
 //! times slower kept as a loop. [`ANY`] is the unroller that may grow the code for any loop, and it
-//! is what `-O3` and `-funroll-loops` run. Section 29.6 says a trip count of two or three is worth unrolling even for size, since
-//! the loop overhead that goes away is comparable to the body that arrives, and that is recorded
-//! rather than built: it is a second threshold and a second pass name for a case the corpus has not
-//! asked for yet.
+//! is what `-O3` and `-funroll-loops` run.
+//!
+//! At `-Os` it is [`SMALL`], which holds every loop to the rule [`FREE`] holds a loop with a call
+//! to. That is section 29.6's case of a trip count of two or three, where the counter, the test and
+//! the branch back that go away are about as much code as the copies that arrive, and it is what
+//! gcc does at `-Os`, where complete unrolling still runs and only refuses to grow. The kernel's
+//! `native_load_tls` copies three descriptors into the GDT on every context switch, and gcc writes
+//! it as three loads and three stores where rucc kept a loop of seven instructions. For that to
+//! measure right, an address that comes out as a base and a number in every copy, and is only ever
+//! used as an address, is not counted, since that is the displacement of the access that reads it
+//! and costs nothing on its own. The speed unrollers keep counting it, so what they take is what
+//! they took before.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
@@ -133,14 +141,20 @@ pub struct Unroll {
     name: &'static str,
     /// Whether the copies may come to more code than the loop was.
     grow: bool,
+    /// Whether every loop, and not only one with a call in it, has to come out no larger, with an
+    /// address that folds into the access that reads it counted as free.
+    small: bool,
 }
 
 /// The unroller that may grow the code, up to the limits in [`heuristics`].
-pub static ANY: Unroll = Unroll { name: "unroll", grow: true };
+pub static ANY: Unroll = Unroll { name: "unroll", grow: true, small: false };
 
 /// The unroller that takes a loop with a call in it only when the copies are no more code than the
 /// loop.
-pub static FREE: Unroll = Unroll { name: "unroll-free", grow: false };
+pub static FREE: Unroll = Unroll { name: "unroll-free", grow: false, small: false };
+
+/// The unroller for size, which takes any loop only when the copies are no more code than the loop.
+pub static SMALL: Unroll = Unroll { name: "unroll-small", grow: false, small: true };
 
 impl Pass for Unroll {
     fn name(&self) -> &'static str {
@@ -168,7 +182,7 @@ impl Pass for Unroll {
         let mut done: Set<Block> = Set::default();
         let mut say = true;
         'rounds: loop {
-            let jobs = plan(func, an, &done, &mut stats, say, self.grow);
+            let jobs = plan(func, an, &done, &mut stats, say, self);
             if jobs.is_empty() {
                 break;
             }
@@ -230,14 +244,20 @@ fn plan(
     done: &Set<Block>,
     stats: &mut Stats,
     say: bool,
-    grow: bool,
+    unroll: &Unroll,
 ) -> Vec<Job> {
     let cfg = an.cfg(func);
     let doms = an.dominators(func);
     let loops = an.loops(func);
     let mut scev = Scev::new(func, cfg, loops);
     // Both walk the whole function, so they are worked out once a round rather than once a loop.
-    let round = Round { addressed: copy::addressed(func), readers: readers(func), grow };
+    let round = Round {
+        addressed: copy::addressed(func),
+        readers: readers(func),
+        grow: unroll.grow,
+        small: unroll.small,
+        addresses: if unroll.small { addresses(func) } else { Set::default() },
+    };
     let mut found: Vec<Job> = Vec::new();
     for id in loops.all() {
         if done.contains(&loops.header(id)) {
@@ -270,6 +290,10 @@ struct Round {
     readers: Map<Block, Set<Block>>,
     /// Whether the copies may come to more code than the loop was, which is [`Unroll::grow`].
     grow: bool,
+    /// Whether every loop is held to the copies being no larger, which is [`Unroll::small`].
+    small: bool,
+    /// The values only ever used as an address, from [`addresses`], when `small` is set.
+    addresses: Set<Value>,
 }
 
 /// Whether this loop can be unrolled away, and why not when it cannot.
@@ -358,7 +382,8 @@ fn consider(
     if escapes(&round.readers, &blocks, &inside) {
         return Err(ESCAPES);
     }
-    let size = size_after(func, scev, id, &blocks, times).ok_or(TOO_BIG)?;
+    let folds = round.small.then_some(&round.addresses);
+    let size = size_after(func, scev, id, &blocks, times, folds).ok_or(TOO_BIG)?;
     if size > rucc_cost::param!(heuristics::UNROLL_MAX_INSNS) {
         return Err(TOO_BIG);
     }
@@ -375,7 +400,8 @@ fn consider(
         .iter()
         .flat_map(|&block| func.insts(block))
         .any(|inst| matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect));
-    if !round.grow && calls && usize::try_from(size).map_or(true, |size| size > before) {
+    let held = calls || round.small;
+    if !round.grow && held && usize::try_from(size).map_or(true, |size| size > before) {
         return Err(GROWS);
     }
     Ok(Job {
@@ -406,6 +432,39 @@ pub(crate) fn escapes(
     inside: &Set<Block>,
 ) -> bool {
     blocks.iter().filter_map(|block| readers.get(block)).flatten().any(|at| !inside.contains(at))
+}
+
+/// The values whose every use is as the address of a load or a store, or as the base another
+/// address is worked out from.
+///
+/// An address like that which comes out as a base and a number is the displacement of the access,
+/// so it is no instruction of its own. A use anywhere else, an argument to a block included, is a
+/// value the machine has to hold, and the value is left out.
+fn addresses(func: &Func) -> Set<Value> {
+    let mut used: Set<Value> = Set::default();
+    let mut held: Set<Value> = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            for (at, &value) in func[data.args].iter().enumerate() {
+                let address = match data.opcode {
+                    Opcode::Load | Opcode::PtrAdd => at == 0,
+                    Opcode::Store => at == 1,
+                    _ => false,
+                };
+                if address {
+                    used.insert(value);
+                } else {
+                    held.insert(value);
+                }
+            }
+            for call in func.successors(inst) {
+                held.extend(func[call.args].iter().copied());
+            }
+        }
+    }
+    used.retain(|value| !held.contains(value));
+    used
 }
 
 /// For each block, the other blocks that read a value it defines, as an operand or as an argument
@@ -439,6 +498,7 @@ fn size_after(
     id: LoopId,
     blocks: &[Block],
     times: u32,
+    folds: Option<&Set<Value>>,
 ) -> Option<u32> {
     let mut settled: Set<Value> = Set::default();
     let mut survives = 0u32;
@@ -454,6 +514,17 @@ fn size_after(
             if known && (func.is_terminator(inst) || !data.opcode.has_effects()) {
                 settled.extend(data.results());
                 continue;
+            }
+            // A base and a number used only as an address is the displacement of the access, and
+            // its result is not a number, so it is free without being settled.
+            if let Some(folds) = folds {
+                let offset = func[data.args].get(1).copied();
+                let numbered =
+                    offset.is_some_and(|it| settled.contains(&it) || is_number(scev, id, it));
+                let address = data.results().all(|value| folds.contains(&value));
+                if data.opcode == Opcode::PtrAdd && numbered && address {
+                    continue;
+                }
             }
             survives = survives.checked_add(1)?;
         }
@@ -561,7 +632,8 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDRESSED, ANY, ESCAPES, EXITS, FREE, GROWS, NO_COUNT, NO_FUEL, TOO_BIG, TOO_MANY, UNROLLED,
+        ADDRESSED, ANY, ESCAPES, EXITS, FREE, GROWS, NO_COUNT, NO_FUEL, SMALL, TOO_BIG, TOO_MANY,
+        UNROLLED,
     };
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
@@ -919,6 +991,101 @@ block2(%6: i32):
         let mut it = rotated(3);
         let stats = free(&mut it.func);
         assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// The `-Os` unroller, which holds every loop to the copies being no larger.
+    fn small(func: &mut Func) -> Stats {
+        SMALL.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// `for (i = 0; i < limit; i++) q[i] = p[i];` over 64 bit elements, which is the shape of the
+    /// kernel's `native_load_tls`. The counter is 64 bits wide so that the offset is `i * 8` with
+    /// nothing in between, and `held` makes the read's address a value the function returns too,
+    /// so that it is something the machine has to hold rather than a displacement.
+    fn copy_loop(limit: i128, held: bool) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR, Type::PTR]);
+        let signature = if held { signature.with_returns(&[Type::PTR]) } else { signature };
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let from = func.append_param(entry, Type::PTR);
+        let to = func.append_param(entry, Type::PTR);
+        let head = func.create_block();
+        let body = func.create_block();
+        let done = func.create_block();
+        let i = func.append_param(head, Type::int(64));
+        let carried = func.append_param(body, Type::int(64));
+        let last = func.append_param(done, Type::PTR);
+        let plain = rucc_ir::MemInfo {
+            size: 8,
+            align: 8,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: rucc_ir::Restrict::NONE,
+        };
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        build.jump(head, &[zero]);
+        Builder::new(&mut func, head).jump(body, &[i]);
+
+        let mut build = Builder::new(&mut func, body);
+        let eight = build.iconst(Type::int(64), 8);
+        let offset = build.binary(Opcode::Mul, carried, eight, Flags::NONE);
+        let read = build.binary(Opcode::PtrAdd, from, offset, Flags::NONE);
+        let value = build.load(Type::int(64), read, plain, Flags::NONE);
+        let write = build.binary(Opcode::PtrAdd, to, offset, Flags::NONE);
+        build.store(value, write, plain, Flags::NONE);
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, carried, one, Flags::NSW);
+        let stop = build.iconst(Type::int(64), limit);
+        let test = build.icmp(IntPred::Slt, next, stop);
+        let out = if held { read } else { from };
+        build.br_if(test, head, &[next], done, &[out]);
+        let mut build = Builder::new(&mut func, done);
+        if held {
+            build.ret(&[last]);
+        } else {
+            build.ret(&[]);
+        }
+        (names, func)
+    }
+
+    /// At `-Os` a loop of three copies is two accesses a copy, since each address is the base and
+    /// a number, against eight instructions for the loop, so it is copied out the way gcc does.
+    #[test]
+    fn a_loop_whose_addresses_fold_is_unrolled_at_size() {
+        let (mut names, mut func) = copy_loop(3, false);
+        let stats = small(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
+        assert_eq!(tally(&func, Opcode::Load), 3);
+        assert_eq!(tally(&func, Opcode::BrIf), 0);
+        sound(&func, &mut names);
+    }
+
+    /// The same loop is kept when a read's address is used for something other than the read, and
+    /// so has to be in a register, because then the copies are more code than the loop was.
+    #[test]
+    fn a_loop_whose_copies_would_grow_is_kept_at_size() {
+        let (mut names, mut func) = copy_loop(3, true);
+        let stats = small(&mut func);
+        assert_eq!(stats.count(Kind::Missed, GROWS), 1);
+        assert_eq!(tally(&func, Opcode::Load), 1);
+        sound(&func, &mut names);
+
+        // And a loop of four with two multiplies the counter does not settle, with no call in
+        // it, which `-O2` would copy out.
+        let mut it = rotated(4);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let mut running = build.func()[it.body].params[1];
+        for _ in 0..2 {
+            running = build.binary(Opcode::Mul, running, running, Flags::NONE);
+        }
+        tucked(&mut it.func, it.body);
+        let stats = small(&mut it.func);
+        assert_eq!(stats.count(Kind::Missed, GROWS), 1);
         sound(&it.func, &mut it.names);
     }
 
