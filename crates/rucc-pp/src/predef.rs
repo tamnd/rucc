@@ -136,6 +136,10 @@ pub struct Predef {
     pub opt_level: OptLevel,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
+    /// Whether gcc would read the C library's `<stdc-predef.h>` ahead of the unit: the unit is
+    /// hosted and `-nostdinc` was not written. The five macros of that header are defined only
+    /// then.
+    pub stdc_predef: bool,
     /// Which link the output is for, from `-fPIC` and `-fPIE`. It decides `__PIE__`, since
     /// `__PIC__` is defined either way and says only that there are no absolute addresses.
     pub pic: Pic,
@@ -242,6 +246,7 @@ impl Predef {
             ms_extensions: None,
             opt_level: OptLevel::O0,
             hosted: true,
+            stdc_predef: true,
             pic: Pic::Executable,
             code_model: CodeModel::Small,
             timestamp: Timestamp::now(),
@@ -295,6 +300,7 @@ impl Predef {
             ms_extensions: opts.ms_extensions,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
+            stdc_predef: opts.hosted && opts.std_inc,
             pic: opts.pic,
             code_model: opts.code_model,
             timestamp: Timestamp::now(),
@@ -570,8 +576,14 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // The BSDs say none of these five either. gcc defines none of them itself, and on GNU/Linux
     // they come from the C library's `<stdc-predef.h>`, which gcc includes there and nowhere else.
     let bsd = target.tuple.os().is_bsd();
-    let iec =
-        opts.math.iec_559(opts.trapping_math) && target.tuple.arch() != tuple::Arch::Wasm32 && !bsd;
+    // gcc reads `<stdc-predef.h>` only for a hosted unit with the standard include directories,
+    // so `-nostdinc` and `-ffreestanding` leave the five out. A Plan 9 or kernel unit that tests
+    // `__STDC_ISO_10646__` to include `<wctype.h>` is then the same unit that gcc compiles.
+    let predef_h = opts.stdc_predef;
+    let iec = predef_h
+        && opts.math.iec_559(opts.trapping_math)
+        && target.tuple.arch() != tuple::Arch::Wasm32
+        && !bsd;
     d.flag_if(iec, "__STDC_IEC_559__");
     d.flag_if(iec, "__STDC_IEC_559_COMPLEX__");
     // TS 18661-1's date, in every dialect, which is gcc 16's answer rather than the standard's.
@@ -597,7 +609,7 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // is not Unicode, and clang for Apple leaves the macro out for that reason. A program that
     // reads it to skip `mbstowcs` is the one that would be wrong.
     let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
-    d.set_if(!apple && !bsd, "__STDC_ISO_10646__", "201706L");
+    d.set_if(predef_h && !apple && !bsd, "__STDC_ISO_10646__", "201706L");
     // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
     // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
     // same in every dialect and this one is not, which is the whole reason a header can test
@@ -2513,6 +2525,28 @@ mod tests {
     fn set_for(triple: &str) -> String {
         let triple: Triple = triple.parse().expect("a triple the compiler supports");
         built_in(&TargetInfo::new(triple), &Predef::new())
+    }
+
+    #[test]
+    fn the_macros_of_stdc_predef_h_need_the_standard_directories_and_a_hosted_unit() {
+        // gcc 16 on x86_64 Linux defines the five with neither flag and none of them with
+        // `-nostdinc` or `-ffreestanding`, because they come from glibc's `<stdc-predef.h>`.
+        let five = [
+            "__STDC_IEC_559__",
+            "__STDC_IEC_559_COMPLEX__",
+            "__STDC_IEC_60559_BFP__",
+            "__STDC_IEC_60559_COMPLEX__",
+            "__STDC_ISO_10646__",
+        ];
+        let triple: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
+        let target = TargetInfo::new(triple);
+        let hosted = built_in(&target, &Predef::new());
+        let without = built_in(&target, &Predef { stdc_predef: false, ..Predef::new() });
+        for name in five {
+            assert!(hosted.contains(&format!("#define {name} ")), "{name}");
+            assert!(!without.contains(&format!("#define {name} ")), "{name}");
+        }
+        assert!(has(&without, "#define __STDC_HOSTED__ 1"));
     }
 
     /// The same, for a machine the three field triple cannot spell.

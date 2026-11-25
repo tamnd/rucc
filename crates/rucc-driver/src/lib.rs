@@ -4543,6 +4543,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if opts.deps.generated && !opts.deps.instead_of_compiling {
         return Err(err("-MG may only be used with -M or -MM"));
     }
+    opts.std_inc = !nostdinc;
     if !nostdinc {
         // NetBSD's own GCC has a directory of its own with the intrinsics in it and none of the
         // headers of the C standard: `<stdarg.h>`, `<stddef.h>`, `<limits.h>` and the rest are the
