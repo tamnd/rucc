@@ -34,7 +34,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc and the runtime
         run: |
           cargo build --release --bin rucc
@@ -70,7 +70,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc and the runtime
         run: |
           cargo build --release --bin rucc

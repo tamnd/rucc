@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: the version in the tag matches the workspace
         run: |
           set -euo pipefail
@@ -102,7 +102,7 @@ jobs:
       TARGETS: x86_64-linux-gnu x86_64-linux-musl i686-linux-gnu aarch64-linux-gnu aarch64-linux-musl x86_64-windows-gnu aarch64-macos wasm32-wasip1 wasm32-none
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build them
         run: |
           set -euo pipefail
@@ -112,7 +112,7 @@ jobs:
             cp "target/$target/release/librucc_builtins.a" "lib/rucc/$target/"
           done
           find lib -type f | sort
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: builtins
           path: lib
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: add the target
         run: rustup target add ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: ${{ matrix.target }}
       - name: build
@@ -190,7 +190,7 @@ jobs:
             echo "rucc.exe imports the C runtime above, so it will not start without it installed"
             exit 1
           fi
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: builtins
           path: builtins/lib
@@ -210,7 +210,7 @@ jobs:
             binary="$binary.exe"
           fi
           .github/package.sh "$name" "$binary" dist builtins/lib
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: |
@@ -232,7 +232,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: builtins
           path: builtins/lib
@@ -244,7 +244,7 @@ jobs:
           total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
           echo "mem=$((total - 2048))" >> "$GITHUB_OUTPUT"
       - name: start FreeBSD
-        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
         with:
           release: "15.1"
           cpu: ${{ steps.size.outputs.cpu }}
@@ -282,7 +282,7 @@ jobs:
           git config --global --add safe.directory "$PWD"
           name="rucc-${{ github.event.inputs.tag || github.ref_name }}-x86_64-unknown-freebsd"
           bash .github/package.sh "$name" /var/tmp/target/x86_64-unknown-freebsd/release/rucc dist builtins/lib
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: dist-x86_64-unknown-freebsd
           path: |
@@ -305,7 +305,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: add the target
         run: rustup target add wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: wasm32-wasip1
       - name: build
@@ -333,7 +333,7 @@ jobs:
           cp target/wasm32-wasip1/release/rucc.wasm dist/rucc-wasm32-wasip1.wasm
           (cd dist && sha256sum rucc-wasm32-wasip1.wasm > rucc-wasm32-wasip1.wasm.sha256)
           ls -l dist
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: dist-wasm32-wasip1
           path: dist
@@ -350,7 +350,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: dist-x86_64-unknown-linux-gnu
           path: dist
@@ -367,7 +367,7 @@ jobs:
           "$rucc" --target=x86_64-windows-gnu hello.c -o hello.exe
           file hello.exe
           file hello.exe | grep -q 'PE32+ executable'
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: dist-x86_64-unknown-linux-musl
           path: musl
@@ -403,7 +403,7 @@ jobs:
             image: archlinux
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: dist-${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}-unknown-linux-musl
           path: dist
@@ -434,7 +434,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: dist-*
           merge-multiple: true
@@ -461,7 +461,7 @@ jobs:
           ' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $tag"; exit 1; }
           cat notes.md
-      - uses: softprops/action-gh-release@v3.0.3
+      - uses: softprops/action-gh-release@v3.0.4
         with:
           files: dist/*
           body_path: notes.md
